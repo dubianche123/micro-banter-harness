@@ -54,20 +54,26 @@ Aliases are a genuine need: some people say the name, some @ it — both mean th
 
 > ⚠️ Do not confuse the **trigger word** with an **address term**: the trigger word is "what this bot is called in your group" (this section); an address term is "what it calls members / the owner" (step 2's claim, `relations.py`). Both are configured, neither is hardcoded, but **if the trigger word is not set, every feature downstream simply cannot fire**.
 
-#### It only supports the "receive all messages" kind of bot
+#### It only supports the "receive all messages" kind of bot (and you switch it on by hand)
 
-**Once you pull the bot into a group and enable it, what it receives is every message in that group — not just the ones that @ it.** That is the premise of this project: it needs the surrounding context to decide whether to speak up and to remember what happened. Seeing only the @-mentions leaves it blind.
+**Once you pull the bot into a group and set the group message scope to 「获取群内全部消息」 (obtain all messages), what it receives is every message in that group — not just the ones that @ it.** That is the premise of this project: it needs the surrounding context to decide whether to speak up and to remember what happened. Seeing only the @-mentions leaves it blind.
 
 Mind the difference between **receiving** everything and **replying** to everything: it receives all messages, but whether it answers is a separate matter — it always answers when @-mentioned or called by its trigger word, chimes in probabilistically the rest of the time, and stays quiet for most messages (otherwise it would be a spam bot).
 
-There are two ways a QQ bot can receive messages. This project **only supports the second**:
+The platform offers **three scopes** for what a bot may see in a group. This project **is written for the third** (the platform's wording drifts between versions — you can tell them apart by asking "can it see chatter that does not @ it?"):
 
-| Mode | What it receives | Right for this project? |
+| Scope the platform offers | What it sees | How it fits this project |
 |:--|:--|:--|
-| @-mentions only | Just the messages that mention it | ❌ Not enough. It has to judge whether to chime in and understand context; @-only leaves it blind |
-| All group messages | Every message in the group | ✅ **This is what the project is written for** — configure it this way |
+| Only when @-mentioned | Just the messages that mention it | ⚠️ Answers @-mentions, and **only** @-mentions |
+| The @ message + a bit before it | The message that @-ed it, plus the few immediately preceding ones (10 in our testing) | ⚠️ Same, except it also carries that little stretch around the @ |
+| All messages | Every message in the group | ✅ **This is what the project is written for** — and this scope is **not the default; you have to switch it manually** |
 
-So the platform side must grant **full group-message permission** (configure it in the message subscription section of the QQ open platform). On the code side there is also an extra layer of event parsing — `botpy` only dispatches mention events by default, and `bot.py` dispatches `GROUP_MESSAGE_CREATE` into the main flow as well. With @-only permission it will still answer you, but "jumping in unprompted" and "remembering context" all quietly stop working — and **nothing errors**; it just silently gets dumber.
+**First, separate "does not reply" from "cannot reply": on either of the first two scopes it still answers @-mentions normally and still responds to its trigger word — the wiring works.** What you lose is **context management only** — it cannot see what the group was talking about, so it remembers nothing and never chimes in on its own. In other words, on the first two scopes it degrades into a "answers only when @-ed" Q&A bot, and everything this project is after — behaving like a regular member of the group — stops being true. And **nothing errors**; it just silently gets dumber.
+
+⚠️ That switch is **not in the QQ Open Platform — it lives in the QQ group itself**, and **only the group owner can change it, once per group**:
+group settings → find the bot attached to the group → set 「机器人可获取的群聊消息范围」 (the range of group messages the bot may obtain) to 「获取群内全部消息」 (obtain all messages in the group).
+
+On the code side there is a matching layer of event parsing — `botpy` only dispatches mention events by default, and `bot.py` dispatches `GROUP_MESSAGE_CREATE` into the main flow as well.
 
 ### 2. Claim the owner role (do not skip this)
 
@@ -120,7 +126,7 @@ Both providers speak the OpenAI-compatible protocol, so **the calling code is sh
 ### 5. Platform-side setup
 
 - Create a bot on the QQ Open Platform and invite it to the group.
-- **Enable the message permission the same way as step 1's "receive all group messages"** — @-only is not enough, for the reason in that table.
+- **Set the group message scope to 「获取群内全部消息」** (the third of the three scopes in step 1). ⚠️ This switch lives in the **QQ group settings**, **only the group owner can change it, and it is per group** — it is not the event subscription on the Open Platform.
 - **Claiming goes through a private chat, so enable the C2C (single-chat) message permission** — without it, the claim in step 2 gets no response at all, and silently so.
 - Still in the sandbox? Add the test group to the sandbox list, or messages will never be pushed to you. Same for private chat: in the sandbox the other party must be on the test-member list.
 
@@ -354,8 +360,8 @@ This bot was written from day one for the assumption that it would be open-sourc
 
 | Symptom | Likely cause |
 |:--|:--|
-| It never responds in the group | ①Check the **trigger word**: if `BOT_NAMES` is unset and the platform nickname is unavailable, it only answers to the generic 「机器人」; ②all-message permission not granted on the platform; ③the group is not in the sandbox list |
-| It answers @-mentions but never chimes in or remembers context | The platform only granted @-mention permission, not **full group messages** — it cannot see the whole conversation, so it cannot judge whether to speak up. See the table in step 1 |
+| It never responds in the group | ①Check the **trigger word**: if `BOT_NAMES` is unset and the platform nickname is unavailable, it only answers to the generic 「机器人」; ②the group message scope is still on one of the first two levels (the group owner changes it to 「获取群内全部消息」 in the QQ group settings); ③the group is not in the sandbox list |
+| It answers @-mentions but never chimes in or remembers context | The group message scope is stuck on one of the first two levels (only @ / @ + the previous 10). It cannot see the whole conversation, so it cannot judge whether to speak up or remember anything. **The group owner** changes 「机器人可获取的群聊消息范围」 to 「获取群内全部消息」 in the QQ group settings, once per group. See the table in step 1 |
 | Calling its name does nothing, but @ works | The trigger word does not match what people actually say: add it to `BOT_NAMES`. Renaming it on QQ will not help — a nickname only adds an alias, it never overrides what `BOT_NAMES` already has |
 | The first reply after startup is slow | Cold start, not yet warmed; startup performs one 0-token connectivity probe (measured 0.35s) |
 | Owner commands do nothing / cannot name others | No owner has claimed the role: have them send the passphrase from `OWNER_CLAIM_PHRASE` to the bot in a **private chat**; to change owners, delete `owner.txt` first. Shouting it in the group does nothing, deliberately |
