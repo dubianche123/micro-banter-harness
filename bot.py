@@ -1460,7 +1460,9 @@ def apply_digest_affinity(group_id, rows):
 class GroupBot(botpy.Client):
     async def on_ready(self):
         _bot_ref["client"] = self
-        # 平台昵称登记进 naming：群主在 QQ 那边改的名字，这里一起来就生效（不用改代码、不用改 .env）
+        # 平台昵称登记进 naming：它是「附带别名」，不是触发词的权威来源 ——
+        # 只会往 bot_names() 里**多加**一个叫法，顶不掉 .env 的 BOT_NAMES；
+        # 而且登录时读一次，改了 QQ 昵称要重启进程才会生效。
         naming.set_platform_name(getattr(self.robot, "name", ""))
         logger.info("=" * 50)
         logger.info("🎉 机器人「%s」(ID: %s) 已更新上线！", self.robot.name, self.robot.id)

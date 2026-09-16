@@ -39,20 +39,26 @@ The **trigger word** is the name the bot answers to in the group. It drives thre
 
 **This is the first thing to change on a deployment** — and the thing most likely to have been hardcoded: once a name is sprinkled through prompts, regexes, easter-egg lines and logs, moving to another person's machine or another group means going back into the code. So there is not a single concrete name in the source; it is all resolved at runtime.
 
-Either way works:
+There is **exactly one** authoritative source for the trigger word — `BOT_NAMES` in `.env`:
 
 ```env
 # .env — multiple aliases, comma-separated
 BOT_NAMES=the name you give it,alias1,alias2
 ```
 
-Or just change the bot's nickname on the QQ side — the process picks it up on startup, no code or config change needed.
+Aliases are a genuine need: some people say the name, some @ it — both mean the same bot, hence the comma-separated list.
 
-Leave it empty and only the **platform nickname** counts; if that is unavailable too, it falls back to the generic word 「机器人」. Aliases are a genuine need: some people say the name, some @ it — both mean the same bot, hence the comma-separated list.
+> ⚠️ **Renaming the bot on the QQ side is not how you set the trigger word.** The platform nickname (the bot's QQ username) is only a **supplement**: it is read once at startup and appended as one extra alias — it can only **add** a name, it will **never replace or override** what you wrote in `BOT_NAMES`. So renaming on QQ does not change the trigger word and the old names keep working; to change the trigger word, change `BOT_NAMES`. The nickname is also read at login, so **a rename needs a restart to take effect**.
+>
+> Only when both are unavailable (`BOT_NAMES` empty and no nickname) does it fall back to the generic word 「机器人」.
 
 > ⚠️ Do not confuse the **trigger word** with an **address term**: the trigger word is "what this bot is called in your group" (this section); an address term is "what it calls members / the owner" (step 2's claim, `relations.py`). Both are configured, neither is hardcoded, but **if the trigger word is not set, every feature downstream simply cannot fire**.
 
-#### Also worth stating: it only supports the "receive all messages" kind of bot
+#### It only supports the "receive all messages" kind of bot
+
+**Once you pull the bot into a group and enable it, what it receives is every message in that group — not just the ones that @ it.** That is the premise of this project: it needs the surrounding context to decide whether to speak up and to remember what happened. Seeing only the @-mentions leaves it blind.
+
+Mind the difference between **receiving** everything and **replying** to everything: it receives all messages, but whether it answers is a separate matter — it always answers when @-mentioned or called by its trigger word, chimes in probabilistically the rest of the time, and stays quiet for most messages (otherwise it would be a spam bot).
 
 There are two ways a QQ bot can receive messages. This project **only supports the second**:
 
@@ -61,7 +67,7 @@ There are two ways a QQ bot can receive messages. This project **only supports t
 | @-mentions only | Just the messages that mention it | ❌ Not enough. It has to judge whether to chime in and understand context; @-only leaves it blind |
 | All group messages | Every message in the group | ✅ **This is what the project is written for** — configure it this way |
 
-So the platform side must grant **full group-message permission**. On the code side there is also an extra layer of event parsing — `botpy` only dispatches mention events by default, and `bot.py` dispatches `GROUP_MESSAGE_CREATE` into the main flow as well. With @-only permission it will still answer you, but "jumping in unprompted" and "remembering context" all quietly stop working — and **nothing errors**; it just silently gets dumber.
+So the platform side must grant **full group-message permission** (configure it in the message subscription section of the QQ open platform). On the code side there is also an extra layer of event parsing — `botpy` only dispatches mention events by default, and `bot.py` dispatches `GROUP_MESSAGE_CREATE` into the main flow as well. With @-only permission it will still answer you, but "jumping in unprompted" and "remembering context" all quietly stop working — and **nothing errors**; it just silently gets dumber.
 
 ### 2. Claim the owner role (do not skip this)
 
@@ -295,7 +301,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 
 | Problem | Solution | Where |
 |:--|:--|:--|
-| **Trigger word (what the bot is called in the group)** ← highest priority | `BOT_NAMES` in `.env` (multiple aliases) + platform nickname, resolved at runtime; no default name is baked in | `naming.py` |
+| **Trigger word (what the bot is called in the group)** ← highest priority | `BOT_NAMES` in `.env` (multiple aliases) is authoritative; the platform nickname is only a bonus alias and cannot override it; no default name is baked in | `naming.py` |
 | How it refers to itself | The first entry of that same list, substituted through the `{bot}` placeholder | `naming.py` + `prompts.py` |
 | How the owner is addressed | Whatever they claim (claim the role in a private chat, then say 「我是XX」 in the group); falls back to the generic 「群主」 | `naming.py` + `relations.py` |
 | Names inside prompts/scripts | Always `{bot}` / `{owner}` placeholders, substituted by `naming.render` before sending | `prompts.py`, `bot.py` |
@@ -349,8 +355,8 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Symptom | Likely cause |
 |:--|:--|
 | It never responds in the group | ①Check the **trigger word**: if `BOT_NAMES` is unset and the platform nickname is unavailable, it only answers to the generic 「机器人」; ②all-message permission not granted on the platform; ③the group is not in the sandbox list |
-| It answers @-mentions but never chimes in or remembers context | The platform only granted @-mention permission, not **full group messages** — see the table in step 1 |
-| Calling its name does nothing, but @ works | The trigger word does not match what people actually say: add it to `BOT_NAMES`, or just rename the bot on the QQ side |
+| It answers @-mentions but never chimes in or remembers context | The platform only granted @-mention permission, not **full group messages** — it cannot see the whole conversation, so it cannot judge whether to speak up. See the table in step 1 |
+| Calling its name does nothing, but @ works | The trigger word does not match what people actually say: add it to `BOT_NAMES`. Renaming it on QQ will not help — a nickname only adds an alias, it never overrides what `BOT_NAMES` already has |
 | The first reply after startup is slow | Cold start, not yet warmed; startup performs one 0-token connectivity probe (measured 0.35s) |
 | Owner commands do nothing / cannot name others | No owner has claimed the role: have them send the passphrase from `OWNER_CLAIM_PHRASE` to the bot in a **private chat**; to change owners, delete `owner.txt` first. Shouting it in the group does nothing, deliberately |
 | Log says "no owner claimed yet" | Same as above. That log line exists so this problem stops being silent |
@@ -392,8 +398,8 @@ cd tests && for f in test_*.py; do ../.venv/bin/python "$f"; done
 
 | Goal | Change |
 |:--|:--|
-| Move to another group | Just change the **trigger word**: set `BOT_NAMES` to whatever your group calls it (or rename it on QQ), then let it learn address terms on its own; not a line of code changes |
-| Change its trigger word / what it is called | `BOT_NAMES` (`.env`, comma-separated aliases), or rename it on QQ — see step 1 of "Running it in five minutes" |
+| Move to another group | Just change the **trigger word**: set `BOT_NAMES` to whatever your group calls it, then let it learn address terms on its own; not a line of code changes |
+| Change its trigger word / what it is called | `BOT_NAMES` (`.env`, comma-separated aliases) — the only entry point; see step 1 of "Running it in five minutes" |
 | Switch the primary provider | `AI_PROVIDER` (both are OpenAI-compatible; the calling code is shared) |
 | Rotate multiple keys | Create `api_keys_gemini.txt` / `api_keys_zhipu.txt` next to the code, one key per line, `#` starts a comment |
 | Tune the banter rate | `BANTER_PROBABILITY` (0.08), `OWNER_MENTION_PROBABILITY` (0.25), `BANTER_COOLDOWN_SECONDS` |
