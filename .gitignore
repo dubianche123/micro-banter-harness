@@ -1,0 +1,32 @@
+# 凭证绝对不能进版本库
+.env
+api_keys_*.txt
+
+# 运行时状态 / 日志
+state.json
+bot.log
+bot.log.*
+botpy.log
+owner.txt
+
+# 原始消息归档与每日摘要（含群友聊天内容，不进版本库）
+archive/
+memory/
+# 助手的工作区笔记（同样只是本机的项目记录，不进版本库）
+.workbuddy/
+# 清档/迁机前手动留的备份，里面同样是群聊原文
+.backup/
+*.bak
+*.bak2
+
+# 敏感词表：填的是你自己群里的词，按设计就不该进版本库
+# （模板见 sensitive_nicks.example.txt，复制一份改名即可）
+sensitive_nicks.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# macOS
+.DS_Store
