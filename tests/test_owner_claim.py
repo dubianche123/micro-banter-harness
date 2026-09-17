@@ -229,6 +229,76 @@ class PrivateChatClaimTest(BaseClaimTest):
         self.assertEqual(bot.OWNER_OPENID, OWNER)
 
 
+class PrivateChatNicknameTest(BaseClaimTest):
+    """私聊不办改名，但它必须**明说出来** —— 不能假装受理，也不能静默吞掉。
+
+    为什么不支持：称呼是按群存的（`群号|openid`），私聊消息里没有群号，
+    改了也不知道该改在哪个群，硬做就是拿一个不确定的群去落笔。
+
+    为什么不能一声不吭：以前这句话直接喂给模型，被当成闲聊回了个玩笑，
+    当事人完全不知道命令根本没生效 —— 「机器人叫不动」的错觉就是这么来的。
+    这一组钉住三件事：**不改档、指回群里、不花额度**。
+    """
+
+    def _nick(self, openid=OWNER):
+        return (bot.RELATIONS.get(GROUP, openid, create=False) or {}).get("nick")
+
+    async def test_private_chat_never_writes_a_nick(self):
+        await self.say_in_private("小王，叫我奶龙")
+        self.assertIsNone(self._nick(), "私聊居然把称呼写进档案了 —— 它压根不知道该改在哪个群")
+
+    async def test_private_chat_points_back_to_the_group(self):
+        await self.say_in_private("小王，叫我奶龙")
+        self.assertTrue(self.sent, "私聊说了改名却一句没回，用户会以为命令生效了")
+        self.assertIn("群", self.sent[-1], "引导语得指明白去哪儿办")
+        self.assertIn("叫我", self.sent[-1], "最好连句式都给出来")
+
+    async def test_redirect_costs_no_quota(self):
+        """本地拦下的事不该调模型 —— 它是确定性判断，不是生成任务。"""
+        before = bot.BUDGET.used
+        await self.say_in_private("小王，叫我奶龙")
+        self.assertEqual(bot.BUDGET.used, before, "一句本地引导居然扣了额度")
+
+    async def test_owner_is_redirected_too(self):
+        """群主本人也一样 —— 私聊缺的是群号，不是权限。"""
+        bot.OWNER_OPENID = OWNER
+        await self.say_in_private("小王，叫我奶龙")
+        self.assertTrue(self.sent)
+        self.assertIn("群", self.sent[-1])
+        self.assertIsNone(self._nick(), "群主私聊改名也不该落笔")
+
+    async def test_clear_command_is_redirected_too(self):
+        """撤销称呼同样按群存，走同一条路。"""
+        await self.say_in_private("忘掉我的称呼")
+        self.assertTrue(self.sent)
+        self.assertIn("群", self.sent[-1])
+
+    async def test_ordinary_chat_is_not_mistaken_for_a_rename(self):
+        """「叫个外卖」不是改名 —— 误判会把正常私聊也堵成一句指路话。"""
+        orig = bot.get_ai_reply
+        async def fake(_sid, _text, **_kw):
+            return "（闲聊回复）", None
+        bot.get_ai_reply = fake
+        try:
+            await self.say_in_private("帮我叫个外卖")
+        finally:
+            bot.get_ai_reply = orig
+        self.assertTrue(self.sent)
+        self.assertNotIn("回群里", self.sent[-1])
+
+    def test_c2c_handler_never_touches_the_nickname_store(self):
+        """钉住这个设计决定：将来谁想「顺手支持一下私聊改名」，这条会当场拦下。
+
+        比行为断言更结实 —— 因为它盯着的是**路径里有没有落笔**，不只是这一次没落。
+        """
+        src = inspect.getsource(bot.GroupBot.on_c2c_message_create)
+        self.assertNotIn("handle_nick_command", src)
+        self.assertNotIn("set_nick", src)
+
+    def test_hint_actually_says_where_to_go(self):
+        self.assertIn("群", bot.NICK_PRIVATE_CHAT_HINT)
+
+
 class ClaimPhraseIsScrubbedTest(unittest.TestCase):
     """暗号本身当成敏感词注册掉。
 

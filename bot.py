@@ -314,6 +314,17 @@ OWNER_CLAIM_HINT = (
 # 刻意**不含**真正的暗号：那会让群聊变成一台确认器（喊对了就有人应声 = 等于验证了口令）。
 OWNER_CLAIM_PROBE_WORDS = ("我是群主", "认领群主", "认领一下")
 
+# 私聊收到改名命令时的回复。
+#
+# 为什么必须在这里挡一句：称呼是**按群**存的（`群号|openid`），而私聊消息里没有群号 ——
+# 改了也不知道该改在哪个群。以前的坑是这句话直接喂给模型，被当成闲聊回了个玩笑，
+# 当事人完全不知道自己那条命令压根没生效（「叫不动它」的错觉就是这么来的）。
+# 所以这里是**明说**：不静默吞掉，也不假装受理。0 token、不扣额度。
+NICK_PRIVATE_CHAT_HINT = (
+    "（把小本本合上了）称呼这事得回群里办 —— 名字是按群记的，"
+    "私聊这儿我看不出你说的是哪个群。回群里 @ 我一句「叫我 XXX」就行，"
+    "随时能改，以最新一次为准。")
+
 # 暗号本身就当敏感词注册掉：万一真有人在群里念出来，摘要出口会把它就地抹掉，
 # 不会顺着长期记忆回流进每一轮 prompt。
 wordfilter.add_runtime_words([config.OWNER_CLAIM_PHRASE])
@@ -1929,6 +1940,19 @@ class GroupBot(botpy.Client):
                     "`OWNER_CLAIM_PHRASE`。")
             return
 
+        is_owner = OWNER_OPENID is not None and sender_openid == OWNER_OPENID
+
+        # 私聊不办改名：称呼是按群存的（`群号|openid`），这条消息里没有群号 ——
+        # 改了也不知道该改在哪儿。必须**明说**：以前这句话直接喂给模型，被当成闲聊
+        # 回了个玩笑，当事人完全不知道命令没生效，还以为「叫不动它」。0 token，不占额度。
+        nick_cmd = relations.parse_nick_command(
+            user_input, bot_names=naming.bot_names(),
+            mentioned_others=(), allow_other=is_owner)
+        if nick_cmd:
+            logger.info("🚫 私聊收到改名命令（%s），已指回群里", nick_cmd.get("scope"))
+            await safe_reply(message, NICK_PRIVATE_CHAT_HINT)
+            return
+
         if not BUDGET.try_consume():
             logger.warning("🛑 今日额度已用尽，私聊也一并拒绝（%d/%d）", BUDGET.used, BUDGET.limit)
             STATE.mark_dirty()
@@ -1936,7 +1960,6 @@ class GroupBot(botpy.Client):
             return
         STATE.mark_dirty()
 
-        is_owner = OWNER_OPENID is not None and sender_openid == OWNER_OPENID
         reply_text, _delta = await get_ai_reply(
             f"user_{sender_openid}", user_input, is_owner=is_owner, mode="normal"
         )

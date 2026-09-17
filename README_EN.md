@@ -175,6 +175,11 @@ Missing credentials make it **fail at startup and tell you which one is missing*
 | (Owner) flavour command | 办他 / 拖出去 / 拿下 / 护驾 | 0 |
 | Direct message | Just DM it | 1 call |
 
+⚠️ **Renaming works in group chat only.** Nicknames are stored per group (`group_id|openid`),
+and a DM carries no group id — so there is no way to tell which group the change belongs to.
+Saying "call me Aryu" in a DM does **not** write anything; it gets a local pointer back to the
+group (0 tokens, no quota spent). It is never silently swallowed.
+
 Almost all commands are answered **locally, for zero tokens**, without touching a model at all.
 
 ---
@@ -337,7 +342,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Name review accuracy | 4.7 **7/7**; 4.5-air misses homophones and false-positives; 3.5-flash-lite **8/8** | 2 sensitive names vs 6 normal nicknames |
 | Compression throughput | 4.5-air swallowed 260 messages / 4732 chars; 4.7 returned contentFilter 1301 on the same input | Evidence for using the weaker tier |
 | Cost gates | Global ≤3000 calls/day; per-group bucket of 8, refilling 1 per 5s | Caps flooding at roughly 12 calls/minute |
-| Regression suite | **190 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, prompt order, passive-reply expiry, failover |
+| Regression suite | **198 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, prompt order, passive-reply expiry, private-chat rename redirect, failover |
 
 ---
 
@@ -392,7 +397,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | `storage.py` | State persistence, session context, token bucket, daily budget |
 | `qqtext.py` | Message normalisation: turn "human text + machine placeholders" into readable text |
 | `wordfilter.py` | Sensitive words: one wordlist shared by the naming entry point and the summary exit |
-| `tests/` | 190 regression tests + a few one-off probe scripts |
+| `tests/` | 198 regression tests + a few one-off probe scripts |
 
 Run the tests (fully offline, no network or keys):
 
