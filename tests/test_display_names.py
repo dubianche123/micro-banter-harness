@@ -58,6 +58,30 @@ class ContentParsingTest(unittest.TestCase):
     def test_no_mention_returns_none(self):
         self.assertIsNone(bot.mention_nick_from_content("今天天气不错"))
 
+    def test_machine_mention_is_not_a_nickname(self):
+        """`<@openid>` 是 openid 不是昵称 —— 误抽会把一串编号学成名字。
+
+        实测事故：`小王，叫<@E5E3793C25CF161D9F3292FE6ABA8C84> 家豪` 被抽成
+        `E5E3793C25CF161D9F3292FE`（被 24 字上限切断的 openid 前缀），
+        学进去之后还被原样发回了群里。
+        """
+        self.assertIsNone(
+            bot.mention_nick_from_content(
+                "小王，叫<@E5E3793C25CF161D9F3292FE6ABA8C84> 家豪"))
+        self.assertIsNone(
+            bot.mention_nick_from_content(
+                "小王，叫<@!E5E3793C25CF161D9F3292FE6ABA8C84> 家豪"))
+
+    def test_bare_machine_id_is_not_a_nickname(self):
+        """万一哪天没有尖括号裹着，编号也不能当名字。"""
+        self.assertIsNone(
+            bot.mention_nick_from_content("@E5E3793C25CF161D9F3292FE6ABA8C84 在吗"))
+
+    def test_real_nick_still_gets_through_after_stripping(self):
+        """剔掉机器形态之后，后面的明文该拿还是拿得到。"""
+        self.assertEqual(
+            bot.mention_nick_from_content("<@!OPENID_BOT> @奶龙 在吗"), "奶龙")
+
 
 class LearningTest(unittest.TestCase):
     def setUp(self):
@@ -70,6 +94,11 @@ class LearningTest(unittest.TestCase):
     def test_single_char_is_refused(self):
         """单字误伤面太大，跟台账一个规矩。"""
         self.assertFalse(self.dn.learn(GROUP, ALICE, "龙"))
+        self.assertIsNone(self.dn.of(GROUP, ALICE))
+
+    def test_machine_id_is_refused_at_the_write_gate(self):
+        """learn 是唯一写入口，调用方漏了它也得拦住 —— 编号不是任何人的名字。"""
+        self.assertFalse(self.dn.learn(GROUP, ALICE, "E5E3793C25CF161D9F3292FE"))
         self.assertIsNone(self.dn.of(GROUP, ALICE))
 
     def test_unchanged_name_does_not_dirty_the_state(self):

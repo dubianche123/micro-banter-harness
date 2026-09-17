@@ -551,6 +551,10 @@ class RenameLedger:
         return text
 
 
+# 裸的机器编号（openid 那类）。没有人的显示名长这样 —— 16 位以上纯十六进制。
+_RE_MACHINE_ID = re.compile(r"^[0-9A-Fa-f]{16,}$")
+
+
 class DisplayNames:
     """群里**平台侧**的显示名（QQ 群昵称 / 群名片）。
 
@@ -587,10 +591,17 @@ class DisplayNames:
 
         空名、单字不记（单字误伤面太大，跟 RenameLedger 同一个理由）。
         是不是机器人自己的名字由调用方挡 —— 这里不认识 bot_names。
+
+        ⚠️ 机器编号必须在这里**再挡一次**：它是唯一写入口，调用方漏了就没人拦了。
+        实测事故：正文里的 `<@openid>` 被当成明文昵称抽走，还被 24 字上限切成
+        一段残缺编号，学进来之后原样发回了群里 —— 群里看到的是「往后
+        【E5E3793C25CF161D9F3292FE】我就记作【家豪】」。
         """
         nick = (nick or "").strip().lstrip("@")
         if not openid or len(nick) < 2:
             return False
+        if _RE_MACHINE_ID.match(nick):
+            return False          # openid 不是名字，谁的都不是
         table = self.groups.setdefault(group_id, {})
         if table.get(openid) == nick:
             return False          # 已经记成这样了，别反复标脏

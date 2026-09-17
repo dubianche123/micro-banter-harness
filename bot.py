@@ -945,19 +945,29 @@ def extract_mentions(message, bot_id=""):
 # 还会被「单字不记」挡掉。代价是「@老王.你好」会连着吃进去，中文群里极少见。
 _RE_PLAIN_MENTION = re.compile(r"@([^\s@，。！？；：、,!?;:（）()【】\[\]]{1,24})")
 _RE_TRAILING_DOTS = re.compile(r"[.．]+\Z")
+# 裸的机器编号（openid 那类），没有尖括号裹着时靠它兜底。没有人的昵称长这样。
+_RE_MACHINE_ID = re.compile(r"^[0-9A-Fa-f]{16,}$")
 
 
 def mention_nicks_from_content(content, bot_names=()):
-    """按正文里出现的顺序，抠出所有 @ 后面的明文昵称。
+    """按正文里出现的顺序，抠出所有 @ 后面的**明文**昵称。
 
     返回顺序和 `mentions` 一致，所以调用方只要校验**数量对得上**就能逐个配对。
     机器人自己的叫法要跳过（@它就是喊它，不是某个人）—— 这一步同时把 mentions
     里机器人那一格对齐剔掉，否则后面的配对会整体错位。
+
+    ⚠️ 必须先剔掉机器形态的 `<@!openid>` / `<@openid>`：它是 openid 不是昵称，
+    但不剔就会被下面的正则当成明文吞进去，还被 24 字上限切成一段残缺编号 ——
+    实测就这么把一串 openid 前缀学成了「某人叫 E5E3793C25CF161D9F3292FE」，
+    还原样发回了群里。
     """
+    text = qqtext._MENTION.sub("", content or "")
     nicks = []
-    for m in _RE_PLAIN_MENTION.finditer(content or ""):
+    for m in _RE_PLAIN_MENTION.finditer(text):
         nick = _RE_TRAILING_DOTS.sub("", m.group(1).strip()).strip()
         if not nick or nick == qqtext.MENTION_FALLBACK:
+            continue
+        if _RE_MACHINE_ID.match(nick):
             continue
         if any(nick == b or nick.startswith(b) for b in (bot_names or ())):
             continue
@@ -1205,8 +1215,10 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
         _sync_rename(group_id, old_nick, nick)
         if old_nick and old_nick != nick:
             await safe_reply(message,
+                # ⚠️ 别说「谁也不许改」—— 听起来像**本人**也改不动，其实本人一句
+                # 「叫我 XXX」就能覆盖（source=claim 同样是合法写入源）。
                 f"（划掉旧名字重新落笔）收到！往后【{old_nick}】就改记作【{nick}】"
-                f"——{owner}御赐，谁也不许擦。")
+                f"——{owner}御赐，旁人动不了；本人想改，随口一句话的事。")
         else:
             # 以前这里带对方 openid 的后四位，方便核对绑没绑错；代价是群里看到一串
             # 读不懂的编号，模型还会照着复读。现在改用他**群里挂的显示名**来核对 ——
@@ -1214,7 +1226,7 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
             who = DISPLAY_NAMES.of(group_id, target) or "这位"
             await safe_reply(message,
                 f"（工工整整把名字写进点名册）收到！往后【{who}】我就记作【{nick}】"
-                f"——{owner}御赐的名字，谁也不许擦。")
+                f"——{owner}御赐，旁人动不了；本人想改，随口一句话的事。")
         return
 
     old = RELATIONS.get(group_id, sender_openid).get("nick")

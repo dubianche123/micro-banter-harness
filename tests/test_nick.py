@@ -292,5 +292,29 @@ class ExtractMentionsTest(unittest.TestCase):
         self.assertEqual(extract_mentions(msg, "BOTID"), [])
 
 
+class RenameWordingTest(unittest.TestCase):
+    """群主赐名的确认语：要挡住旁人，但**不能**把本人也挡在门外。
+
+    用户原话：「『{owner}御赐的名字，谁也不许改』这句话一说，搞得好像他本人也
+    改不了一样」。事实上本人一句「叫我 XXX」就能覆盖（source=claim 同样是合法
+    写入源），所以措辞必须把「旁人动不了」和「本人能改」分开说。
+    """
+
+    def test_confirmation_does_not_lock_the_person_out(self):
+        import inspect
+        import re
+
+        import bot
+
+        # 注释里会拿这句当反例讲「为什么不能这么写」，那正是要留下的说明，
+        # 所以只扫**真正会发出去**的部分：把 # 注释剥掉再断言。
+        src = inspect.getsource(bot.handle_nick_command)
+        code = "\n".join(re.sub(r"#.*$", "", line) for line in src.splitlines())
+        for banned in ("谁也不许改", "谁也不许擦", "谁也改不了", "谁都改不了"):
+            self.assertNotIn(banned, code, f"「{banned}」听起来像本人也改不动")
+        self.assertIn("旁人", code, "挡的应该是旁人，不是本人")
+        self.assertIn("本人想改", code, "得给本人留一句「随时能改」的出口")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -18,6 +18,8 @@ memory/
 .backup/
 *.bak
 *.bak2
+# 带时间戳的手工备份（清档/改档前留的），里面同样是群聊原文
+state.json.bak.*
 
 # 敏感词表：填的是你自己群里的词，按设计就不该进版本库
 # （模板见 sensitive_nicks.example.txt，复制一份改名即可）
