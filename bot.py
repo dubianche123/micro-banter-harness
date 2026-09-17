@@ -15,6 +15,7 @@ import re
 import signal
 import sys
 import time
+from datetime import datetime, timezone
 
 import aiohttp
 import certifi
@@ -694,8 +695,57 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
 # ══════════════════════ 5. 发送与限流提示 ══════════════════════
 
 
+# QQ 的被动回复是有时效的（官方「消息收发概述」）：群聊 5 分钟 / 每条最多 5 次，
+# 单聊 60 分钟 / 4 次。这里各留一点余量给时钟偏差和生成耗时 —— 贴着边界回照样会被拒。
+GROUP_PASSIVE_WINDOW_SECONDS = 240      # 群聊 5 分钟，留 1 分钟
+C2C_PASSIVE_WINDOW_SECONDS = 3000       # 单聊 60 分钟，留 10 分钟
+
+
+def passive_reply_window(message):
+    """这条消息走被动回复的时效（秒）。认不出的类型按更紧的群聊口径算。"""
+    if isinstance(message, C2CMessage):
+        return C2C_PASSIVE_WINDOW_SECONDS
+    return GROUP_PASSIVE_WINDOW_SECONDS
+
+
+def message_age_seconds(message):
+    """消息从发出来到现在过了多久（秒）。
+
+    拿不到、或解不出时间戳时返回 None —— 调用方当作「不旧」，保持原行为：
+    不因为一个读不懂的时间戳，就把该发的回复吞掉。
+    """
+    raw = getattr(message, "timestamp", None)
+    if not raw:
+        return None
+    text = str(raw).strip().replace("Z", "+00:00")
+    try:
+        sent = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if sent.tzinfo is None:
+        # 平台给的是带偏移的 RFC3339。真遇到没带时区的，按**本地**时间算 ——
+        # 当成 UTC 会凭空多出 8 小时，等于把该回的回复全吞了，比误发一次危险得多。
+        return (datetime.now() - sent).total_seconds()
+    return (datetime.now(timezone.utc) - sent).total_seconds()
+
+
 async def safe_reply(message, reply_text):
-    """安全回复，命中腾讯内容风控时自动降级。"""
+    """安全回复，命中腾讯内容风控时自动降级。
+
+    发之前还有一道**过期闸**：被动回复有时效（群聊 5 分钟 / 单聊 60 分钟），
+    而机器人掉线期间积压的消息会在重连时补推过来 —— 那时再回，腾讯直接拒：
+    `40034005 回复消息msg_id已过期`。模型跑了、答案也有了，就是发不出去，
+    群里一片安静，看起来跟宕机一模一样（2026-09-17 实测踩到过）。
+    所以太老的消息干脆不回，只留一条日志，省掉那次注定失败的请求。
+    """
+    age = message_age_seconds(message)
+    window = passive_reply_window(message)
+    if age is not None and age > window:
+        logger.warning(
+            "⏳ 这条消息已经发出 %d 秒，超过被动回复时效 %d 秒，不再回复"
+            "（多半是掉线期间积压、重连后补推过来的，硬回腾讯也会拒 40034005）",
+            int(age), window)
+        return
     try:
         await message.reply(content=reply_text, msg_type=0)
         logger.info("📤 [已回复]: %s", reply_text.replace("\n", " ")[:200])

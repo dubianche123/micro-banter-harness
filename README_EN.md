@@ -337,7 +337,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Name review accuracy | 4.7 **7/7**; 4.5-air misses homophones and false-positives; 3.5-flash-lite **8/8** | 2 sensitive names vs 6 normal nicknames |
 | Compression throughput | 4.5-air swallowed 260 messages / 4732 chars; 4.7 returned contentFilter 1301 on the same input | Evidence for using the weaker tier |
 | Cost gates | Global ≤3000 calls/day; per-group bucket of 8, refilling 1 per 5s | Caps flooding at roughly 12 calls/minute |
-| Regression suite | **177 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, prompt order, failover |
+| Regression suite | **190 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, prompt order, passive-reply expiry, failover |
 
 ---
 
@@ -346,6 +346,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Not done | Reason |
 |:--|:--|
 | Per-user quotas | In a group everyone is an equal member; throttling per person feels wrong. A per-group bucket plus a global daily budget keeps the bill predictable |
+| Resending expired messages | Tencent's passive replies expire (5 minutes for groups) and resending one is always rejected. Messages buffered during a disconnect are mostly expired by the time they are replayed, so it checks `message.timestamp` first and just logs the skip — firing a request that cannot succeed is worse than not firing at all |
 | A message-length threshold | A bare 「？」 or 「太蠢了」 is a genuine cue to jump in; measuring by character count only filters out the messages worth answering |
 | Multimodal (image reading) | Faces and images that read as nothing are dropped entirely, not archived — the complexity of adding multimodal far outweighs the benefit |
 | A database | One group's data fits in JSON; one less dependency is one less deployment trap |
@@ -361,6 +362,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Symptom | Likely cause |
 |:--|:--|
 | It never responds in the group | ①Check the **trigger word**: if `BOT_NAMES` is unset and the platform nickname is unavailable, it only answers to the generic 「机器人」; ②the group message scope is still on one of the first two levels (the group owner changes it to 「获取群内全部消息」 in the QQ group settings); ③the group is not in the sandbox list |
+| A few messages got no reply at all, yet the log says `⏳ …超过被动回复时效` | Not broken — **deliberately skipped**. Messages that piled up while the connection was down get replayed on reconnect, by which time they are past Tencent's passive-reply window (5 minutes for groups). Sending anyway is rejected (`40034005`), so it logs one line and moves on instead of firing a request that is certain to fail |
 | It answers @-mentions but never chimes in or remembers context | The group message scope is stuck on one of the first two levels (only @ / @ + the previous 10). It cannot see the whole conversation, so it cannot judge whether to speak up or remember anything. **The group owner** changes 「机器人可获取的群聊消息范围」 to 「获取群内全部消息」 in the QQ group settings, once per group. See the table in step 1 |
 | Calling its name does nothing, but @ works | The trigger word does not match what people actually say: add it to `BOT_NAMES`. Renaming it on QQ will not help — a nickname only adds an alias, it never overrides what `BOT_NAMES` already has |
 | The first reply after startup is slow | Cold start, not yet warmed; startup performs one 0-token connectivity probe (measured 0.35s) |
@@ -390,7 +392,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | `storage.py` | State persistence, session context, token bucket, daily budget |
 | `qqtext.py` | Message normalisation: turn "human text + machine placeholders" into readable text |
 | `wordfilter.py` | Sensitive words: one wordlist shared by the naming entry point and the summary exit |
-| `tests/` | 177 regression tests + a few one-off probe scripts |
+| `tests/` | 190 regression tests + a few one-off probe scripts |
 
 Run the tests (fully offline, no network or keys):
 
