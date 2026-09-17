@@ -427,11 +427,12 @@ async def probe_provider():
         logger.warning("⚠️ 探活跳过（不影响运行）: %s", str(e)[:120])
 
 
-def _provider_available(name):
+def _provider_available(name, allow_yield=True):
     """这家现在能不能用。两条都满足才行：
 
     1) 熔断冷却过了 —— 失败之后的最短让位时间；
-    2) **群已经静下来够久，缓存大概率凉了**。
+    2) **群已经静下来够久，缓存大概率凉了**（`allow_yield=False` 时跳过这条，
+       只看熔断 —— 全员让位时用它破死锁，见 call_model）。
 
     第 2 条是「缓存优先」的核心。被让位的那家前缀缓存还热着的时候切回去，等于把
     已经付过钱的 prefill 白扔：换一家就要把整段稳定头 + 历史重新算一遍，而群聊的
@@ -447,7 +448,7 @@ def _provider_available(name):
     now = time.time()
     if now < st.get("cooldown_until", 0.0):
         return False
-    if now - _last_msg_ts() < config.PROVIDER_CACHE_WARM_SECONDS:
+    if allow_yield and now - _last_msg_ts() < config.PROVIDER_CACHE_WARM_SECONDS:
         if any(p != name and _provider_serving(p) for p in PROVIDER_CHAIN):
             return False
     return True
@@ -538,6 +539,17 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
     start_time = time.time()
     chains = _TIER_CHAINS.get(tier) or MODEL_CHAINS
 
+    # ⚠️ 「缓存优先」会自锁：A 看到 B 顶得上就让位，B 看到 A 顶得上也让位 ——
+    # 两家都不出工，整条链全哑。症状极具迷惑性：进程活着、消息收得到、也确实回了，
+    # 只是回的全是「刚才走神了」这类兜底话术，**看起来就像宕机**。
+    # 所以开跑前先问一句「真有人能顶上吗」，没有就关掉让位（只按熔断挑），
+    # 宁可多花一次 prefill 也不能不说话 —— 这正是上面那条例外的本意。
+    allow_yield = any(
+        AI_CLIENTS.get(p) and (chains.get(p)) and _provider_available(p)
+        for p in PROVIDER_CHAIN)
+    if not allow_yield:
+        logger.info("🚨 全员让位（互让死锁），本轮关闭缓存让位，只按熔断挑供应商")
+
     for pname in PROVIDER_CHAIN:
         elapsed = time.time() - start_time
         if elapsed >= config.AI_TOTAL_TIMEOUT:
@@ -548,7 +560,7 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
         models = chains.get(pname) or []
         if not clients or not models:
             continue
-        if not _provider_available(pname):
+        if not _provider_available(pname, allow_yield=allow_yield):
             logger.info("⏭️ 供应商 [%s] 让位中（%s），先用别家",
                         config.PROVIDER_PRESETS[pname]["label"], _provider_block_reason(pname))
             continue
@@ -559,8 +571,9 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
             elapsed = time.time() - start_time
             if elapsed >= config.AI_TOTAL_TIMEOUT:
                 break
-            # 熔断可能在上一个模型失败时刚触发，这时没必要再试这家剩下的模型
-            if not _provider_available(pname):
+            # 熔断可能在上一个模型失败时刚触发，这时没必要再试这家剩下的模型。
+            # 这里只看熔断不看缓存：同一家内部换模型不涉及「切回去要重新 prefill」。
+            if not _provider_available(pname, allow_yield=False):
                 break
             timeout_for_this = min(config.AI_TOTAL_TIMEOUT - elapsed,
                                    preset.get("timeout") or config.AI_TIMEOUT_SECONDS)

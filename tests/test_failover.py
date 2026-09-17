@@ -183,5 +183,58 @@ class FailoverTest(unittest.IsolatedAsyncioTestCase):
                                  f"{type(exc).__name__} 不该判为硬失败")
 
 
+class ProviderYieldDeadlockTest(unittest.TestCase):
+    """「缓存优先」的自锁：A 看到 B 顶得上就让位，B 看到 A 顶得上也让位 —— 全哑。
+
+    症状极具迷惑性：进程活着、消息收得到、也确实回了，只是回的全是「刚才走神了」
+    这类兜底话术 —— **看起来就像宕机**。所以让位规则必须留一个破锁口子。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import bot as _bot
+        cls.bot = _bot
+
+    def setUp(self):
+        b = self.bot
+        self.saved = (dict(b._provider_state), dict(b.AI_CLIENTS), b._activity["ts"])
+        now = time.time()
+        b._provider_state.clear()
+        # 两家都「失败过但冷却已过」+ 都还有 client —— 互让死锁的必要条件
+        for p in b.PROVIDER_CHAIN:
+            b._provider_state[p] = {"fails": 2, "cooldown_until": now - 1}
+        b.AI_CLIENTS.update({p: ["fake"] for p in b.PROVIDER_CHAIN})
+        b._activity["ts"] = now          # 群刚刚还在聊 → 缓存还热
+
+    def tearDown(self):
+        b = self.bot
+        state, clients, ts = self.saved
+        b._provider_state.clear(); b._provider_state.update(state)
+        b.AI_CLIENTS.clear(); b.AI_CLIENTS.update(clients)
+        b._activity["ts"] = ts
+
+    def test_mutual_yield_mutes_everyone(self):
+        """前提：这个局面下两家确实都在让位。"""
+        if len(self.bot.PROVIDER_CHAIN) < 2:
+            self.skipTest("只配了一家供应商，构不成互让")
+        avail = [p for p in self.bot.PROVIDER_CHAIN if self.bot._provider_available(p)]
+        self.assertEqual(avail, [], "前提不成立：这个局面下本该全员让位")
+
+    def test_turning_yield_off_breaks_the_deadlock(self):
+        """关掉让位（只按熔断挑）后，必须至少有一家能出工。"""
+        avail = [p for p in self.bot.PROVIDER_CHAIN
+                 if self.bot._provider_available(p, allow_yield=False)]
+        self.assertTrue(avail, "宁可多花一次 prefill，也不能不说话")
+
+    def test_still_muted_while_actually_cooling_down(self):
+        """破锁不能冲破熔断本身 —— 冷却期里谁都不该上。"""
+        now = time.time()
+        for p in self.bot.PROVIDER_CHAIN:
+            self.bot._provider_state[p] = {"fails": 2, "cooldown_until": now + 60}
+        avail = [p for p in self.bot.PROVIDER_CHAIN
+                 if self.bot._provider_available(p, allow_yield=False)]
+        self.assertEqual(avail, [], "熔断期内不该有人出工")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
