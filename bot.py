@@ -606,6 +606,11 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
                         _note_provider_ok(pname)
                         if pname != config.AI_PROVIDER:
                             logger.info("↩️ 本次由备用供应商 [%s] 应答", preset["label"])
+                        else:
+                            # 主供应商应答也要留痕：2026-09-17 统计「今天谁在回话」时
+                            # 发现只能靠「总数 - 备用数 - 兜底数」倒推，非常别扭。
+                            logger.info("✅ [%s] %s 应答（%s）",
+                                        preset["label"], model_name, tier)
                         return candidate
             except asyncio.TimeoutError:
                 logger.warning("⏰ [%s] %s 超过 %.1fs，尝试下一个...",
