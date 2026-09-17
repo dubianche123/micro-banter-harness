@@ -292,6 +292,43 @@ class ExtractMentionsTest(unittest.TestCase):
         self.assertEqual(extract_mentions(msg, "BOTID"), [])
 
 
+class LooksLikeOtherNickTest(unittest.TestCase):
+    """「这句是不是在给别人改名」——必须是**强信号**，宁可漏也别误伤。
+
+    为什么要单拎出来：`parse_nick_command` 会把普通群友的 other 意图按权限整个
+    吞掉（`allow_other=False`），于是请求掉进闲聊 —— 机器人顺着接一句
+    「别别别，这辈分乱套了」，群里看着像在商量、甚至像改成了，其实一个字没存。
+    所以需要一次独立探测来把这种请求**明确回绝**。
+
+    代价是误伤：把「@老王 你好」当成起名，每句打招呼都要被回绝一次，比不响还烦。
+    所以只认带「叫/称呼/改名」这类动词的句式，不认光秃秃的短句。
+    """
+
+    MENTIONED = ["BBBBBBBBBBBBBBBBBBBBBBBBBBBB2222"]
+
+    def test_verb_with_mention_is_an_intent(self):
+        self.assertTrue(relations.looks_like_other_nick(
+            "小星，叫@阿澈 儿子", bot_names=BOT, mentioned_others=self.MENTIONED))
+
+    def test_verb_without_mention_is_also_an_intent(self):
+        """「叫他阿强」没 @ 人，但同样是明确意图 —— 一样不该静默掉进闲聊。"""
+        self.assertTrue(relations.looks_like_other_nick("叫他阿强", bot_names=BOT))
+
+    def test_bare_phrase_after_at_is_not_an_intent(self):
+        """「@老王 你好」不算 —— `RE_AT_BARE` 是「任意 1-12 字」，认了就全中。"""
+        self.assertFalse(relations.looks_like_other_nick(
+            "小星，@老王 你好", bot_names=BOT, mentioned_others=self.MENTIONED))
+
+    def test_ordinary_chat_is_not_an_intent(self):
+        self.assertFalse(relations.looks_like_other_nick(
+            "小星，今天天气不错", bot_names=BOT, mentioned_others=self.MENTIONED))
+
+    def test_calling_a_thing_is_not_a_rename(self):
+        """「叫个外卖」这种，动词后面不是名字。"""
+        self.assertFalse(relations.looks_like_other_nick(
+            "叫个外卖", bot_names=BOT))
+
+
 class RenameWordingTest(unittest.TestCase):
     """群主赐名的确认语：要挡住旁人，但**不能**把本人也挡在门外。
 

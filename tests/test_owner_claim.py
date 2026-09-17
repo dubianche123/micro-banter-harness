@@ -26,6 +26,7 @@ import config  # noqa: E402
 import wordfilter  # noqa: E402
 
 import bot  # noqa: E402
+import naming  # noqa: E402
 
 GROUP = "GROUP_OWNER_CLAIM"
 OWNER = "OPENID_CLAIM_OWNER"
@@ -70,6 +71,10 @@ class _StubSink:
 
     def touch(self, *a, **kw):
         pass
+
+    def get(self, *a, **kw):
+        """摘要读取同样要挡掉 —— 走到深一点的分支会来问一句。"""
+        return None
 
 
 class BaseClaimTest(unittest.IsolatedAsyncioTestCase):
@@ -129,6 +134,79 @@ class BaseClaimTest(unittest.IsolatedAsyncioTestCase):
     async def say_in_private(self, text, sender=OWNER):
         await bot.GroupBot.on_c2c_message_create(
             FakeClient(), FakeMessage(text, msg_id=self._next_id(), member_openid=sender))
+
+
+class OtherNickPermissionTest(BaseClaimTest):
+    """普通群友给**别人**起名：改不了，但必须明说 —— 不能装没听懂。
+
+    事故：群友说「叫@老王 儿子」，解析层按权限把 other 意图整个吞掉，请求掉进
+    闲聊，机器人顺着接一句「别别别，这辈分乱套了，我可不敢当」—— 群里看着像在
+    商量、甚至像改成了，其实档案一个字没动。**看着像生效，比明确失败更糟。**
+
+    为什么放这个文件：它跟「群里说破天也不授权」是同一条边界（群主权限），
+    而且这里已经有现成的假消息体。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._orig_judge = bot.judge_nick
+        self._orig_call = bot.call_model
+        async def fake_judge(nick):             # 审核要调模型，测试里一律放行
+            return None
+
+        bot.judge_nick = fake_judge
+
+        async def fake_call_model(*a, **kw):
+            return "（测试替身）别当真。"
+
+        bot.call_model = fake_call_model
+        bot.OWNER_OPENID = OWNER
+        self.bot_name = naming.bot_names()[0]
+
+    def tearDown(self):
+        bot.judge_nick = self._orig_judge
+        bot.call_model = self._orig_call
+        for oid in (OWNER, OTHER):
+            bot.RELATIONS.records.pop(f"{GROUP}|{oid}", None)
+        super().tearDown()
+
+    def _nick(self, openid):
+        return (bot.RELATIONS.get(GROUP, openid, create=False) or {}).get("nick")
+
+    async def _say(self, text, sender, target=()):
+        await bot.GroupBot.handle_group_msg(
+            FakeClient(),
+            FakeMessage(text, msg_id=self._next_id(), member_openid=sender,
+                        mentions=[FakeUser(t) for t in target]))
+
+    async def test_non_owner_is_refused_out_loud(self):
+        """改不了可以，一声不吭不行 —— 那会让人以为还在商量。"""
+        await self._say(f"{self.bot_name}，叫@老王 儿子", sender=OTHER, target=[OWNER])
+        self.assertTrue(self.sent, "没权限却一句没回，当事人会以为命令生效了")
+        self.assertIn("点头", self.sent[-1], "得说清楚是谁点头才算")
+        self.assertIn("叫我", self.sent[-1], "顺手给出本人改名的正确句式")
+
+    async def test_nothing_is_written(self):
+        await self._say(f"{self.bot_name}，叫@老王 儿子", sender=OTHER, target=[OWNER])
+        self.assertIsNone(self._nick(OWNER), "没权限就一个字都不该写进档案")
+
+    async def test_refusal_costs_no_quota(self):
+        """本地拦下的事不该调模型 —— 它是确定性判断，不是生成任务。"""
+        before = bot.BUDGET.used
+        await self._say(f"{self.bot_name}，叫@老王 儿子", sender=OTHER, target=[OWNER])
+        self.assertEqual(bot.BUDGET.used, before, "一句本地回绝居然扣了额度")
+
+    async def test_owner_can_still_rename(self):
+        """放行权限不能把群主自己的路也堵了。"""
+        await self._say(f"{self.bot_name}，叫@阿澈 阿强", sender=OWNER, target=[OTHER])
+        self.assertEqual(self._nick(OTHER), "阿强", "群主给人起名是正经功能，别一起拦了")
+
+    async def test_ordinary_greeting_is_not_refused(self):
+        """「@某人 你好」不该被当成起名 —— 否则每句打招呼都被回绝一次。"""
+        await self._say(f"{self.bot_name}，@老王 你好", sender=OTHER, target=[OWNER])
+        self.assertFalse(
+            any("点头" in s for s in self.sent),
+            f"普通打招呼被当成起名意图了：{self.sent}")
 
 
 class GroupChatNeverClaimsTest(BaseClaimTest):

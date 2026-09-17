@@ -830,6 +830,28 @@ def parse_nick_command(text, bot_names=(), mentioned_others=(), allow_other=True
     return None
 
 
+def looks_like_other_nick(text, bot_names=(), mentioned_others=()):
+    """这句话是不是**明确在给被 @ 的人起名**（带「叫/称呼/改名」这类动词）。
+
+    跟 `parse_nick_command` 的分工：那边按权限把普通群友的 other 意图整个吞掉
+    （`allow_other=False`），好处是权限和事实分开，坏处是这类请求**掉进了闲聊**
+    —— 机器人会顺着接一句「别别别，这辈分乱套了，我可不敢当」，群里看着像在
+    商量、甚至像改成了，其实档案里一个字都没动。
+
+    所以这里补一次探测，只认**带动词的强信号**。刻意不认 `RE_AT_BARE`
+    （它是「任意 1-12 字」）—— 那个会把「@老王 你好」也当成起名，于是每句普通
+    打招呼都回一句「得群主点头才行」，比不响还烦。
+    """
+    mentioned = [m for m in (mentioned_others or ()) if m]
+    raw = text or ""
+    t = strip_bot_address(strip_at_text(raw) if mentioned else raw.strip(), bot_names)
+    if not t:
+        return False
+    # 有 @ 时被 @ 的人就是宾语（「叫@阿澈 阿强」）；没 @ 时是代词式（「叫他阿强」）。
+    m = (RE_AT_NICK if mentioned else RE_OTHER_NICK).match(t)
+    return bool(m and _clean_nick(m.group(1)))
+
+
 def bad_nick(nick, reserved=(), taken=()):
     """名字得像个名字：不冒犯机器人/群主，不碰职务尊号，也不碰敏感词，还不跟人重名。
 

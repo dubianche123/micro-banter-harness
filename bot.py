@@ -331,6 +331,13 @@ NICK_PRIVATE_CHAT_HINT = (
     "私聊这儿我看不出你说的是哪个群。回群里 @ 我一句「叫我 XXX」就行，"
     "随时能改，以最新一次为准。")
 
+# 普通群友想给别人起名。同理必须**明说**：解析层按权限把这种意图整个吞掉了
+# （allow_other=False），不补一句的话请求会掉进闲聊 —— 机器人顺着接一句
+# 「别别别，这辈分乱套了」，群里看着像在商量、甚至像改成了，其实一个字都没存。
+NICK_OTHER_DENIED = (
+    "（赶紧用手按住了小本本）给别人起外号这事得{owner}点头才行。"
+    "你要是自己想改称呼，直接说「叫我 XXX」就好，随时能改。")
+
 # 暗号本身就当敏感词注册掉：万一真有人在群里念出来，摘要出口会把它就地抹掉，
 # 不会顺着长期记忆回流进每一轮 prompt。
 wordfilter.add_runtime_words([config.OWNER_CLAIM_PHRASE])
@@ -1205,9 +1212,7 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
     if cmd["scope"] == "other":
         owner = owner_label(group_id)
         if not is_owner:
-            await safe_reply(message,
-                f"（赶紧用手按住了小本本）给别人起外号这事得{owner}点头才行。"
-                "你要是自己想改称呼，直接说「叫我 XXX」就好，随时能改。")
+            await safe_reply(message, NICK_OTHER_DENIED.format(owner=owner))
             return
         if not mentioned_others:
             await safe_reply(message,
@@ -1779,6 +1784,14 @@ class GroupBot(botpy.Client):
         if nick_cmd:
             await handle_nick_command(message, nick_cmd, group_id, sender_openid,
                                       is_owner, mentioned_others)
+            return
+        # 解析不出命令 ≠ 没有这个意图：普通群友的「叫@某人 X」被 allow_other 吞掉了，
+        # 静默掉进闲聊会让人以为在商量、甚至以为改成了。带动词的是明确意图，必须给说法。
+        # 只认带动词的（不认「@老王 你好」那种任意短句），否则每句打招呼都要被回绝一次。
+        if not is_owner and relations.looks_like_other_nick(
+                user_input, bot_names=bot_names, mentioned_others=mentioned_others):
+            logger.info("🚫 非群主要给别人起名，已明说（%s）", sender_openid[-4:])
+            await safe_reply(message, NICK_OTHER_DENIED.format(owner=owner_label(group_id)))
             return
 
         # 6. 群主专属特权指令
