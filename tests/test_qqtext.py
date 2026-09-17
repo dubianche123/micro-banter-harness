@@ -42,9 +42,18 @@ class NormalizeTest(unittest.TestCase):
                              mention_label=lambda oid: "阿强"),
             "@阿强这是谁")
 
-    def test_mention_without_resolver_falls_back_to_short_id(self):
-        """解析器给不出名字（那人还没认领称呼）也要看得出「这里 @ 了个人」。"""
-        self.assertEqual(qqtext.normalize("<@!A1B2C3D4E5>这是谁"), "@群友D4E5这是谁")
+    def test_mention_without_resolver_falls_back_to_a_readable_placeholder(self):
+        """解析器给不出名字（那人还没认领称呼）也要看得出「这里 @ 了个人」。
+
+        ⚠️ 兜底里**不许带 openid 尾巴**：这串编号会顺着 prompt 流进回复。
+        """
+        self.assertEqual(qqtext.normalize("<@!A1B2C3D4E5>这是谁"), "@群友这是谁")
+
+    def test_fallback_never_leaks_an_id_fragment(self):
+        """换一批 openid 也不该冒出编号 —— 拼的是常量，不是从 openid 上切下来的。"""
+        out = qqtext.normalize("<@!FFFFFFFFFFFF78D0AAAA>")
+        self.assertNotIn("78D0", out)
+        self.assertEqual(out, "@群友")
 
     def test_mention_in_the_middle_of_sentence(self):
         """跟内容里那个多余的 @ 不要留成「@@某人」。"""
@@ -58,7 +67,7 @@ class NormalizeTest(unittest.TestCase):
             raise RuntimeError("表炸了")
 
         self.assertEqual(qqtext.normalize("<@!A1B2C3D4E5>", mention_label=boom),
-                         "@群友D4E5")
+                         "@群友")
 
     def test_plain_nickname_kept(self):
         """明文 @昵称 是人写的，要留住（上层靠它认人、起名）。"""

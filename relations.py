@@ -361,8 +361,8 @@ def build_relation_note(rec, member_openid, mode="normal", now=None, other_names
 
     刻意不告诉模型具体分数：一旦它知道数字，就容易冒出「我们好感度 42」这种出戏的话。
 
-    other_names 是群里其他人的称呼对照（[(显示名, openid后四位)]）。没有它的时候，模型
-    会把群聊背景里飘过的别人的名字当成眼前这个人的，叫错人就是这么来的。
+    other_names 是群里其他人的称呼（一串名字）。没有它的时候，模型会把群聊背景里飘过的
+    别人的名字当成眼前这个人的，叫错人就是这么来的。
     """
     now = time.time() if now is None else now
     if not rec or not rec.get("interactions"):
@@ -379,10 +379,16 @@ def build_relation_note(rec, member_openid, mode="normal", now=None, other_names
     else:
         lines.append("- TA 没告诉过你名字，不要凭空编称呼，直接用「哥们/这位同学」这类泛称对话")
 
-    # 别人的称呼只属于别人。这一条是治「叫错人」的：背景里出现的名字不等于眼前这位
-    others = [(n, s) for n, s in (other_names or ()) if n and n != nick]
+    # 别人的称呼只属于别人。这一条是治「叫错人」的：背景里出现的名字不等于眼前这位。
+    # 只报称呼、不报 openid 尾巴：这段是喂给模型的，它一复读，群里看到的就是乱码。
+    # 兼容两种传法：纯名字，或者旧式的 (名字, 后四位) 二元组。
+    others = []
+    for item in (other_names or ()):
+        name = item if isinstance(item, str) else (item[0] if item else "")
+        if name and name != nick:
+            others.append(name)
     if others:
-        shown = "、".join(f"{n}（{s}）" for n, s in others[:8])
+        shown = "、".join(others[:8])
         lines.append(f"- 群里其他人的称呼：{shown}。这些只属于他们本人，"
                      "绝不能拿来称呼当前和你说话的这位")
 

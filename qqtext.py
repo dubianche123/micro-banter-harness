@@ -17,7 +17,7 @@ normalize() 把它们收敛成人话：能解的（被 @ 的人、表情配文�
 问「这是谁」，机器人那边什么都没收到，只能回一句「我不知道你 @ 的是谁」。
 所以 @ 会渲染成「@某人」，具体是谁由调用方通过 mention_label 注入
 （qqtext 不认识群友 —— 认人靠关系档案，那是上层的事）；解析不出来时退成
-「@群友XXXX」，仍然看得出「这里 @ 了个人」。
+「@群友」，仍然看得出「这里 @ 了个人」（**不附带 openid 尾巴**）。
 
 怎么扩展
 --------
@@ -61,7 +61,9 @@ _WS = re.compile(r"[ \t\u3000]+")
 _BLANK = re.compile(r"\n{3,}")
 
 # 没有解析器时，或者解析器也认不出这个 openid 时，用这个兜底（不含 @ 前缀）。
-MENTION_FALLBACK = "群友{}"
+# 认不出是谁时的兜底。**不含 openid 尾巴**：那串编号会顺着 prompt 流进回复里，
+# 人看不懂（见 _render_mention 的注释）。
+MENTION_FALLBACK = "群友"
 
 # 占位符类型 -> 渲染函数。渲染函数返回 None 或空串表示「这段没有可读信息」。
 RENDERERS = {}
@@ -80,7 +82,7 @@ def normalize(text, mention_label=None):
     """把一条消息的 content 规范成「人能读的文本」。
 
     mention_label 是 callable(openid) -> str|None，用来把被 @ 的人翻成人话
-    （上层拿关系档案实现）。不给也不影响使用，只是被 @ 的人退成「@群友XXXX」。
+    （上层拿关系档案实现）。不给也不影响使用，只是被 @ 的人退成「@群友」。
 
     返回空串表示这条消息没有可留存的内容（纯表情/纯图片/纯链接）。
     """
@@ -106,8 +108,11 @@ def _render_mention(openid, mention_label):
             label = mention_label(oid)
         except Exception:
             label = None       # 认人的表坏掉不该把整条消息带崩
-    # 留 4 位尾巴：没认领称呼的人全靠它彼此区分（和群聊背景里的「群友XXXX」同一套规矩）
-    return "@" + (label or MENTION_FALLBACK.format(oid[-4:]))
+    # 认不出是谁就只留「这里 @ 了个人」。
+    # 以前这里会拼上 openid 的后四位（「@群友78D0」），本意是让没留名的人彼此区分，
+    # 代价是这段机器编号会顺着会话历史和 prompt 一路流到模型嘴边 —— 它照着复读一句，
+    # 群里看到的就是一串人类读不懂的乱码。区分人的活归关系档案，不靠这串编号。
+    return "@" + (label or MENTION_FALLBACK)
 
 
 def _render_tag(match):

@@ -1140,11 +1140,13 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
         _sync_rename(group_id, old_nick, nick)
         if old_nick and old_nick != nick:
             await safe_reply(message,
-                f"（划掉旧名字重新落笔）收到！这位（{target[-4:]}）原来记作【{old_nick}】，"
-                f"往后改成【{nick}】——{owner}御赐，谁也不许擦。")
+                f"（划掉旧名字重新落笔）收到！往后【{old_nick}】就改记作【{nick}】"
+                f"——{owner}御赐，谁也不许擦。")
         else:
+            # 以前这里会带上对方 openid 的后四位，方便核对绑没绑错；代价是群里看到
+            # 一串读不懂的编号，而且模型还会照着复读。核对看日志就够了，回复里不写。
             await safe_reply(message,
-                f"（工工整整把名字写进点名册）收到！往后这位（{target[-4:]}）我就记作【{nick}】"
+                f"（工工整整把名字写进点名册）收到！往后这位我就记作【{nick}】"
                 f"——{owner}御赐的名字，谁也不许擦。")
         return
 
@@ -1214,9 +1216,12 @@ def _all_named(group_id):
 
 
 def _other_names(group_id, exclude_openid, limit=8):
-    """别人认领过的称呼。给模型划红线：这些名字已经有主了，别张冠李戴。"""
-    return [(r.get("nick"), oid[-4:]) for oid, r in _all_named(group_id)
-            if oid != exclude_openid][:limit]
+    """别人认领过的称呼。给模型划红线：这些名字已经有主了，别张冠李戴。
+
+    只给**称呼**，不带 openid 尾巴 —— 这段会进 prompt，模型一复读就成了群里的乱码。
+    """
+    return [r.get("nick") for oid, r in _all_named(group_id)
+            if oid != exclude_openid and r.get("nick")][:limit]
 
 
 def _resolve_name(group_id):
@@ -1771,7 +1776,8 @@ class GroupBot(botpy.Client):
                 lines = []
                 for h in hits[-8:]:
                     when = time.strftime("%m-%d %H:%M", time.localtime(h["ts"]))
-                    who = (_resolve_name(group_id)(h["sender"])) or h["sender"][-4:]
+                    # 翻旧账是**发出去给人看的**，没留名的就写「某位群友」，不吐 openid
+                    who = (_resolve_name(group_id)(h["sender"])) or "某位群友"
                     lines.append(f"[{when}] {who}：{h['text'][:60]}")
                 await safe_reply(message,
                     f"🔍 【翻旧账·{m_lookup.group(1)}】共 {len(hits)} 条，最近这些：\n" + "\n".join(lines))
@@ -1831,8 +1837,10 @@ class GroupBot(botpy.Client):
                 # 必须标出发言人。之前只给一串裸文本，模型分不清哪句是谁说的，
                 # 于是把别人认领的名字安到了当前这位头上 —— 叫错人就是这么来的
                 def _who(oid):
+                    # 没留名的就只说「一位群友」。以前这里拼 openid 后四位，
+                    # 结果模型把它当成名字复读进了回复 —— 群里没人看得懂。
                     r = RELATIONS.get(group_id, oid, create=False)
-                    return (r or {}).get("nick") or f"群友{oid[-4:]}"
+                    return (r or {}).get("nick") or "一位群友"
 
                 context_hint = refresh_names(
                     group_id, "\n".join(f"- {_who(b['sender'])}：{b['text']}" for b in prev))
