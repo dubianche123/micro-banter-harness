@@ -198,6 +198,12 @@ RENAMES = relations.RenameLedger()
 RENAMES.hydrate(STATE.data.get("renames", {}))
 STATE.register_collector(RENAMES.dump_into)
 
+# 群里平台侧的显示名（QQ 群昵称）。只在正文里有明文 @ 时才学得到，
+# 纯显示兜底 —— 认领过的称呼永远优先，它不参与任何判断，也不进模型上下文。
+DISPLAY_NAMES = relations.DisplayNames()
+DISPLAY_NAMES.hydrate(STATE.data.get("display_names", {}))
+STATE.register_collector(DISPLAY_NAMES.dump_into)
+
 # 原始消息归档：所有收到的消息按天存 JSONL。摘要是有损的，出错了要能回来查原文。
 ARCHIVE = archive_mod.MessageArchive(
     base_dir=config.BASE_DIR,
@@ -932,6 +938,31 @@ def extract_mentions(message, bot_id=""):
     return found
 
 
+# 正文里 @ 人时留下的**明文昵称**（QQ 群消息不给昵称字段，只给 openid）。
+# 切到空白或标点为止：昵称可能含空格（「A.A 贵阳老莫（全国可飞）」），
+# 宁可只记第一段，也不猜边界 —— 它只是显示兜底，短一点不会出事。
+# ⚠️ 句点**不在**断点里：「A.A」「L.L」这种是真名号，切了就只剩一个字、
+# 还会被「单字不记」挡掉。代价是「@老王.你好」会连着吃进去，中文群里极少见。
+_RE_PLAIN_MENTION = re.compile(r"@([^\s@，。！？；：、,!?;:（）()【】\[\]]{1,24})")
+_RE_TRAILING_DOTS = re.compile(r"[.．]+\Z")
+
+
+def mention_nick_from_content(content, bot_names=()):
+    """从正文里抠 @ 后面那个明文昵称。
+
+    ⚠️ 只在「这条消息只 @ 了一个人」时可信 —— 多人 @ 无法判断哪个名字对应哪个
+    openid，乱配会把名字挂错人。机器人自己的叫法要跳过（@它就是喊它，不是某个人）。
+    """
+    for m in _RE_PLAIN_MENTION.finditer(content or ""):
+        nick = _RE_TRAILING_DOTS.sub("", m.group(1).strip()).strip()
+        if not nick or nick == qqtext.MENTION_FALLBACK:
+            continue
+        if any(nick == b or nick.startswith(b) for b in (bot_names or ())):
+            continue
+        return nick
+    return None
+
+
 def mention_label_for(group_id, bot_id="", bot_display=""):
     """把 <@!openid> 翻成「群里怎么叫他」——给 qqtext.normalize 用的解析器。
 
@@ -940,7 +971,8 @@ def mention_label_for(group_id, bot_id="", bot_display=""):
     现在 @ 会渲染成「@某人」，是谁由这里回答：
       · 机器人自己 → 它的名字（群里看见的本来就是「@机器人名」）
       · 群主        → 他的称呼（没认领就是通用词「群主」），「@群主 这是谁」才答得上来
-      · 其他群友    → 档案里认领过的称呼；没认领就返回 None，由 qqtext 退成「@群友XXXX」
+      · 其他群友    → 档案里认领过的称呼；没认领就退回他群里挂的显示名（QQ 群昵称），
+                      再没有才由 qqtext 退成「@群友」
     刻意 create=False：被 @ 一下不该给谁凭空建一份档案。
     """
     owner = OWNER_OPENID
@@ -951,7 +983,7 @@ def mention_label_for(group_id, bot_id="", bot_display=""):
         if owner and openid == owner:
             return owner_label(group_id)
         rec = RELATIONS.get(group_id, openid, create=False) or {}
-        return rec.get("nick")
+        return rec.get("nick") or DISPLAY_NAMES.of(group_id, openid)
 
     return resolve
 
@@ -1143,10 +1175,12 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
                 f"（划掉旧名字重新落笔）收到！往后【{old_nick}】就改记作【{nick}】"
                 f"——{owner}御赐，谁也不许擦。")
         else:
-            # 以前这里会带上对方 openid 的后四位，方便核对绑没绑错；代价是群里看到
-            # 一串读不懂的编号，而且模型还会照着复读。核对看日志就够了，回复里不写。
+            # 以前这里带对方 openid 的后四位，方便核对绑没绑错；代价是群里看到一串
+            # 读不懂的编号，模型还会照着复读。现在改用他**群里挂的显示名**来核对 ——
+            # 一样能当场看出绑没绑错，而且是人话。
+            who = DISPLAY_NAMES.of(group_id, target) or "这位"
             await safe_reply(message,
-                f"（工工整整把名字写进点名册）收到！往后这位我就记作【{nick}】"
+                f"（工工整整把名字写进点名册）收到！往后【{who}】我就记作【{nick}】"
                 f"——{owner}御赐的名字，谁也不许擦。")
         return
 
@@ -1607,6 +1641,13 @@ class GroupBot(botpy.Client):
         mentioned_others = extract_mentions(message, bot_id)
         if mentioned_others:
             logger.info("🔗 捕捉到艾特对象 %s", "、".join(m[-4:] for m in mentioned_others))
+            # 事件体只给 openid，正文里留下的明文 @昵称 是唯一能知道「群里怎么显示他」
+            # 的地方。**只认单 @** —— 多人时没法判断名字对得上谁，乱配会挂错人。
+            if len(mentioned_others) == 1:
+                nick = mention_nick_from_content(raw_content, naming.bot_names())
+                if nick and DISPLAY_NAMES.learn(group_id, mentioned_others[0], nick):
+                    logger.info("🏷️ 记住群昵称 %s = %s", mentioned_others[0][-4:], nick)
+                    STATE.mark_dirty()
 
         # 规范化时把 @ 翻成人话（@ 了谁由档案回答）—— @ 不再被清掉，见 qqtext 的说明
         user_input = qqtext.normalize(
@@ -1776,8 +1817,10 @@ class GroupBot(botpy.Client):
                 lines = []
                 for h in hits[-8:]:
                     when = time.strftime("%m-%d %H:%M", time.localtime(h["ts"]))
-                    # 翻旧账是**发出去给人看的**，没留名的就写「某位群友」，不吐 openid
-                    who = (_resolve_name(group_id)(h["sender"])) or "某位群友"
+                    # 翻旧账是**发出去给人看的**：称呼 > 显示名 > 泛称，不吐 openid
+                    who = (_resolve_name(group_id)(h["sender"])
+                           or DISPLAY_NAMES.of(group_id, h["sender"])
+                           or "某位群友")
                     lines.append(f"[{when}] {who}：{h['text'][:60]}")
                 await safe_reply(message,
                     f"🔍 【翻旧账·{m_lookup.group(1)}】共 {len(hits)} 条，最近这些：\n" + "\n".join(lines))
@@ -1837,10 +1880,12 @@ class GroupBot(botpy.Client):
                 # 必须标出发言人。之前只给一串裸文本，模型分不清哪句是谁说的，
                 # 于是把别人认领的名字安到了当前这位头上 —— 叫错人就是这么来的
                 def _who(oid):
-                    # 没留名的就只说「一位群友」。以前这里拼 openid 后四位，
+                    # 认领过的称呼 > 群里挂的显示名 > 泛称。以前这里拼 openid 后四位，
                     # 结果模型把它当成名字复读进了回复 —— 群里没人看得懂。
                     r = RELATIONS.get(group_id, oid, create=False)
-                    return (r or {}).get("nick") or "一位群友"
+                    return ((r or {}).get("nick")
+                            or DISPLAY_NAMES.of(group_id, oid)
+                            or "一位群友")
 
                 context_hint = refresh_names(
                     group_id, "\n".join(f"- {_who(b['sender'])}：{b['text']}" for b in prev))

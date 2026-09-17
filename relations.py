@@ -551,6 +551,58 @@ class RenameLedger:
         return text
 
 
+class DisplayNames:
+    """群里**平台侧**的显示名（QQ 群昵称 / 群名片）。
+
+    跟主名、副名都不是一回事：这不是机器人给起的，是当事人自己在群里挂的名字。
+    来源只有一处 —— 正文里 @ 人时留下的明文昵称（事件体只给 openid，官方的群成员
+    接口又需要单独申请权限，实测 11253 无权限）。
+
+    它**只用于显示兜底**：认领过的称呼永远优先，它不参与任何判断、不进模型上下文。
+    记错了最坏也只是「叫了个不太准的名字」，不会像主名那样引发连锁改写。
+    """
+
+    def __init__(self, max_items=500):
+        self.max_items = int(max_items)
+        self.groups = {}   # group_id -> {openid: 群昵称}
+
+    # ── 存取 ──
+    def hydrate(self, raw):
+        n = 0
+        for gid, table in (raw or {}).items():
+            if not isinstance(table, dict):
+                continue
+            kept = {str(k): str(v) for k, v in table.items() if k and v}
+            if kept:
+                self.groups[gid] = kept
+                n += len(kept)
+        return n
+
+    def dump_into(self, data):
+        data["display_names"] = {g: t for g, t in self.groups.items() if t}
+
+    # ── 记账 ──
+    def learn(self, group_id, openid, nick):
+        """记下「这个 openid 在群里挂着这个名字」。
+
+        空名、单字不记（单字误伤面太大，跟 RenameLedger 同一个理由）。
+        是不是机器人自己的名字由调用方挡 —— 这里不认识 bot_names。
+        """
+        nick = (nick or "").strip().lstrip("@")
+        if not openid or len(nick) < 2:
+            return False
+        table = self.groups.setdefault(group_id, {})
+        if table.get(openid) == nick:
+            return False          # 已经记成这样了，别反复标脏
+        table[openid] = nick
+        while len(table) > self.max_items:
+            table.pop(next(iter(table)))
+        return True
+
+    def of(self, group_id, openid):
+        return (self.groups.get(group_id) or {}).get(openid)
+
+
 # ══════════════════════════ 昵称指令解析 ══════════════════════════
 
 # 群友给自己起名。真实输入比想象的自由，实测出现过：
