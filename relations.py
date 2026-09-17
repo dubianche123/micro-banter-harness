@@ -624,9 +624,14 @@ RE_SELF_NICK = re.compile(r"^(?:以后)?(?:叫我|我?叫)\s*(.{1,12})\s*$")
 # 群主给别人起名：@某人 叫他阿强 / 以后叫他阿强
 RE_OTHER_NICK = re.compile(r"^(?:以后)?叫(?:他|她|它)\s*(.{1,12})\s*$")
 # 艾特了别人之后的起名句式：「@阿澈 叫他阿强」「<机器人名>，叫@阿澈 小满」
-# ——「他/她/它」可省，因为被 @ 的那个人已经是明确宾语了
+# ——「他/她/它」可省，因为被 @ 的那个人已经是明确宾语了。
+# ⚠️ 前置的「他/她/它」也要认：真实语料是「小王他叫王洪文，记住了@老王」——
+#    陈述句的形式、祈使的意图（「你记住，他叫这个」）。少了这一个字，整句
+#    识别不出来，请求就掉进闲聊，机器人复读一遍名字说「知道了」，其实没改名。
+#    「他叫什么」这类疑问句交给 _clean_nick 的疑问词表挡。
 RE_AT_NICK = re.compile(
-    r"^(?:以后|往后|接下来|以后就)?(?:请)?(?:叫|称呼|记作|备注|改名|改叫|备注成)\s*(?:他|她|它)?\s*(.{1,12})\s*$"
+    r"^(?:以后|往后|接下来|以后就)?(?:请)?(?:他|她|它)?\s*"
+    r"(?:叫|称呼|记作|备注|改名|改叫|备注成)\s*(?:他|她|它)?\s*(.{1,12})\s*$"
 )
 # 艾特了别人之后直接甩一个名字：「@阿澈 小满」
 RE_AT_BARE = re.compile(r"^(.{1,12})$")
@@ -703,7 +708,12 @@ def strip_bot_address(text, bot_names=()):
     if not re.match(r"^(?:以后)?我(?:是|叫)", t):
         m = RE_BOT_ADDRESS.match(t)
         if m and m.end() < len(t):
-            t = t[m.end():].strip()
+            # ⚠️ 前缀里带着改名动词就不是称呼，是句子的一半：
+            # 「小星他叫王洪文，记住了」的前缀段恰好 ≤8 字，会被剥得只剩
+            # 「记住了」，整条改名意图直接蒸发（真实事故，2026-09-17）。
+            prefix = m.group(0)
+            if not any(w in prefix for w in ("叫", "称呼", "改名", "备注")):
+                t = t[m.end():].strip()
     return t.strip()
 
 
@@ -846,6 +856,9 @@ def looks_like_other_nick(text, bot_names=(), mentioned_others=()):
     raw = text or ""
     t = strip_bot_address(strip_at_text(raw) if mentioned else raw.strip(), bot_names)
     if not t:
+        return False
+    # 自报家门 / 给自己起名是 self 意图，别报成「没权限给别人起名」
+    if "叫我" in t or re.match(r"^(?:以后)?我叫", t) or RE_SELF_INTRO.match(t):
         return False
     # 有 @ 时被 @ 的人就是宾语（「叫@阿澈 阿强」）；没 @ 时是代词式（「叫他阿强」）。
     m = (RE_AT_NICK if mentioned else RE_OTHER_NICK).match(t)

@@ -314,6 +314,25 @@ class LooksLikeOtherNickTest(unittest.TestCase):
         """「叫他阿强」没 @ 人，但同样是明确意图 —— 一样不该静默掉进闲聊。"""
         self.assertTrue(relations.looks_like_other_nick("叫他阿强", bot_names=BOT))
 
+    def test_subject_before_the_verb_is_an_intent(self):
+        """真实语料：「小王他叫王洪文，记住了@老王」。
+
+        陈述句的形式、祈使的意图（「你记住，他叫这个」）。少了「他」前面这一位，
+        整句识别不出来，请求掉进闲聊 —— 机器人复读一遍名字说「知道了」，其实没改名。
+        """
+        self.assertTrue(relations.looks_like_other_nick(
+            "小星他叫王洪文，记住了@老王", bot_names=BOT, mentioned_others=self.MENTIONED))
+
+    def test_self_intent_is_not_read_as_renaming_someone_else(self):
+        """「我叫小满」是自报家门，别回一句「你没权限给别人改名」。"""
+        self.assertFalse(relations.looks_like_other_nick(
+            "我叫小满", bot_names=BOT, mentioned_others=self.MENTIONED))
+
+    def test_question_is_not_an_intent(self):
+        """「他叫什么」是提问 —— 疑问词表在 _clean_nick 里。"""
+        self.assertFalse(relations.looks_like_other_nick(
+            "小星他叫什么", bot_names=BOT, mentioned_others=self.MENTIONED))
+
     def test_bare_phrase_after_at_is_not_an_intent(self):
         """「@老王 你好」不算 —— `RE_AT_BARE` 是「任意 1-12 字」，认了就全中。"""
         self.assertFalse(relations.looks_like_other_nick(
