@@ -342,7 +342,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Name review accuracy | 4.7 **7/7**; 4.5-air misses homophones and false-positives; 3.5-flash-lite **8/8** | 2 sensitive names vs 6 normal nicknames |
 | Compression throughput | 4.5-air swallowed 260 messages / 4732 chars; 4.7 returned contentFilter 1301 on the same input | Evidence for using the weaker tier |
 | Cost gates | Global ≤3000 calls/day; per-group bucket of 8, refilling 1 per 5s | Caps flooding at roughly 12 calls/minute |
-| Regression suite | **222 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, prompt order, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name fallback, failover |
+| Regression suite | **229 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, prompt order, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, failover |
 
 ---
 
@@ -360,7 +360,8 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Canned example lines in prompts | The model copies examples as templates (5 of 5 outputs started with the same phrase), so prompts describe the effect instead |
 | Relying on prompts to keep relationships correct | Prompts do not stop homophones and do not stop invented kinship — so relationships live in the archive, old names in the ledger, and code enforces both |
 | Letting automatic logic touch primary names | One override and the person stops trusting the bot; the only write sources are "the person themself" and "owner-authorised rename", and an illegal source cannot even clear the name |
-| Calling the platform's group-member API for display names | The route exists but needs a separate permission grant (measured: `400 11253 应用无接口访问权限`); one more approval just to render a name is not worth it. Instead it learns the **plain-text nickname** left behind when someone is @-mentioned, and only when a message mentions **exactly one** person — with several mentions there is no way to tell which name belongs to whom, and mislabelling someone is worse than not knowing |
+| Calling the platform's group-member API for display names | The route exists but needs a separate permission grant (measured: `400 11253 应用无接口访问权限`); one more approval just to render a name is not worth it. Instead it learns the **plain-text nickname** left behind when someone is @-mentioned |
+| Guessing which openid a plain-text @ belongs to | `mentions` comes in the order the @s appear, so it pairs them one by one **when the plain-text count matches the mention count**, and drops the whole message when it does not (a hand-typed fake @, or an @ rendered as a placeholder). Mislabelling someone is worse than not knowing — the bot would call you by someone else's name in public. And when it does get one wrong there is a way out: the person says `call me X` and it is overridden, since a claimed name always wins |
 
 ---
 
@@ -399,7 +400,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | `storage.py` | State persistence, session context, token bucket, daily budget |
 | `qqtext.py` | Message normalisation: turn "human text + machine placeholders" into readable text |
 | `wordfilter.py` | Sensitive words: one wordlist shared by the naming entry point and the summary exit |
-| `tests/` | 222 regression tests + a few one-off probe scripts |
+| `tests/` | 229 regression tests + a few one-off probe scripts |
 
 Run the tests (fully offline, no network or keys):
 

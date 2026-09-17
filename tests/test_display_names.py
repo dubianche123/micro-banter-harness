@@ -11,6 +11,8 @@
 
 另外它是**显示兜底**：认领过的称呼永远优先，它不参与判断、不进模型上下文。
 """
+import inspect
+import re
 import sys
 import unittest
 
@@ -85,6 +87,73 @@ class LearningTest(unittest.TestCase):
         fresh = relations.DisplayNames()
         fresh.hydrate(data.get("display_names"))
         self.assertEqual(fresh.of(GROUP, ALICE), "奶龙")
+
+
+class PairingTest(unittest.TestCase):
+    """明文 @ 与被 @ 的 openid 怎么配成一对。
+
+    这是整条功能最容易出事的地方：**挂错人比不知道更糟** —— 机器人会当众用
+    别人的名字叫你。所以规则是「数量对得上才按顺序配」，对不上就整条放弃。
+    """
+
+    def setUp(self):
+        self.saved = bot.DISPLAY_NAMES
+        bot.DISPLAY_NAMES = relations.DisplayNames()
+
+    def tearDown(self):
+        bot.DISPLAY_NAMES = self.saved
+
+    def test_two_mentions_pair_in_order(self):
+        """日常互相 @ 是大头，不能只认单 @。"""
+        got = bot.learn_display_names(
+            GROUP, [ALICE, BOB], "@奶龙 @老莫 你们俩来一下")
+        self.assertEqual(got, 2)
+        self.assertEqual(bot.DISPLAY_NAMES.of(GROUP, ALICE), "奶龙")
+        self.assertEqual(bot.DISPLAY_NAMES.of(GROUP, BOB), "老莫")
+
+    def test_at_the_bot_does_not_shift_the_pairing(self):
+        """@机器人会同时出现在 mentions 和正文里 —— 两边都要剔掉，否则整体错位。
+
+        归档实证：`小王，叫@米浴 家豪`，`at:1`（@ 了机器人 + @ 了米浴）。
+        """
+        bot.learn_display_names(GROUP, [BOB], "小王，叫@米浴 家豪", bot_names=("小王",))
+        self.assertIsNone(bot.DISPLAY_NAMES.of(GROUP, ALICE))
+        self.assertEqual(bot.DISPLAY_NAMES.of(GROUP, BOB), "米浴")
+
+    def test_hand_typed_fake_mention_is_not_guessed(self):
+        """手打了个「@老王」但没真 @ —— 明文比 openid 多，宁可不记。"""
+        got = bot.learn_display_names(GROUP, [ALICE], "@奶龙 顺便@路人甲 也来")
+        self.assertEqual(got, 0, "数量对不上就别猜，猜错会当众叫错人")
+        self.assertIsNone(bot.DISPLAY_NAMES.of(GROUP, ALICE))
+
+    def test_placeholder_mention_is_not_guessed(self):
+        """@ 被渲染成 <@!openid> 占位符时明文会少一个，同样不记。"""
+        got = bot.learn_display_names(GROUP, [ALICE, BOB], "<@!%s> @老莫 来一下" % ALICE)
+        self.assertEqual(got, 0)
+        self.assertIsNone(bot.DISPLAY_NAMES.of(GROUP, BOB))
+
+    def test_it_binds_to_the_mentioned_person_not_the_sender(self):
+        """@ 的明文是**被 @ 那个人**的昵称，不是发言人的。"""
+        bot.learn_display_names(GROUP, [BOB], "喂，@老莫 在吗")
+        # 发言人（ALICE）不该被挂上「老莫」
+        self.assertIsNone(bot.DISPLAY_NAMES.of(GROUP, ALICE))
+        self.assertEqual(bot.DISPLAY_NAMES.of(GROUP, BOB), "老莫")
+
+    def test_nobody_mentioned_learns_nothing(self):
+        self.assertEqual(bot.learn_display_names(GROUP, [], "@奶龙 在吗"), 0)
+
+    def test_call_site_never_passes_the_sender(self):
+        """源码级守卫：喂进去的必须是**被 @ 的人**，不是发言人。
+
+        把 @ 的明文挂到发言人头上会全盘皆错 —— 大部分 @ 都是 @ 别人的。
+        """
+        calls = re.findall(r"(?<!def )learn_display_names\(([^)]*)\)",
+                           inspect.getsource(bot), re.S)
+        self.assertTrue(calls, "找不到调用点，这条守卫就失去意义了")
+        for call in calls:
+            self.assertIn("mentioned_others", call)
+            self.assertNotIn("author", call)
+            self.assertNotIn("sender", call)
 
 
 class DisplayFallbackTest(unittest.TestCase):

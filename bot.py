@@ -947,20 +947,53 @@ _RE_PLAIN_MENTION = re.compile(r"@([^\s@，。！？；：、,!?;:（）()【】
 _RE_TRAILING_DOTS = re.compile(r"[.．]+\Z")
 
 
-def mention_nick_from_content(content, bot_names=()):
-    """从正文里抠 @ 后面那个明文昵称。
+def mention_nicks_from_content(content, bot_names=()):
+    """按正文里出现的顺序，抠出所有 @ 后面的明文昵称。
 
-    ⚠️ 只在「这条消息只 @ 了一个人」时可信 —— 多人 @ 无法判断哪个名字对应哪个
-    openid，乱配会把名字挂错人。机器人自己的叫法要跳过（@它就是喊它，不是某个人）。
+    返回顺序和 `mentions` 一致，所以调用方只要校验**数量对得上**就能逐个配对。
+    机器人自己的叫法要跳过（@它就是喊它，不是某个人）—— 这一步同时把 mentions
+    里机器人那一格对齐剔掉，否则后面的配对会整体错位。
     """
+    nicks = []
     for m in _RE_PLAIN_MENTION.finditer(content or ""):
         nick = _RE_TRAILING_DOTS.sub("", m.group(1).strip()).strip()
         if not nick or nick == qqtext.MENTION_FALLBACK:
             continue
         if any(nick == b or nick.startswith(b) for b in (bot_names or ())):
             continue
-        return nick
-    return None
+        nicks.append(nick)
+    return nicks
+
+
+def mention_nick_from_content(content, bot_names=()):
+    """正文里第一个明文 @昵称；没有就 None。"""
+    nicks = mention_nicks_from_content(content, bot_names)
+    return nicks[0] if nicks else None
+
+
+def learn_display_names(group_id, openids, content, bot_names=()):
+    """拿一条消息里的明文 @昵称 去喂 `DISPLAY_NAMES`，返回学到了几个。
+
+    `openids` 是**已经剔掉机器人**的被 @ 列表，顺序跟正文里 @ 出现的顺序一致；
+    明文那边也同样剔掉了机器人的叫法，所以两边**数量对得上就能逐个配对**。
+
+    对不上就整条放弃：可能是有人手打了个假 @（明文多），也可能是 @ 被渲染成了
+    占位符（明文少）。猜错名字会当众叫错人，不如不记。
+    """
+    if not openids:
+        return 0
+    nicks = mention_nicks_from_content(content, bot_names)
+    if len(nicks) != len(openids):
+        if nicks:
+            logger.info("🏷️ 跳过群昵称学习：明文 @ %d 个、被 @ %d 个，对不上就不猜",
+                        len(nicks), len(openids))
+        return 0
+    learned = 0
+    for oid, nick in zip(openids, nicks):
+        if DISPLAY_NAMES.learn(group_id, oid, nick):
+            logger.info("🏷️ 记住群昵称 %s = %s", oid[-4:], nick)
+            learned += 1
+    return learned
 
 
 def mention_label_for(group_id, bot_id="", bot_display=""):
@@ -1641,13 +1674,11 @@ class GroupBot(botpy.Client):
         mentioned_others = extract_mentions(message, bot_id)
         if mentioned_others:
             logger.info("🔗 捕捉到艾特对象 %s", "、".join(m[-4:] for m in mentioned_others))
-            # 事件体只给 openid，正文里留下的明文 @昵称 是唯一能知道「群里怎么显示他」
-            # 的地方。**只认单 @** —— 多人时没法判断名字对得上谁，乱配会挂错人。
-            if len(mentioned_others) == 1:
-                nick = mention_nick_from_content(raw_content, naming.bot_names())
-                if nick and DISPLAY_NAMES.learn(group_id, mentioned_others[0], nick):
-                    logger.info("🏷️ 记住群昵称 %s = %s", mentioned_others[0][-4:], nick)
-                    STATE.mark_dirty()
+            # 事件体只给 openid，正文里留下的明文 @昵称 是唯一能知道「群里怎么
+            # 显示他」的地方 —— 日常互相 @ 是大头，别只认群主命名那一种。
+            if learn_display_names(
+                    group_id, mentioned_others, raw_content, naming.bot_names()):
+                STATE.mark_dirty()
 
         # 规范化时把 @ 翻成人话（@ 了谁由档案回答）—— @ 不再被清掉，见 qqtext 的说明
         user_input = qqtext.normalize(
