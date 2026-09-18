@@ -1178,7 +1178,7 @@ def _sync_clear(group_id, openid, old):
     """撤销称呼：把旧名字从历史文本里请出去。
 
     撤销了却不清理，等于「说过的话还压在窗口里」—— 模型照旧那么叫，当事人看着
-    就像撤销没生效。这里把它统一退成「（未留名·XXXX）」，谁都不用再被这么叫。
+    就像撤销没生效。这里把它统一退成 `relations.UNNAMED_LABEL`，谁都不用再被这么叫。
 
     同样的例外：这个名字如果同时还是别人的**主名**，一个字都不许动。撤销的是「我
     不用它了」，不是「这个名字作废了」—— 用这个名字的那位压根没撤销过什么。
@@ -1189,7 +1189,7 @@ def _sync_clear(group_id, openid, old):
     if old in RELATIONS.main_names(group_id):
         logger.info("⏭️ 跳过撤销同步：「%s」同时还是别人的主名", old)
         return False
-    label = f"（未留名·{str(openid)[-4:]}）"
+    label = relations.UNNAMED_LABEL
     n1 = SESSIONS.rename_user(group_id, old, label)
     n2 = DIGESTS.rename_in_memory(group_id, old, label)
     n3 = ARCHIVE.rename_in_memory_files(group_id, old, label)
@@ -1472,11 +1472,21 @@ def _other_names(group_id, exclude_openid, limit=8):
 
 
 def _resolve_name(group_id):
-    """摘要里要写人名：有认领过的昵称就用昵称，否则返回 None 由摘要侧退成短 ID。"""
+    """压缩记忆时把一行的发言人写成谁：称呼 → 群昵称 → None（由压缩侧退成通用词）。
 
+    ⚠️ 这里**不再退成 openid 后四位**。旧版 resolver 给不出名字时，压缩侧拿 `sender[-4:]`
+    顶上，于是摘要里出现了「6ABA」这种人名 —— 摘要每轮注入 prompt，模型就当群里真有个
+    人叫 6ABA，还会照着复读。没名字的人统一退成通用词，宁可少一点区分度。
+
+    第二个来源是**群昵称**（当事人自己在 QQ 群里挂的那个显示名，从明文 @ 里学来）。
+    它只是显示兜底、不参与判断，但拿来当压缩的署名比「一位群友」强得多。
+    """
     def _fn(member_openid):
         rec = RELATIONS.get(group_id, member_openid, create=False)
-        return (rec or {}).get("nick")
+        nick = (rec or {}).get("nick")
+        if nick:
+            return nick
+        return DISPLAY_NAMES.of(group_id, member_openid)
 
     return _fn
 
@@ -1680,7 +1690,9 @@ async def dun_promises(group_id):
     for r in PROMISES.list(group_id):
         due = r.get("due_text") or "没说时间"
         lines.append(f"- {r.get('who','有人')}：{r.get('what','')}（说的时间：{due}）")
-    payload = "未兑现清单：\n" + "\n".join(lines)
+    # 和长期记忆一样，账本里存的是**当时**那个称呼。不刷新的话，人改了名，
+    # 催债的话还是会用旧名叫人 —— 而且这段是直接进 prompt 的。
+    payload = refresh_names(group_id, "未兑现清单：\n" + "\n".join(lines))
     text = await call_model(
         [{"role": "system", "content": naming.render(digest_mod.SYSTEM_DUN)},
          {"role": "user", "content": payload}],
@@ -2031,7 +2043,8 @@ class GroupBot(botpy.Client):
                 return
 
             if any(k in user_input for k in PROMISE_TRIGGERS):
-                await safe_reply(message, PROMISES.render(group_id))
+                # 同上：发到群里之前先刷新，别拿旧名当众叫人
+                await safe_reply(message, refresh_names(group_id, PROMISES.render(group_id)))
                 return
 
         # 8.8 回原文查证：摘要出错时用它翻底稿

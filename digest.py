@@ -78,7 +78,20 @@ SYSTEM_REDUCE = """你在为 QQ 群「{bot}」整理长期记忆。你会拿到�
   这类内容至多在 topics 里留一条「敏感话题试探（不复述）」，不写是谁、不写内容。
   上一版摘要里若已带有这类内容，合并时**顺手删掉**，不要因为「它是旧记录」就留着。
 - 合并时：仍然新鲜的保留，已经过时/完结的丢掉，保持总量不膨胀。
+- 压缩稿里的署名有时会写成「一位群友」：那是**系统给不出名字的人**共用的泛称，
+  不是谁的外号也不是真名。别把它当成某一个人来总结，也别写进 people / promises 的 who；
+  真要提到就说「某位群友」，不要复读这个泛称。
 - 标签行之后不要输出任何内容。"""
+
+
+# 说话人没有名字时，压缩稿里写什么。
+#
+# ⚠️ 旧版写的是 openid 后四位（`sender[-4:]`）。后果不是「不好看」而是**泄漏**：
+# 摘要里从此出现「6ABA」这种人名，而摘要每轮注入 prompt —— 模型当群里真有个人叫 6ABA，
+# 照着复读，甚至拿去叫人。这跟「回复里冒出 openid 尾巴」是同一类事故，只是入口在压缩侧。
+# 没有名字就用通用词兜住：区分度差一点，但绝不把编号喂进模型嘴里。
+# ⚠️ 这个字面同时写进了上面的 SYSTEM_REDUCE（要让模型知道它是个泛称），改一处要改两处。
+UNAMED_WHO = "一位群友"
 
 
 def render_transcript(entries, resolver=None, max_chars=DEFAULT_CHUNK_CHARS):
@@ -86,7 +99,7 @@ def render_transcript(entries, resolver=None, max_chars=DEFAULT_CHUNK_CHARS):
     lines = []
     used = 0
     for e in entries:
-        who = (resolver(e["sender"]) if resolver else None) or e["sender"][-4:]
+        who = (resolver(e["sender"]) if resolver else None) or UNAMED_WHO
         text = (e.get("text") or "").strip().replace("\n", " ")
         if not text:
             continue
@@ -277,7 +290,7 @@ class GroupDigest:
         """把待压缩区切成若干块。每块控制在 chunk_chars 以内。"""
         blocks, cur, size = [], [], 0
         for e in slot["pending"]:
-            who = (resolver(e["sender"]) if resolver else None) or e["sender"][-4:]
+            who = (resolver(e["sender"]) if resolver else None) or UNAMED_WHO
             row_len = len(who) + len(e["text"]) + 4
             if size + row_len > self.chunk_chars and cur:
                 blocks.append(cur)

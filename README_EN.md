@@ -204,7 +204,9 @@ The fix is to treat names as **state**, not as text:
 | Who may write a primary name | Only the person themself (`claim`) or the owner (`owner`); summaries, model inference and any automatic sync are refused |
 | May two people share a name | No. Occupancy is tracked **by openid**, and the person's own current name is let through — so they can always overwrite their own |
 | Where old names go | The `RenameLedger` only records "this name used to belong to whom" and **never enters the model context** |
-| Before injection | A `refresh_names` pass rewrites old literals to the person's current name; revoked names become `（未留名·XXXX）` |
+| Before injection | A `refresh_names` pass rewrites old literals to the person's current name; revoked names become `（未留名）` — **with no id tail**, because a label carrying one gets read aloud as somebody's name |
+| A speaker with no name, when compressing | Signed as the generic 「一位群友」, **never as the last four of the openid**. The old fallback put strings like `6ABA` into the summary, and the summary is injected every turn — the model called people by it |
+| Stale names in the promise ledger | The nag prompt and the ledger command both run through the refresh pass first; the ledger stores whatever the name was back then |
 | Coverage | Group chronicle, daily memory, recent-chat background, the previous summary fed back to the compression model, and the 群史记 command output |
 | On rename/revoke | The session window, long-term memory and daily MD are scrubbed too; `archive/` raw logs are never touched |
 | Off limits | Any literal in the primary-name list (`main_names()`) — no automatic logic may rewrite it, including the rename/revoke history sync |
@@ -343,7 +345,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | One real siege (2026-09-18) | 17 rename requests in 13 minutes: 10 blocked, 7 let through | The ones that slipped through were no cleaner than the blocked ones — they simply were not the sample drawn. This is where the rename throttle below comes from |
 | Compression throughput | 4.5-air swallowed 260 messages / 4732 chars; 4.7 returned contentFilter 1301 on the same input | Evidence for using the weaker tier |
 | Cost gates | Global ≤3000 calls/day; per-group bucket of 8, refilling 1 per 5s | Caps flooding at roughly 12 calls/minute |
-| Regression suite | **279 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, prompt order, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, failover |
+| Regression suite | **293 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, digest bylines, prompt order, no canned examples in prompts, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, failover |
 
 ---
 
@@ -362,7 +364,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Multimodal (image reading) | Faces and images that read as nothing are dropped entirely, not archived — the complexity of adding multimodal far outweighs the benefit |
 | A database | One group's data fits in JSON; one less dependency is one less deployment trap |
 | Regex-enumerating message formats | A new platform placeholder is one new `@renderer`, the parser is untouched |
-| Canned example lines in prompts | The model copies examples as templates (5 of 5 outputs started with the same phrase), so prompts describe the effect instead |
+| Canned example lines in prompts | The model copies examples as templates (5 of 5 outputs started with the same phrase), so prompts describe the effect instead. ⚠️ This has to hold **all the way down**: on one day the bot said the same plumbing line 5 times and the same takeout line 6 times, and every one of them came from two example sentences in the deflecting-a-bait section. A prop written into the prompt becomes a verbal tic |
 | Relying on prompts to keep relationships correct | Prompts do not stop homophones and do not stop invented kinship — so relationships live in the archive, old names in the ledger, and code enforces both |
 | Letting automatic logic touch primary names | One override and the person stops trusting the bot; the only write sources are "the person themself" and "owner-authorised rename", and an illegal source cannot even clear the name |
 | Calling the platform's group-member API for display names | The route exists but needs a separate permission grant (measured: `400 11253 应用无接口访问权限`); one more approval just to render a name is not worth it. Instead it learns the **plain-text nickname** left behind when someone is @-mentioned |
@@ -387,7 +389,8 @@ This bot was written from day one for the assumption that it would be open-sourc
 | It stays on Zhipu and never returns to Gemini | Same as above. Lower `PROVIDER_CACHE_WARM_SECONDS` if that bothers you |
 | A name was rejected | Three gates: local wordlist (role words / honorifics / `sensitive_nicks.txt`) → model review → rename throttle. If the review service is down it lets names through, the wordlist still holds. Get rejected too often in a short window and renaming freezes group-wide for 20 minutes (log: `🧊 …进入冷静期`) — that is anti-flooding, not a failure |
 | Log says `🧊 …改名进入冷静期` | Somebody was hammering the rename endpoint. It clears after a while; the owner is exempt |
-| It still calls someone by an old name | Should no longer happen: names are refreshed before injection and scrubbed from history on rename. If it does, check whether the old name is registered in `renames` in `state.json` |
+| It still calls someone by an old name | Should no longer happen: names are refreshed before injection and scrubbed from history on rename. If it does, check whether the old name is registered in `renames` in `state.json`. ⚠️ Exception: **single-character names** are never recorded — replacing one would rewrite half the dictionary, so pick a name of two characters or more |
+| It keeps reusing the same metaphor or catchphrase | Check whether the prompt hard-codes an example (`tests/test_digest_names.py` guards this); a prop written into the prompt gets reused forever. It takes a restart to take effect, and the lines still sitting in the history window linger a turn or two |
 | It treats two people as one / invents a relationship | First check whether the old name reached `renames`; relationships come only from the `relations` archive — anything beyond that is the model improvising, so check whether 群史记 has been polluted |
 | Start completely over | Stop → delete `state.json` (memory / affinity / modes / ledger), `archive/`, `memory/` (raw logs and summaries) and `owner.txt` (re-claim the owner) |
 

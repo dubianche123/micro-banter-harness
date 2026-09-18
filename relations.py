@@ -492,7 +492,15 @@ def render_status(rec, member_openid, mode="normal", now=None):
 #
 # 台账记的是「这个名字曾经属于谁」。它**永远不进模型上下文**：只在注入之前用来把
 # 旧字面改写成当事人**当前**那一版称呼。于是模型看到的永远只有最新名字 ——
-# 改名后旧名自动跟着变，撤销称呼后旧名退成「（未留名·XXXX）」，改多少次都不会串。
+# 改名后旧名自动跟着变，撤销称呼后旧名退成 UNNAMED_LABEL，改多少次都不会串。
+#
+# ⚠️ 那个退成的标签刻意**不带 openid 后四位**。旧版是「（未留名·XXXX）」，本意是让两个
+# 都没留名的人区分得开；代价是这段文本会进 prompt，模型把它当成人名照抄 —— 实测群里真的
+# 出现过「（未留名·6ABA）这题超纲了」这样的回复。区分度换不来当众念一串编号，
+# 所以所有没留名的人都退成同一句，与「@群友」「一位群友」是同一套口径。
+UNNAMED_LABEL = "（未留名）"
+
+
 class RenameLedger:
     def __init__(self, max_items=300):
         self.max_items = int(max_items)
@@ -535,7 +543,11 @@ class RenameLedger:
     def refresh(self, group_id, text, label_of=None, current_names=()):
         """把文本里的旧称呼换成当事人的**当前**称呼，返回改写后的文本。
 
-        label_of(openid) 给出这个人现在叫什么；撤销过称呼的退成「（未留名·XXXX）」。
+        label_of(openid) 给出这个人现在叫什么；撤销过称呼的退成「（未留名）」。
+        ⚠️ **退成的标签里不带 ID 后四位**（旧版带）：这段文本是要进 prompt 的，
+        带编号的标签会被模型当成一个人名照抄出去 —— 实测它真的这么干过
+        （群里出现过「（未留名·6ABA）这题超纲了」这种回复）。区分两个未留名的人
+        不值得拿这个换，宁可让它们都叫「（未留名）」。
         current_names 是群里现在正被用着的称呼 —— 出现在里面的字面一律不碰，
         否则会把刚认领这个名字的那位一起改掉。
         """
@@ -546,7 +558,7 @@ class RenameLedger:
         for old, openid in list(table.items()):
             if old in taken or old not in text:
                 continue
-            label = (label_of(openid) if label_of else None) or f"（未留名·{str(openid)[-4:]}）"
+            label = (label_of(openid) if label_of else None) or UNNAMED_LABEL
             text = text.replace(old, label)
         return text
 

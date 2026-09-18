@@ -1,8 +1,11 @@
 """旧称呼台账的回归测试。
 
 要守住的只有一条：**喂给模型的文本里，一个人永远只有当前这一个称呼。**
-改过名就换成新的，撤销了就退成「（未留名·XXXX）」，改了多少次都不许留下旧字面 ——
+改过名就换成新的，撤销了就退成「（未留名）」，改了多少次都不许留下旧字面 ——
 否则模型会拿旧名去叫人，甚至把旧名和新名当成两个人。
+
+⚠️ 退成的那个标签里**不许带 openid 后四位**：这段文本是进 prompt 的，带编号的标签
+会被模型当成人名照抄（实测群里出现过「（未留名·6ABA）这题超纲了」这种回复）。
 """
 
 import os
@@ -12,6 +15,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from relations import RenameLedger  # noqa: E402
+import relations  # noqa: E402
 
 G = "GROUP_X"
 
@@ -36,7 +40,17 @@ class RenameLedgerTest(unittest.TestCase):
         self.led.note(G, "爸爸", "OPENID_A")
         self.labels["OPENID_A"] = None
         out = self.led.refresh(G, "爸爸来了", label_of=self.label_of)
-        self.assertEqual(out, "（未留名·ID_A）来了")
+        self.assertEqual(out, "（未留名）来了")
+        # 占位符里不许出现 openid 的任何片段
+        self.assertNotIn("ID_A", out)
+
+    def test_revoked_placeholder_never_carries_an_id(self):
+        """⚠️ 旧版这里是「（未留名·XXXX）」，编号顺着 prompt 进了模型嘴里。"""
+        self.led.note(G, "爸爸", "OPENID_A")
+        out = self.led.refresh(G, "爸爸来了", label_of=lambda _oid: None)
+        self.assertEqual(out, relations.UNNAMED_LABEL + "来了")
+        self.assertNotIn("ID_A", out)
+        self.assertNotIn("A）", out)
 
     def test_current_owner_of_the_name_is_untouched(self):
         """旧名又被别人认领了，就说明它现在有主 —— 不许再把它的历史算到前一个人头上。"""
