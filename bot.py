@@ -485,6 +485,21 @@ def _provider_available(name, allow_yield=True):
     return True
 
 
+def _pick_last_resort(chains):
+    """全员真熔断时挑一家「带伤上阵」—— 冷却剩余最短的那家。
+
+    破锁只解决了「互让」，解决不了「两家都在冷却」。实测事故（2026-09-18 14:18）：
+    智谱偶发一次 20s 超时被关 120s，而 Gemini 正卡在地区不可用上，于是整整两分钟
+    机器人只会回「刚才走神了」。**这时候沉默比多等一次更糟** —— 让最可能已经恢复
+    的那家再试一次，成了就成，不成也只是多等一轮。
+    """
+    cands = [p for p in PROVIDER_CHAIN if AI_CLIENTS.get(p) and (chains.get(p))]
+    if not cands:
+        return None
+    return min(cands,
+               key=lambda p: (_provider_state.get(p) or {}).get("cooldown_until", 0.0))
+
+
 def _provider_serving(name):
     """这家现在顶得上吗：有 client、且不在熔断冷却里。"""
     if not AI_CLIENTS.get(name):
@@ -581,6 +596,17 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
     if not allow_yield:
         logger.info("🚨 全员让位（互让死锁），本轮关闭缓存让位，只按熔断挑供应商")
 
+    # 连「只按熔断挑」都没人上 = 全员真熔断。这时谁都不出工，整条链等于哑了，
+    # 让冷却剩余最短的那家带伤上阵（见 _pick_last_resort）。
+    last_resort = None
+    if not any(AI_CLIENTS.get(p) and (chains.get(p))
+               and _provider_available(p, allow_yield=False) for p in PROVIDER_CHAIN):
+        last_resort = _pick_last_resort(chains)
+        if last_resort:
+            logger.warning(
+                "🩹 全员熔断，让 [%s] 带伤上阵 —— 沉默比多等一次更糟",
+                config.PROVIDER_PRESETS[last_resort]["label"])
+
     for pname in PROVIDER_CHAIN:
         elapsed = time.time() - start_time
         if elapsed >= config.AI_TOTAL_TIMEOUT:
@@ -591,7 +617,7 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
         models = chains.get(pname) or []
         if not clients or not models:
             continue
-        if not _provider_available(pname, allow_yield=allow_yield):
+        if pname != last_resort and not _provider_available(pname, allow_yield=allow_yield):
             logger.info("⏭️ 供应商 [%s] 让位中（%s），先用别家",
                         config.PROVIDER_PRESETS[pname]["label"], _provider_block_reason(pname))
             continue
@@ -604,7 +630,8 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
                 break
             # 熔断可能在上一个模型失败时刚触发，这时没必要再试这家剩下的模型。
             # 这里只看熔断不看缓存：同一家内部换模型不涉及「切回去要重新 prefill」。
-            if not _provider_available(pname, allow_yield=False):
+            # 带伤上阵的那家例外 —— 它本来就是越过熔断挑的。
+            if pname != last_resort and not _provider_available(pname, allow_yield=False):
                 break
             timeout_for_this = min(config.AI_TOTAL_TIMEOUT - elapsed,
                                    preset.get("timeout") or config.AI_TIMEOUT_SECONDS)

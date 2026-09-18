@@ -183,6 +183,72 @@ class FailoverTest(unittest.IsolatedAsyncioTestCase):
                                  f"{type(exc).__name__} 不该判为硬失败")
 
 
+class LastResortTest(unittest.TestCase):
+    """全员**真熔断**（不是互让）时，谁都不出工 = 整条链哑掉。
+
+    破锁解决不了这个：2026-09-18 14:18，智谱偶发一次 20s 超时被关 120s，而 Gemini
+    正卡在地区不可用上 —— 于是整整两分钟机器人只会回「刚才走神了」。
+    这时候沉默比多等一次更糟，得让最可能已经恢复的那家带伤上阵。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import bot as _bot
+        cls.bot = _bot
+
+    def setUp(self):
+        b = self.bot
+        self.saved = (dict(b._provider_state), dict(b.AI_CLIENTS))
+        now = time.time()
+        b._provider_state.clear()
+        # 两家都还在冷却：一个剩 97s，一个剩 80s
+        b._provider_state["gemini"] = {"fails": 2, "cooldown_until": now + 97}
+        b._provider_state["zhipu"] = {"fails": 2, "cooldown_until": now + 80}
+        b.AI_CLIENTS.update({"gemini": ["fake"], "zhipu": ["fake"]})
+
+    def tearDown(self):
+        b = self.bot
+        state, clients = self.saved
+        b._provider_state.clear(); b._provider_state.update(state)
+        b.AI_CLIENTS.clear(); b.AI_CLIENTS.update(clients)
+
+    def test_picks_the_one_closest_to_recovering(self):
+        chains = {"gemini": ["m1"], "zhipu": ["m2"]}
+        self.assertEqual(self.bot._pick_last_resort(chains), "zhipu",
+                         "该挑冷却剩余最短的那家，它最可能已经恢复")
+
+    def test_providers_without_a_client_are_not_candidates(self):
+        self.bot.AI_CLIENTS.pop("zhipu")
+        self.assertEqual(self.bot._pick_last_resort({"gemini": ["m1"], "zhipu": ["m2"]}),
+                         "gemini")
+
+    def test_returns_none_when_nobody_is_configured(self):
+        self.assertIsNone(self.bot._pick_last_resort({}))
+
+    def test_nobody_is_available_yet_someone_still_answers(self):
+        """端到端：全员熔断时，回复不该直接掉成兜底话术。"""
+        import types
+
+        b = self.bot
+        saved_chain, saved_clients = list(b.PROVIDER_CHAIN), dict(b.AI_CLIENTS)
+        b.PROVIDER_CHAIN[:] = ["gemini", "zhipu"]
+
+        async def ok_create(*a, **kw):
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(content="（带伤上阵）我还在。"))])
+
+        b.AI_CLIENTS["zhipu"] = [types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=ok_create)))]
+        try:
+            import asyncio
+            got = asyncio.run(b.call_model([{"role": "user", "content": "在吗"}], 100))
+        finally:
+            b.PROVIDER_CHAIN[:] = saved_chain
+            b.AI_CLIENTS.clear(); b.AI_CLIENTS.update(saved_clients)
+        self.assertEqual(got, "（带伤上阵）我还在。",
+                         "全员熔断时仍该试一次，而不是直接掉兜底话术")
+
+
 class ProviderYieldDeadlockTest(unittest.TestCase):
     """「缓存优先」的自锁：A 看到 B 顶得上就让位，B 看到 A 顶得上也让位 —— 全哑。
 
