@@ -164,6 +164,15 @@ PROVIDER_FAIL_THRESHOLD = _env_int("PROVIDER_FAIL_THRESHOLD", 2)
 # ⚠️ 这只是**最短**让位时间，不是唯一条件 —— 能不能回来还要看下面那条缓存窗口。
 PROVIDER_COOLDOWN_SECONDS = _env_float("PROVIDER_COOLDOWN_SECONDS", 120.0)
 
+# 结构性故障（地区封禁 / Key 失效）的隔离时长，默认 30 分钟。
+# 这一类跟上面的「抖动」不是一回事：Gemini 的 `User location is not supported`
+# 由出口 IP 决定，两分钟后再试必然还是同一个错。实测 2026-09-17~18 一天半里
+# 这类 400 撞了 **39 次** —— 每两分钟被放回来重撞一轮，每轮还会顺着模型梯队连试 3 档，
+# 全员熔断时更要被当成「冷却剩余最短」的那家挑去带伤上阵。
+# 30 分钟的依据：够长到不再刷无效请求，也够短到换代理或换 Key 之后能在可接受时间内自愈
+# （真要立刻恢复，改完重启进程即可）。
+PROVIDER_FATAL_COOLDOWN_SECONDS = _env_float("PROVIDER_FATAL_COOLDOWN_SECONDS", 1800.0)
+
 # 缓存还热着的窗口：群里距最后一条消息不超过这么久，就认为被让位那家的前缀缓存
 # 还没凉，**先别切回去**（切换要重新 prefill 一整段，等于把缓存白扔）。
 # 等群静到超过这个时长，缓存该过期了，这时候回去重试才是免费的。

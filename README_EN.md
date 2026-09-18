@@ -260,6 +260,9 @@ Two companion rules:
 
 - **Hard failures** (proxy down, region unsupported, invalid key) are not counted: one occurrence yields immediately. No model or key swap rescues those, and retrying only makes the group wait ten-plus seconds. The check must look at **the exception class name as well as the message**: when the proxy dies, `str(e)` is just `Connection error.` and contains none of the keywords.
 - **Only yield if somebody else can serve.** If the fallback is down too, the primary must step up — otherwise one tripped breaker plus one dead provider takes the whole chain offline.
+- **Structural failures are isolated separately** (`_is_fatal_fail` / `PROVIDER_FATAL_COOLDOWN_SECONDS`, default 30 minutes). Region blocks and revoked keys differ from network jitter not in severity but in **whether they can recover on their own** — the former is decided by the egress IP or the credential, so retrying two minutes later returns the exact same error. Measured across 2026-09-17~18: Gemini sat on `User location is not supported` for a day and a half and hit that 400 **39 times** (every 120-second cooldown released another round, each round trying three model tiers), and during full-blown cooldown it was even picked as the last resort because it "had the shortest cooldown left". Now one hit quarantines it for a long window, and it may not take the last-resort slot unless nobody else is left.
+
+The log distinguishes the two: "cooling down, Xs left" is worth waiting for; "structural failure (region/credentials), isolated" is not.
 
 ### Measured: how long does the cache actually live
 
@@ -347,7 +350,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | One real siege (2026-09-18) | 17 rename requests in 13 minutes: 10 blocked, 7 let through | The ones that slipped through were no cleaner than the blocked ones — they simply were not the sample drawn. This is where the rename throttle below comes from |
 | Compression throughput | 4.5-air swallowed 260 messages / 4732 chars; 4.7 returned contentFilter 1301 on the same input | Evidence for using the weaker tier |
 | Cost gates | Global ≤3000 calls/day; per-group bucket of 8, refilling 1 per 5s | Caps flooding at roughly 12 calls/minute |
-| Regression suite | **305 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, digest bylines, the rename lock, prompt order, no canned examples in prompts, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, failover |
+| Regression suite | **316 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, digest bylines, the rename lock, prompt order, no canned examples in prompts, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, structural-failure isolation, failover |
 
 ---
 

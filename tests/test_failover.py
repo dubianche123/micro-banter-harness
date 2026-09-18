@@ -302,5 +302,158 @@ class ProviderYieldDeadlockTest(unittest.TestCase):
         self.assertEqual(avail, [], "熔断期内不该有人出工")
 
 
+class StructuralFailureTest(unittest.TestCase):
+    """地区封禁 / Key 失效这类「等一分钟也不会好」的错，不该每两分钟被放回来重撞一遍。
+
+    起因是 2026-09-17~18 的日志复盘：Gemini 卡在 `User location is not supported`
+    整整一天半，其间这类 400 撞了 **39 次** —— 每次冷却（120s）一到就被放回来重撞一轮，
+    每轮还要顺着模型梯队连试 3 档；全员熔断时更离谱，它因为「冷却剩余最短」被挑去
+    「带伤上阵」（14:53、14:56 两次），而它这一轮必挂。
+
+    所以这类错要有自己的隔离策略：长得多的隔离窗 + 不许抢占带伤上阵的机会。
+    """
+
+    # 日志里 Gemini 返回的原文，一字不改 —— 用来钉死「认得出它」这件事
+    GEMINI_REGION_ERR = ("Error code: 400 - [{'error': {'code': 400, 'message': "
+                         "'User location is not supported for the API use.'")
+
+    @classmethod
+    def setUpClass(cls):
+        import bot as _bot
+        cls.bot = _bot
+
+    def setUp(self):
+        b = self.bot
+        self.saved = (dict(b._provider_state), dict(b.AI_CLIENTS))
+        b._provider_state.clear()
+        b.AI_CLIENTS.update({"gemini": ["fake"], "zhipu": ["fake"]})
+
+    def tearDown(self):
+        b = self.bot
+        state, clients = self.saved
+        b._provider_state.clear(); b._provider_state.update(state)
+        b.AI_CLIENTS.clear(); b.AI_CLIENTS.update(clients)
+
+    def test_region_block_is_recognized(self):
+        """正例：必须从真实错误串里认出结构性故障。"""
+        self.assertTrue(self.bot._is_fatal_fail(RuntimeError(self.GEMINI_REGION_ERR)))
+
+    def test_bad_credentials_are_recognized(self):
+        """凭证失效同属这一类 —— Key 错了也不会因为等两分钟而变对。"""
+        for msg in ("Error code: 401 - {'error': {'message': 'invalid api key'}}",
+                    "Error code: 403 - permission denied for the api use"):
+            with self.subTest(msg=msg[:40]):
+                self.assertTrue(self.bot._is_fatal_fail(RuntimeError(msg)))
+
+    def test_ordinary_outages_are_not_structural(self):
+        """反例：抖动（超时/代理断/5xx/限流）还得留在短冷却那条路上，别被隔离半小时。"""
+        import httpx
+        from openai import APIConnectionError, APITimeoutError
+        req = httpx.Request("POST", "https://example.invalid")
+        for exc in (APIConnectionError(request=req), APITimeoutError(request=req),
+                    RuntimeError("Error code: 500 - internal error"),
+                    RuntimeError("Error code: 429 - RESOURCE_EXHAUSTED")):
+            with self.subTest(exc=type(exc).__name__):
+                self.assertFalse(self.bot._is_fatal_fail(exc),
+                                 f"{type(exc).__name__} 只是抖动，不该按结构性故障隔离")
+
+    def test_structural_failure_gets_the_long_isolation(self):
+        """隔离时长要用长窗，而不是 PROVIDER_COOLDOWN_SECONDS。"""
+        self.bot._note_provider_fail("gemini", fatal=True)
+        st = self.bot._provider_state["gemini"]
+        left = st["cooldown_until"] - time.time()
+        self.assertGreater(
+            left, config.PROVIDER_COOLDOWN_SECONDS,
+            "结构性故障的隔离窗必须长于普通抖动，否则等于没改")
+        self.assertLessEqual(left, config.PROVIDER_FATAL_COOLDOWN_SECONDS + 1,
+                             "不该无限期拉黑，换代理/换 Key 后要能自愈")
+        self.assertGreater(st["fatal_until"], time.time())
+
+    def test_structural_failure_needs_no_threshold(self):
+        """一次就够 —— 这类错不存在「凑几次再判定」，第一次就是结论。"""
+        self.bot._note_provider_fail("gemini", fatal=True)
+        self.assertGreater(self.bot._provider_state["gemini"]["cooldown_until"], time.time())
+
+    def test_plain_outage_keeps_the_short_cooldown(self):
+        """对照组：普通硬失败仍然走短冷却，别把改动扩散到别的场景。"""
+        self.bot._note_provider_fail("gemini", hard=True)
+        st = self.bot._provider_state["gemini"]
+        self.assertLessEqual(st["cooldown_until"] - time.time(),
+                             config.PROVIDER_COOLDOWN_SECONDS + 1)
+        self.assertEqual(st.get("fatal_until", 0.0), 0.0)
+
+    def test_blocks_reason_says_why(self):
+        """日志要分得清「还在冷却」和「结构性出局」，否则下次排查还得翻源码。"""
+        self.bot._note_provider_fail("gemini", fatal=True)
+        self.assertIn("结构性故障", self.bot._provider_block_reason("gemini"))
+        self.bot._provider_state["gemini"] = {
+            "fails": 0, "cooldown_until": time.time() + 30, "fatal_until": 0.0}
+        self.assertIn("熔断", self.bot._provider_block_reason("gemini"))
+        self.assertNotIn("结构性故障", self.bot._provider_block_reason("gemini"))
+
+    def test_structural_outage_loses_the_last_resort_slot(self):
+        """它冷却剩得最短也不该被挑去带伤上阵 —— 那一轮必挂。"""
+        now = time.time()
+        self.bot._provider_state["gemini"] = {
+            "fails": 0, "cooldown_until": now + 30, "fatal_until": now + 30}
+        self.bot._provider_state["zhipu"] = {
+            "fails": 0, "cooldown_until": now + 300, "fatal_until": 0.0}
+        self.assertEqual(self.bot._pick_last_resort({"gemini": ["m"], "zhipu": ["m"]}),
+                         "zhipu",
+                         "结构性出局的那家必须让位给还有戏的那家")
+
+    def test_everybody_structural_still_answers(self):
+        """别无选择时仍然按老规矩挑剩余最短的 —— 沉默比多等一次更糟。"""
+        now = time.time()
+        self.bot._provider_state["gemini"] = {
+            "fails": 0, "cooldown_until": now + 30, "fatal_until": now + 30}
+        self.bot._provider_state["zhipu"] = {
+            "fails": 0, "cooldown_until": now + 300, "fatal_until": now + 300}
+        self.assertEqual(self.bot._pick_last_resort({"gemini": ["m"], "zhipu": ["m"]}),
+                         "gemini")
+
+    def test_recovery_clears_the_structural_flag(self):
+        """应上答了就得把帽子摘掉，否则它恢复了却还排在最后。"""
+        self.bot._note_provider_fail("gemini", fatal=True)
+        self.bot._note_provider_ok("gemini")
+        st = self.bot._provider_state["gemini"]
+        self.assertEqual(st["cooldown_until"], 0.0)
+        self.assertEqual(st["fatal_until"], 0.0)
+
+    def test_structural_outage_is_not_called_while_isolated(self):
+        """端到端：隔离期内这家**一次都不能被调用**，话由别家说。"""
+        import asyncio
+        import types
+
+        b = self.bot
+        b._note_provider_fail("gemini", fatal=True)
+
+        calls = {"gemini": 0, "zhipu": 0}
+
+        def make(who):
+            async def create(*a, **kw):
+                calls[who] += 1
+                if who == "gemini":
+                    raise RuntimeError(self.GEMINI_REGION_ERR)
+                return types.SimpleNamespace(choices=[types.SimpleNamespace(
+                    message=types.SimpleNamespace(content="我来答"))])
+            return create
+
+        b.AI_CLIENTS["gemini"] = [types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=make("gemini"))))]
+        b.AI_CLIENTS["zhipu"] = [types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=make("zhipu"))))]
+
+        saved_chain = list(b.PROVIDER_CHAIN)
+        b.PROVIDER_CHAIN[:] = ["gemini", "zhipu"]
+        try:
+            got = asyncio.run(b.call_model([{"role": "user", "content": "在吗"}], 100))
+        finally:
+            b.PROVIDER_CHAIN[:] = saved_chain
+        self.assertEqual(got, "我来答")
+        self.assertEqual(calls["gemini"], 0,
+                         "已知结构性出局的家庭还不重撞 —— 这正是这次修复的目的")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

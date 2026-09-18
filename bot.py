@@ -170,6 +170,20 @@ _HARD_FAIL_MARKS = (
     "api key not valid", "api_key_invalid", "invalid api key", "permission denied",
 )
 
+# 「结构性故障」＝上面的硬失败里，那种**等一分钟也不会好**的子集：地区封禁、Key 失效。
+# 它们和抖动的区别不是严重等级，而是**会不会自己恢复** —— 代理抖一下几十秒就回来，
+# 而 Gemini 的 400 "User location is not supported" 是出口 IP 决定的，两分钟后再试还是同一个错。
+#
+# 实测（2026-09-17 02:15 → 09-18 15:45，见日志复盘）：这一类 400 在一天半里撞了 **39 次**，
+# 每两分钟冷却一到期就被放回来重撞一轮（每次还会顺着模型梯队连试 3 档），
+# 全员熔断时甚至被 `_pick_last_resort` 当成「冷却剩余最短」的那家挑去带伤上阵 ——
+# 明知道它结构性不可用还让它出工。所以这类错要单独记一笔长的隔离窗，并且在里面
+# 不许它在「带伤上阵」里跟别家抢。
+_FATAL_FAIL_MARKS = (
+    "location is not supported", "not supported for the api use",
+    "api key not valid", "api_key_invalid", "invalid api key", "permission denied",
+)
+
 # ══════════════════════ 3. 持久化状态 ══════════════════════
 
 STATE = storage.StateStore(config.STATE_FILE, config.STATE_SAVE_INTERVAL)
@@ -499,10 +513,20 @@ def _pick_last_resort(chains):
     机器人只会回「刚才走神了」。**这时候沉默比多等一次更糟** —— 让最可能已经恢复
     的那家再试一次，成了就成，不成也只是多等一轮。
     """
+    def _still_fatal(p):
+        """这家是不是还戴着「结构性出局」的帽子（地区封禁 / Key 失效）。"""
+        return time.time() < (_provider_state.get(p) or {}).get("fatal_until", 0.0)
+
     cands = [p for p in PROVIDER_CHAIN if AI_CLIENTS.get(p) and (chains.get(p))]
     if not cands:
         return None
-    return min(cands,
+
+    # 结构性出局的那家不许跟别家抢「带伤上阵」的机会：它只是恰好冷却剩得短，
+    # 而它这轮必挂（实测 14:53：让 [Google Gemini] 带伤上阵 → 立刻又一个
+    # "User location is not supported"，白等一轮）。只有别无选择时才轮到它。
+    healthy = [p for p in cands if not _still_fatal(p)]
+    pool = healthy or cands
+    return min(pool,
                key=lambda p: (_provider_state.get(p) or {}).get("cooldown_until", 0.0))
 
 
@@ -519,6 +543,10 @@ def _provider_block_reason(name):
     st = _provider_state.get(name) or {}
     if time.time() < st.get("cooldown_until", 0.0):
         left = st["cooldown_until"] - time.time()
+        # 冷却原因要分开说：这两种不可用**能不能靠等**完全不同 —— 前者等一分钟可能就回来了，
+        # 后者（地区封禁/凭证失效）等多久都一样，看到它就别再盼它恢复了。
+        if time.time() < st.get("fatal_until", 0.0):
+            return f"结构性故障（地区/凭证），隔离中，还剩 {left:.0f}s"
         return f"熔断中，还剩 {left:.0f}s"
     idle = time.time() - _last_msg_ts()
     return f"缓存还热（群 {idle:.0f}s 前还在聊 < {config.PROVIDER_CACHE_WARM_SECONDS:.0f}s），先不切回去"
@@ -545,9 +573,35 @@ def _is_hard_fail(exc):
     return any(k in f"{type(exc).__name__}: {exc}".lower() for k in _HARD_FAIL_MARKS)
 
 
-def _note_provider_fail(name, hard=False):
-    """记一次失败。hard=连接层错误，直接拉黑，不等够阈值。"""
+def _is_fatal_fail(exc):
+    """这类错是不是「等冷却过了也不会好」的那种（地区封禁 / Key 失效）。
+
+    是 `_is_hard_fail` 的子集：hard 说的是「这家整条链路现在不通，直接拉黑」，
+    fatal 说的是「它不是在抖，它是出局了」——所以隔离窗要长得多，见 `config
+    .PROVIDER_FATAL_COOLDOWN_SECONDS`。判定串同样走「类名 + 消息」并小写，
+    跟 `_is_hard_fail` 保持一致。
+    """
+    return any(k in f"{type(exc).__name__}: {exc}".lower() for k in _FATAL_FAIL_MARKS)
+
+
+def _note_provider_fail(name, hard=False, fatal=False):
+    """记一次失败。hard=连接层错误，直接拉黑，不等够阈值。
+
+    fatal=地区封禁/凭证失效这类「等也不会好」的错：不看失败次数，直接关进长隔离窗，
+    并记下 `fatal_until` —— 「冷却剩多久」和「是不是结构性出局」是两件事，
+    `_pick_last_resort` 要靠后者判断该不该让它带伤上阵（见上面 14:53 那次教训）。
+    """
     st = _provider_state.setdefault(name, {"fails": 0, "cooldown_until": 0.0})
+    now = time.time()
+    label = config.PROVIDER_PRESETS[name]["label"]
+    if fatal:
+        st["fails"] = 0
+        st["cooldown_until"] = now + config.PROVIDER_FATAL_COOLDOWN_SECONDS
+        st["fatal_until"] = st["cooldown_until"]
+        logger.warning("🚫 供应商 [%s] 结构性故障（地区封禁或凭证失效），隔离 %.0f 分钟 "
+                       "—— 这类错不会因为等多久而好转，别每两分钟回来重撞一次",
+                       label, config.PROVIDER_FATAL_COOLDOWN_SECONDS / 60.0)
+        return
     st["fails"] += config.PROVIDER_FAIL_THRESHOLD if hard else 1
     if st["fails"] >= config.PROVIDER_FAIL_THRESHOLD:
         st["fails"] = 0
@@ -558,10 +612,16 @@ def _note_provider_fail(name, hard=False):
 
 
 def _note_provider_ok(name):
+    """应答成功 = 这家已经回来，连带把结构性出局的标记一起清掉。
+
+    ⚠️ 不能只清 `cooldown_until`：`fatal_until` 是另一件事留的（「别让它带伤上阵」），
+    漏清会在它明明已经恢复正常后仍然被排除在「最后人选」之外。
+    """
     st = _provider_state.get(name)
     if st:
         st["fails"] = 0
         st["cooldown_until"] = 0.0
+        st["fatal_until"] = 0.0
 
 
 async def call_model(messages, max_tokens, tier="chat", temperature=None):
@@ -684,7 +744,9 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
                         models.remove(model_name)
                         models.append(model_name)
                 else:
-                    _note_provider_fail(pname, hard=_is_hard_fail(e))
+                    # fatal 是 hard 的子集：先用 loose 的 hard 判「要不要立刻拉黑」，
+                    # 再用严格的 fatal 判「这一觉要多长」。
+                    _note_provider_fail(pname, hard=_is_hard_fail(e), fatal=_is_fatal_fail(e))
         logger.warning("⤵️ 供应商 [%s] 全部模型不可用，回落到下一家", preset["label"])
     return None
 
