@@ -264,6 +264,8 @@ Two companion rules:
 
 The log distinguishes the two: "cooling down, Xs left" is worth waiting for; "structural failure (region/credentials), isolated" is not.
 
+One companion rule about how hard to kick (**do not bench a whole provider when nobody else is backing it up**): a single model timing out does not mean the provider's link is gone — 4.7 being slow says nothing about whether 4.5-air can answer. So **when somebody else can serve**, one hard failure benches the provider immediately (don't make the group wait through every tier); **when nobody else can serve**, it is downgraded to an ordinary failure (recorded, and only benched once the threshold is reached), so the cheaper tiers left in the ladder still get their shot. Measured incident (2026-09-18 16:11): Gemini was structurally isolated, one 20-second timeout on Zhipu 4.7 benched the entire provider for 120s, and 4.5-air / 4-flash never got a single attempt — the group ate a fallback line. `AI_TOTAL_TIMEOUT` (30s) still bounds the worst case.
+
 ### Measured: how long does the cache actually live
 
 `tests/probe_cache_ttl.py` (1340-char stable prefix, a few dozen tokens in total):
@@ -350,7 +352,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | One real siege (2026-09-18) | 17 rename requests in 13 minutes: 10 blocked, 7 let through | The ones that slipped through were no cleaner than the blocked ones — they simply were not the sample drawn. This is where the rename throttle below comes from |
 | Compression throughput | 4.5-air swallowed 260 messages / 4732 chars; 4.7 returned contentFilter 1301 on the same input | Evidence for using the weaker tier |
 | Cost gates | Global ≤3000 calls/day; per-group bucket of 8, refilling 1 per 5s | Caps flooding at roughly 12 calls/minute |
-| Regression suite | **316 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, digest bylines, the rename lock, prompt order, no canned examples in prompts, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, structural-failure isolation, failover |
+| Regression suite | **321 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, digest bylines, the rename lock, prompt order, no canned examples in prompts, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, structural-failure isolation, failover |
 
 ---
 

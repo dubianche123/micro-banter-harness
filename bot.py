@@ -505,6 +505,19 @@ def _provider_available(name, allow_yield=True):
     return True
 
 
+def _someone_else_can_serve(name, chains):
+    """除这家以外，还有别人能出工吗（不看缓存、只看熔断）。
+
+    用来回答「这一脚我可以踹多重」：有别家兜着时，单个模型超时就该立刻把整家摁下去
+    （它后面的模型大概率也是一样的慢，别让用户白等）；**没人兜着时**就得手下留情 ——
+    整家拉黑等于这一次彻底没话说，而剩下的便宜模型很可能立刻就答上来了。
+    """
+    return any(
+        p != name and AI_CLIENTS.get(p) and chains.get(p)
+        and _provider_available(p, allow_yield=False)
+        for p in PROVIDER_CHAIN)
+
+
 def _pick_last_resort(chains):
     """全员真熔断时挑一家「带伤上阵」—— 冷却剩余最短的那家。
 
@@ -744,9 +757,21 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
                         models.remove(model_name)
                         models.append(model_name)
                 else:
-                    # fatal 是 hard 的子集：先用 loose 的 hard 判「要不要立刻拉黑」，
+                    # fatal 是 hard 的子集：先用宽松的 hard 判「要不要立刻拉黑」，
                     # 再用严格的 fatal 判「这一觉要多长」。
-                    _note_provider_fail(pname, hard=_is_hard_fail(e), fatal=_is_fatal_fail(e))
+                    fatal = _is_fatal_fail(e)
+                    hard = _is_hard_fail(e)
+                    # ⚠️ 单模型超时 ≠ 整家断线：4.7 慢起来不代表 4.5-air 也答不上来。
+                    # 但**有别家兜着**时可以狠一点（一次就把这家摁下去，免得每档都白等一轮）；
+                    # **没人兜着**时必须换轻手 —— 此时把它整家拉黑 = 这一次彻底没话说，
+                    # 而它梯队里剩下的便宜模型很可能一两句就答上来了。
+                    # 实测场景（2026-09-18 16:11）：Gemini 正处结构性隔离，智谱 4.7 一次 20s
+                    # 超时 → 整家立刻降温 120s，4.5-air / 4-flash 连试都没试，用户直接吃掉
+                    # 一句兜底话术。总超时 AI_TOTAL_TIMEOUT 仍在兜着最坏情况。
+                    if hard and not fatal and not _someone_else_can_serve(pname, chains):
+                        _note_provider_fail(pname)  # 降级为普通失败：记一笔，凑够阈值才禁
+                    else:
+                        _note_provider_fail(pname, hard=hard, fatal=fatal)
         logger.warning("⤵️ 供应商 [%s] 全部模型不可用，回落到下一家", preset["label"])
     return None
 

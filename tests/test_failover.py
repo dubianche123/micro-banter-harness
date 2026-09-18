@@ -455,5 +455,133 @@ class StructuralFailureTest(unittest.TestCase):
                          "已知结构性出局的家庭还不重撞 —— 这正是这次修复的目的")
 
 
+class SoloProviderLadderTest(unittest.IsolatedAsyncioTestCase):
+    """只剩一家可用时，单个模型超时**不许把整家摁下去**。
+
+    起因是 2026-09-18 16:11：Gemini 处于结构性隔离，智谱的 4.7 一次 20s 超时，
+    代码按「硬失败」立刻把智谱整家关了 120s —— 梯队里剩的 4.5-air / 4-flash
+    **连一次机会都没有**，用户当场吃到一句兜底话术。
+
+    所以「踢多少」要看还有没有别人兜着：有人兜着就狠（一次即禁，别让用户每档都白等），
+    没人兜着就得轻手（记一笔，凑够阈值才禁），让便宜的那几档有机会把话说完。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import bot as _bot
+        cls.bot = _bot
+
+    def setUp(self):
+        b = self.bot
+        self.saved = (dict(b._provider_state), dict(b.AI_CLIENTS), list(b.PROVIDER_CHAIN))
+        b._provider_state.clear()
+        b._provider_state["gemini"] = {
+            "fails": 0, "cooldown_until": time.time() + 900, "fatal_until": time.time() + 900}
+        b.PROVIDER_CHAIN[:] = ["gemini", "zhipu"]
+
+    def tearDown(self):
+        b = self.bot
+        state, clients, chain = self.saved
+        b._provider_state.clear(); b._provider_state.update(state)
+        b.AI_CLIENTS.clear(); b.AI_CLIENTS.update(clients)
+        b.PROVIDER_CHAIN[:] = chain
+
+    def _install(self, factory):
+        import types
+        self.bot.AI_CLIENTS.update({
+            "gemini": [types.SimpleNamespace(chat=types.SimpleNamespace(
+                completions=types.SimpleNamespace(create=factory("gemini"))))],
+            "zhipu": [types.SimpleNamespace(chat=types.SimpleNamespace(
+                completions=types.SimpleNamespace(create=factory("zhipu"))))],
+        })
+
+    def test_nobody_backing_up_is_detected(self):
+        """前提判定：另一家处于隔离时，应当判定「没人兜底」。"""
+        self.assertFalse(self.bot._someone_else_can_serve(
+            "zhipu", {"gemini": ["m"], "zhipu": ["m"]}))
+
+    def test_a_healthy_peer_counts_as_backup(self):
+        """反例：别家能出工时，判定结果为「有人兜底」。"""
+        self.bot._provider_state["gemini"] = {"fails": 0, "cooldown_until": 0.0}
+        self.assertTrue(self.bot._someone_else_can_serve(
+            "zhipu", {"gemini": ["m"], "zhipu": ["m"]}))
+
+    async def test_weaker_sibling_gets_its_turn_when_nobody_else_serves(self):
+        """端到端：最强那档超时后，梯队里剩下的那一档必须被叫到，而且要答得出来。"""
+        import types
+
+        tried = []
+
+        async def create(who, model, *a, **kw):
+            tried.append((who, model))
+            if who == "zhipu" and model == "glm-4.7":
+                raise RuntimeError("APITimeoutError: request timed out")
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(content=f"{who}/{model} 应答"))])
+
+        def factory(who):
+            async def inner(*a, **kw):
+                return await create(who, kw.get("model", "?"))
+            return inner
+
+        self._install(factory)
+        saved = self.bot._TIER_CHAINS["chat"]
+        self.bot._TIER_CHAINS["chat"] = {
+            "gemini": ["gemini-dead"], "zhipu": ["glm-4.7", "glm-4.5-air"]}
+        try:
+            got = await self.bot.call_model([{"role": "user", "content": "在吗"}], 100)
+        finally:
+            self.bot._TIER_CHAINS["chat"] = saved
+
+        self.assertEqual(got, "zhipu/glm-4.5-air 应答",
+                         "单档超时后，梯队里剩下的便宜档必须有机会把话说完")
+        self.assertEqual([t for t in tried if t[0] == "zhipu"],
+                         [("zhipu", "glm-4.7"), ("zhipu", "glm-4.5-air")])
+
+    async def test_the_whole_provider_still_goes_down_after_enough_failures(self):
+        """轻手不等于不设防：这家每一档都超时，最后仍要被熔断。"""
+        import types
+
+        async def create(*a, **kw):
+            raise RuntimeError("APITimeoutError: request timed out")
+
+        def factory(who):
+            async def inner(*a, **kw):
+                return await create(*a, **kw)
+            return inner
+
+        self._install(factory)
+        saved = self.bot._TIER_CHAINS["chat"]
+        self.bot._TIER_CHAINS["chat"] = {"gemini": ["gemini-dead"], "zhipu": ["m1", "m2", "m3"]}
+        try:
+            await self.bot.call_model([{"role": "user", "content": "在吗"}], 100)
+        finally:
+            self.bot._TIER_CHAINS["chat"] = saved
+        self.assertGreater(self.bot._provider_state["zhipu"]["cooldown_until"], time.time(),
+                           "每一档都超时了，这家仍该被熔断 —— 阈值机制不能被绕过")
+
+    async def test_structural_failures_are_never_downgraded(self):
+        """地区封禁对这家所有模型一视同仁，不许为了「给它机会」放它继续撞。"""
+        import types
+
+        async def create(*a, **kw):
+            raise RuntimeError(StructuralFailureTest.GEMINI_REGION_ERR)
+
+        self.bot._provider_state.pop("gemini")  # 本次自己撞出隔离，不预设
+        self.bot._provider_state.pop("zhipu", None)
+        self.bot.AI_CLIENTS.update({"gemini": [types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))]})
+        self.bot.AI_CLIENTS.pop("zhipu", None)
+        saved = self.bot._TIER_CHAINS["chat"]
+        self.bot._TIER_CHAINS["chat"] = {"gemini": ["g1", "g2", "g3"]}
+        try:
+            await self.bot.call_model([{"role": "user", "content": "在吗"}], 100)
+        finally:
+            self.bot._TIER_CHAINS["chat"] = saved
+        left = self.bot._provider_state["gemini"]["cooldown_until"] - time.time()
+        self.assertGreater(left, config.PROVIDER_COOLDOWN_SECONDS,
+                           "结构性故障必须立刻进长隔离窗，不能因为没人兜底就降级成普通失败")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
