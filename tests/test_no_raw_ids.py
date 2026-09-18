@@ -69,6 +69,8 @@ class RenameReplyTest(unittest.IsolatedAsyncioTestCase):
     """给被人起名之后的确认语 —— 这是最早被吐槽「让我找 78D0」的那句。"""
 
     def setUp(self):
+        # 同上：改名节流是模块级流水账，测试之间要清空。
+        bot.reset_nick_flood()
         self.sent = []
         self._orig_reply = bot.safe_reply
         self._orig_judge = bot.judge_nick

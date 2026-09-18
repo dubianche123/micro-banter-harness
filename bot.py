@@ -1229,6 +1229,74 @@ def _taken_nick_names(group_id, subject_openid=""):
     return RELATIONS.main_names(group_id, exclude_openid=subject_openid)
 
 
+# ══════════════════ 改名节流：一次围攻能试几次，才是真正的防线 ══════════════════
+#
+# 背景是 2026-09-18 的一场实测围攻：13 分钟内群友轮番试谐音称呼，审核拦下 10 个，
+# 漏过去 7 个。回头看，**漏的并不比拦下的更干净**，它们只是「刚好没被抽中」的那一发。
+# 只要每试一次的代价是零（一句话 + 一次几百 token 的调用），这种抽样就永远打不完 ——
+# 把模型调准只能降低漏的概率，降不到零。
+#
+# 所以真正的闸门是把**一次围攻能试的次数**压下去，而且必须是本地算：
+#   · 个人层 —— 同一个人的名字改完之后 3 分钟内不能再动。正常人一天改一次都算多，
+#     而「刚记下就马上换下一个」正是试名字的标准动作。
+#   · 群层   —— 窗口内累计拦下这么多次，就说明有人在挠这里，整群进入改名冷静期。
+#     单人 freq 限制摁不住换号/换人来试的情况，群级这一层是兜那个底的。
+#
+# 两条都在本地跑：0 token、不受供应商抖动影响、也不依赖模型当天心情好不好。
+NICK_FLOOD = {
+    "window": 600.0,      # 统计窗口：10 分钟
+    "max_rejects": 3,     # 窗口内被拦下几次就把这个群拖进冷静期
+    "cooldown": 1200.0,   # 冷静期：20 分钟
+    "self_gap": 180.0,    # 同一个名字两次之间的最小间隔
+}
+
+_nick_rejects = {}    # group_id -> [被拦下的时刻, ...]
+_nick_cool = {}       # group_id -> 冷静期截止时刻
+_nick_done = {}       # (group_id, subject) -> 上一次改名的时刻
+
+
+def reset_nick_flood():
+    """清掉全部流水账。只有测试会调 —— 进程一重启这些本来就是空的。"""
+    _nick_rejects.clear()
+    _nick_cool.clear()
+    _nick_done.clear()
+
+
+def _nick_block_reason(group_id, subject, is_owner=False, now=None):
+    """本地闸门：返回给群友看的拒绝理由（人话），None = 放行。"""
+    now = time.time() if now is None else now
+    until = _nick_cool.get(group_id, 0.0)
+    # 群主不受**群级**冷静期限制：他本来就有全群的改名权，不该因为手下的人闹腾而失效。
+    if now < until and not is_owner:
+        return f"这片地方刚有人在名字上连着翻车，我先歇 {max(1, int((until - now) // 60))} 分钟"
+    gap = NICK_FLOOD["self_gap"]
+    last = _nick_done.get((group_id, subject), 0.0)
+    if now - last < gap:
+        return f"名字刚换过一轮，得焐一会儿——再等 {max(1, int(gap - (now - last)))} 秒"
+    return None
+
+
+def _nick_note_reject(group_id, now=None):
+    """拦下一次就记一笔；够数就把整群拖进冷静期。返回是否触发了冷静期。"""
+    now = time.time() if now is None else now
+    window = NICK_FLOOD["window"]
+    hits = [t for t in _nick_rejects.get(group_id, ()) if now - t < window]
+    hits.append(now)
+    _nick_rejects[group_id] = hits
+    if len(hits) >= NICK_FLOOD["max_rejects"]:
+        _nick_cool[group_id] = now + NICK_FLOOD["cooldown"]
+        logger.warning(
+            "🧊 本群 %d 分钟内连续拦下 %d 个称呼，改名进入 %d 分钟冷静期（像是有人在批量试名）",
+            int(window // 60), len(hits), int(NICK_FLOOD["cooldown"] // 60))
+        return True
+    return False
+
+
+def _nick_note_accept(group_id, subject, now=None):
+    """改名落地了就记时间，个人层的间隔从这一刻开始算。"""
+    _nick_done[(group_id, subject)] = time.time() if now is None else now
+
+
 async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, mentioned_others):
     """昵称管理。本地词表先过一遍（0 token），可疑的再让模型看一眼（约 137 token）。
 
@@ -1255,18 +1323,32 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
     subject = (mentioned_others[0] if cmd["scope"] == "other" and len(mentioned_others) == 1
                else sender_openid)
     nick = cmd["nick"]
+
+    # 闸门排在这里，排在**名字本身合不合格**之前：先把一次围攻能试几次压住，
+    # 再看名字本身 —— 顺序无所谓对错，只是前者是「能不能问」，后者是「问到的是什么」。
+    blocked = _nick_block_reason(group_id, subject, is_owner=is_owner)
+    if blocked:
+        logger.info("⏳ 改名节流挡住一笔（%s 想叫「%s」）：%s", str(subject)[-4:], nick, blocked)
+        await safe_reply(message, f"（把小本本合上一半）{blocked}，到时候再喊我一声。")
+        return
+
     problem = relations.bad_nick(
         nick,
         reserved=_reserved_nick_names(group_id, subject),
         taken=_taken_nick_names(group_id, subject),
     )
     if problem:
+        # 只有**撞到敏感词**才计入围攻统计：重名、冒名顶替这些是正常的业务冲突，
+        # 拿来当「有人在攻击」的证据会冤枉好人。
+        if wordfilter.has_hit(nick):
+            _nick_note_reject(group_id)
         await safe_reply(message, f"（皱眉盯着你写的字看了半天）这个名字不成（{problem}），换一个吧。")
         return
 
     # 词表过了不等于安全：谐音、拆字、缩写天生就是拿来绕开字面匹配的。
     # 再让审核梯队看一眼（失败返回 None = 放行，不因审核不可用而堵死起名）。
     if await judge_nick(nick) is False:
+        _nick_note_reject(group_id)
         logger.info("🕵️ 称呼审核拦下：%s 想用「%s」", sender_openid[-4:], nick)
         await safe_reply(message,
             "（笔尖悬在小本本上方，半天没落下去）这名字我不敢往上写，换一个吧。")
@@ -1294,6 +1376,9 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
         RENAMES.note(group_id, old_nick, target)
         STATE.mark_dirty()
         _sync_rename(group_id, old_nick, nick)
+        _nick_note_accept(group_id, target)
+        logger.info("✍️ 采纳称呼：%s → 「%s」（%s御赐）", old_nick or "（未留名）", nick,
+                    owner_label(group_id))
         if old_nick and old_nick != nick:
             await safe_reply(message,
                 # ⚠️ 别说「谁也不许改」—— 听起来像**本人**也改不动，其实本人一句
@@ -1315,6 +1400,8 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
     RENAMES.note(group_id, old, sender_openid)
     STATE.mark_dirty()
     _sync_rename(group_id, old, nick)
+    _nick_note_accept(group_id, sender_openid)
+    logger.info("✍️ 采纳称呼：%s → 「%s」（本人认领）", old or "（未留名）", nick)
     if old and old != nick:
         await safe_reply(message,
             f"（把小本本上原来的“{old}”划掉）行，改口最快——以后叫你【{nick}】，之前那个作废。")
@@ -1415,7 +1502,11 @@ async def judge_nick(nick):
     本地词表（relations.bad_nick）只能拦住**已经登记过**的词，拦不住新花样：
     谐音、拆字、缩写、暗指 —— 这些恰恰是设计来绕过字面匹配的。所以补这一层。
 
-    但它是「尽力而为」，不是安全边界：
+    但它是「尽力而为」，不是安全边界。2026-09-18 的实测说得最清楚：同一场围攻里
+    审核拦下 10 个、漏了 7 个，漏的那几个并不比拦下的更干净 —— 它们只是没被抽中。
+    所以别指望把这一层调到全对，**一次围攻能试几次**才是防线（见改名节流那一层）。
+
+    剩下的规矩：
       · 只走审核梯队（最强那档）。弱档在这件事上等于没开 —— 实测 4.5-air 把谐音放行，
         还把正常昵称「阿澈」误杀；同批用例 4.7 全对。
       · 调用失败 / 超时 / 返回看不懂 → 返回 None，由调用方**放行**。
@@ -1427,22 +1518,27 @@ async def judge_nick(nick):
                 {"role": "system", "content": prompts.PROMPT_NICK_JUDGE},
                 {"role": "user", "content": f"称呼：{nick}"},
             ],
-            max_tokens=8,          # 「OK」/「NG」两个 token 就够，留点余量防截断成空
+            # 让它先说一句依据再落结论（思路摊开之后更准，漏判也留得下解释），
+            # 所以这里给到 160 —— 相比一次漏判的代价，这点 token 不值一提。
+            max_tokens=160,
             tier="judge",
             temperature=0.0,       # 判断类必须冻住随机性，见 call_model 的说明
         )
     except Exception as e:
         logger.warning("🕵️ 称呼审核没跑通（先放行）: %s", str(e)[:120])
         return None
-    verdict = (out or "").strip().upper()
-    if not verdict:
+    raw = (out or "").strip()
+    if not raw:
         return None
-    # 按词判断而不是等值比较：模型偶尔会在前后带标点或换行
-    if "NG" in verdict:
+    # 取**最后一处**结论：正文里提到「OK」之类的字样不该影响判决，结论永远在末行。
+    picks = re.findall(r"(?:^|\s)(OK|NG)(?:\s|$)", raw.upper())
+    decision = picks[-1] if picks else ""
+    if decision == "NG":
+        logger.info("🕵️ 称呼审核理由（NG）：%s", raw.replace("\n", " ")[:160])
         return False
-    if "OK" in verdict:
+    if decision == "OK":
         return True
-    logger.warning("🕵️ 称呼审核返回看不懂的内容，先放行: %r", verdict[:40])
+    logger.warning("🕵️ 称呼审核返回看不懂的内容，先放行: %r", raw[:60])
     return None
 
 

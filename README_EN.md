@@ -339,10 +339,11 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Prompt reorder | hit rate 85% → 98% | Recorded by `test_harness.py` |
 | Banter rate | 8% × 113 candidates / 10.8 h ≈ **7 per day** | Counted from logs after launch |
 | The length-threshold lesson | Of 257 messages, a 10-character floor admitted 19 — a third of them emoji strings | The floor was deleted; rate is governed by probability + cooldown only |
-| Name review accuracy | 4.7 **7/7**; 4.5-air misses homophones and false-positives; 3.5-flash-lite **8/8** | 2 sensitive names vs 6 normal nicknames |
+| Name review accuracy | 4.7 **7/7**; 4.5-air misses homophones and false-positives; 3.5-flash-lite **8/8** | 2 sensitive names vs 6 normal nicknames. ⚠️ Small-sample number: during one real siege it missed 7 of 17 requests, see the next row |
+| One real siege (2026-09-18) | 17 rename requests in 13 minutes: 10 blocked, 7 let through | The ones that slipped through were no cleaner than the blocked ones — they simply were not the sample drawn. This is where the rename throttle below comes from |
 | Compression throughput | 4.5-air swallowed 260 messages / 4732 chars; 4.7 returned contentFilter 1301 on the same input | Evidence for using the weaker tier |
 | Cost gates | Global ≤3000 calls/day; per-group bucket of 8, refilling 1 per 5s | Caps flooding at roughly 12 calls/minute |
-| Regression suite | **260 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, prompt order, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, failover |
+| Regression suite | **279 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, prompt order, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, failover |
 
 ---
 
@@ -365,6 +366,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Relying on prompts to keep relationships correct | Prompts do not stop homophones and do not stop invented kinship — so relationships live in the archive, old names in the ledger, and code enforces both |
 | Letting automatic logic touch primary names | One override and the person stops trusting the bot; the only write sources are "the person themself" and "owner-authorised rename", and an illegal source cannot even clear the name |
 | Calling the platform's group-member API for display names | The route exists but needs a separate permission grant (measured: `400 11253 应用无接口访问权限`); one more approval just to render a name is not worth it. Instead it learns the **plain-text nickname** left behind when someone is @-mentioned |
+| Tuning the name review until it is perfect | Impossible. Measured: in one siege it blocked 10 attempts and let 7 through, and on review the ones that got through were no cleaner than the ones blocked — they were simply not the sample drawn (that day the primary provider spent most of its time returning region 400, so the backup was doing the reviewing). As long as one attempt costs nothing, that lottery is winnable. So the real gate is a local **rename throttle**: a name that was just set cannot change again for 3 minutes, and 3 rejections inside 10 minutes freeze renaming for the whole group for 20 minutes (the owner is exempt). Cutting the attempts a siege can make from a dozen down to single digits beats another round of prompt tuning — and it costs no tokens and does not care how the model feels today |
 | Guessing which openid a plain-text @ belongs to | `mentions` comes in the order the @s appear, so it pairs them one by one **when the plain-text count matches the mention count**, and drops the whole message when it does not (a hand-typed fake @, or an @ rendered as a placeholder). Mislabelling someone is worse than not knowing — the bot would call you by someone else's name in public. And when it does get one wrong there is a way out: the person says `call me X` and it is overridden, since a claimed name always wins |
 
 ---
@@ -383,7 +385,8 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Sent the passphrase in private chat, no response | Most likely the QQ Open Platform never enabled the **C2C (single-chat) message permission**; or `OWNER_CLAIM_PHRASE` was left empty (which closes the private-chat claim channel) |
 | Log says "yielding (cache still warm)" | Normal — cache-first at work; it switches back once the group goes quiet |
 | It stays on Zhipu and never returns to Gemini | Same as above. Lower `PROVIDER_CACHE_WARM_SECONDS` if that bothers you |
-| A name was rejected | Two gates: local wordlist (role words / honorifics / `sensitive_nicks.txt`) plus model review; if the review service is down it lets names through, the wordlist still holds |
+| A name was rejected | Three gates: local wordlist (role words / honorifics / `sensitive_nicks.txt`) → model review → rename throttle. If the review service is down it lets names through, the wordlist still holds. Get rejected too often in a short window and renaming freezes group-wide for 20 minutes (log: `🧊 …进入冷静期`) — that is anti-flooding, not a failure |
+| Log says `🧊 …改名进入冷静期` | Somebody was hammering the rename endpoint. It clears after a while; the owner is exempt |
 | It still calls someone by an old name | Should no longer happen: names are refreshed before injection and scrubbed from history on rename. If it does, check whether the old name is registered in `renames` in `state.json` |
 | It treats two people as one / invents a relationship | First check whether the old name reached `renames`; relationships come only from the `relations` archive — anything beyond that is the model improvising, so check whether 群史记 has been polluted |
 | Start completely over | Stop → delete `state.json` (memory / affinity / modes / ledger), `archive/`, `memory/` (raw logs and summaries) and `owner.txt` (re-claim the owner) |

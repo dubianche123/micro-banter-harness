@@ -595,6 +595,8 @@ class NickCollisionEndToEndTest(unittest.IsolatedAsyncioTestCase):
         cls.saved_owner = _bot.OWNER_OPENID
 
     def setUp(self):
+        # 改名节流是按群记流水账的模块级状态，测试之间不清理会互相串味。
+        self.bot.reset_nick_flood()
         self.bot.OWNER_OPENID = self.OWNER
         self.sent = []
         self._orig_reply = self.bot.safe_reply
