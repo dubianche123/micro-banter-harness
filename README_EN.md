@@ -342,7 +342,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Name review accuracy | 4.7 **7/7**; 4.5-air misses homophones and false-positives; 3.5-flash-lite **8/8** | 2 sensitive names vs 6 normal nicknames |
 | Compression throughput | 4.5-air swallowed 260 messages / 4732 chars; 4.7 returned contentFilter 1301 on the same input | Evidence for using the weaker tier |
 | Cost gates | Global ≤3000 calls/day; per-group bucket of 8, refilling 1 per 5s | Caps flooding at roughly 12 calls/minute |
-| Regression suite | **250 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, prompt order, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, failover |
+| Regression suite | **260 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, prompt order, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, failover |
 
 ---
 
@@ -355,6 +355,8 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Resending expired messages | Tencent's passive replies expire (5 minutes for groups) and resending one is always rejected. Messages buffered during a disconnect are mostly expired by the time they are replayed, so it checks `message.timestamp` first and just logs the skip — firing a request that cannot succeed is worse than not firing at all |
 | Letting "cache first" deadlock the providers | "Don't switch back while the cache is warm" can self-lock: A yields because B looks able, B yields because A looks able, and neither one works. The symptom is deceptive — the process is alive, messages arrive, it even replies, but every reply is the same "sorry, spaced out" fallback, **so it looks like an outage**. So it first asks "can anyone actually take over?", and if not it drops the yield rule and picks on circuit-breaker state alone — one extra prefill beats staying silent |
 | Letting a command that did nothing look like it worked | "No permission", "didn't parse" and "did nothing" all read as "the bot ignores me", but the worst one is **looking like it worked**: a non-owner's rename intent is swallowed by the parser on permission grounds, the request falls through to chat, and the bot answers with something like "no way, that messes up the family tree" — which reads as negotiating, or even as done, while the archive is untouched. So a strong verb-based probe catches it and refuses out loud; when it does not match ("@Wang hello") the bot stays quiet |
+| Applying the group's joke register to private chat | Putting someone down in a group is a joke *with an audience* — people egg it on, someone tops it, it bounces off. One-to-one there is no audience and nothing to bounce off, so the same line lands as a one-sided attack you cannot walk away from. Private chat gets its own register: aim at the situation, not the person; meet a complaint before joking about it; no "well you should have" style rub-ins |
+| Letting the snark run past a stop signal | Escalating after someone says "stop mocking me" is the one that actually hurts. This **cannot be left to the model** — by then it is already several turns down the wrong track. A local regex spots it and issues a hard override that outranks every "feel free to tease" instruction. Judged wide, not narrow — but "knock it off" is deliberately *not* a stop signal, it is too common in groups and would flatten the voice |
 | A message-length threshold | A bare 「？」 or 「太蠢了」 is a genuine cue to jump in; measuring by character count only filters out the messages worth answering |
 | Multimodal (image reading) | Faces and images that read as nothing are dropped entirely, not archived — the complexity of adding multimodal far outweighs the benefit |
 | A database | One group's data fits in JSON; one less dependency is one less deployment trap |
@@ -402,7 +404,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | `storage.py` | State persistence, session context, token bucket, daily budget |
 | `qqtext.py` | Message normalisation: turn "human text + machine placeholders" into readable text |
 | `wordfilter.py` | Sensitive words: one wordlist shared by the naming entry point and the summary exit |
-| `tests/` | 250 regression tests + a few one-off probe scripts |
+| `tests/` | 260 regression tests + a few one-off probe scripts |
 
 Run the tests (fully offline, no network or keys):
 

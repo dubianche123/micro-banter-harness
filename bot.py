@@ -385,6 +385,30 @@ def looks_like_claim_attempt(text):
     return any(w in (text or "") for w in OWNER_CLAIM_PROBE_WORDS)
 
 
+# 对方喊停：他明确表示被你的调侃弄不舒服了。
+# 判宽一点 —— 误判的代价只是「这次不开玩笑」，漏判的代价是把人越推越远。
+RE_BACK_OFF = re.compile(
+    r"别(?:这么|这样|再|老|总)?(?:损|嘲|怼|阴阳|挤兑|挖苦|讽|笑话|埋汰)我?"
+    r"|(?:太|有点|有够|很|好)?(?:过分|过火|伤人|难听|扎心|难堪)"
+    r"|(?:不要|别)(?:这样|这么)(?:说|讲话|说话|跟我)(?:话|了)?"
+    r"|说(?:得)?(?:太|有点|这么)(?:狠|重|过分|难听)"
+    r"|(?:听着|听)?(?:不舒服|不高兴|难受|不是滋味)"
+    r"|认真点|正经点|我不是开玩笑|来真的"
+)
+# 刻意**不收**「别闹了」：群里这句太常见（「别闹了，说正事」），收了机器人天天变正经，
+# 人设就没了。喊停信号只收那些明确指向「你刚才说话的方式」的表达。
+
+
+def looks_like_back_off(text):
+    """对方是不是在喊停（「别这么损我」「有点过分了」）。
+
+    为什么不能交给模型自觉：它已经在错误方向上跑了几轮，等你下一句提示它，
+    中间那几句早就把人怼跑了。实测用户连说两次，它每次都加码 —— 第二次还嘴硬
+    「你平时损我也没见手软」。所以这里用正则一眼认出来，直接下死命令。
+    """
+    return bool(RE_BACK_OFF.search(text or ""))
+
+
 def save_owner(openid):
     try:
         with open(config.OWNER_FILE, "w", encoding="utf-8") as f:
@@ -659,7 +683,7 @@ def resolve_mode(mode):
 
 async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
                        context_hint="", is_random_banter=False, relation_note="",
-                       group_memory="", owner_label=""):
+                       group_memory="", owner_label="", private=False):
     """根据当前模式生成回复。整段持session锁，保证上下文读写不会被并发请求撕裂。
 
     返回 (正文, 情感分值或 None)。分值为 None 表示这次没拿到模型给的记账标签
@@ -701,6 +725,13 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
         if config.AFFINITY_ENABLED and relation_note:
             # 关系档案：这条回复最该参考的「对具体某个人的长期印象」
             bits.append(relation_note)
+        if private:
+            # 放在 owner note **之后**：那一句里有「该损就损」，私聊里得压住它
+            bits.append(prompts.PROMPT_PRIVATE_NOTE.strip())
+        if looks_like_back_off(user_text):
+            # 最高优先级，压过上面所有「该损就损」—— 对方已经明说不舒服了
+            logger.info("🛑 对方喊停，本轮强制收敛（%s）", session_id[-12:])
+            bits.append(prompts.PROMPT_BACK_OFF_NOTE.strip())
         turn_context = ""
         if bits:
             turn_context = "（以下是系统给你的即时提示，不是群友说的话）\n" + "\n".join(bits)
@@ -2088,7 +2119,8 @@ class GroupBot(botpy.Client):
         STATE.mark_dirty()
 
         reply_text, _delta = await get_ai_reply(
-            f"user_{sender_openid}", user_input, is_owner=is_owner, mode="normal"
+            f"user_{sender_openid}", user_input, is_owner=is_owner, mode="normal",
+            private=True,
         )
         await safe_reply(message, reply_text)
 
