@@ -145,6 +145,9 @@ if len(PROVIDER_CHAIN) > 1 and len(AI_CLIENTS) > 1:
 # 供应商熔断：连续失败就暂时拉黑，免得代理断了之后每条消息都干等一个超时周期
 _provider_state = {}   # name -> {"fails": int, "cooldown_until": float}
 _key_idx = {}          # name -> 轮到第几个 Key
+# 单模型「慢」处罚：(供应商, 模型名) -> 到期时间戳。超时过的一档在这个时间前会被跳过，
+# 免得它占着队首让每一轮都先白等一个满超时 —— 见 _penalize_slow_model。
+_slow_until = {}
 # 最近一条群消息的时刻。它决定「被让位的供应商什么时候能回来」—— 见 _provider_available。
 # 内存态即可：重启后当作「群刚静下来」，立刻重试一次主供应商，代价只有一次 prefill。
 _activity = {"ts": 0.0}
@@ -505,6 +508,24 @@ def _provider_available(name, allow_yield=True):
     return True
 
 
+def _penalize_slow_model(pname, model_name):
+    """给「刚超时过」的这一档记一笔，让它在 MODEL_SLOW_PENALTY_SECONDS 内先靠边站。
+
+    不是永久降级：记的是**到期时间戳**，凉够了自己回到原位试运行 —— 答上来就留用，
+    再超时就再罚一轮。写的是时间而不是改梯队顺序，是因为顺序变了就回不去了：
+    晚高峰变慢的模型，过一小时可能又快又好用，把它永久沉到队尾等于白丢一档质量。
+    """
+    _slow_until[(pname, model_name)] = time.time() + config.MODEL_SLOW_PENALTY_SECONDS
+    logger.warning("🐢 [%s] %s 这一档暂时挂免战牌（%.0f 分钟内先跳过去）",
+                   config.PROVIDER_PRESETS[pname]["label"], model_name,
+                   config.MODEL_SLOW_PENALTY_SECONDS / 60.0)
+
+
+def _model_slow(pname, model_name):
+    """这一档现在是不是还在「慢」的处罚期里。"""
+    return time.time() < _slow_until.get((pname, model_name), 0.0)
+
+
 def _someone_else_can_serve(name, chains):
     """除这家以外，还有别人能出工吗（不看缓存、只看熔断）。
 
@@ -712,6 +733,14 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
             # 带伤上阵的那家例外 —— 它本来就是越过熔断挑的。
             if pname != last_resort and not _provider_available(pname, allow_yield=False):
                 break
+            # 刚超时过的那一档先靠边站（见 _penalize_slow_model）。⚠️ 前提是这家至少还有一档
+            # 没被罚 —— 全罚了还硬躲就是自己把自己饿死，那时候只能照常试。
+            if _model_slow(pname, model_name) and not all(
+                    _model_slow(pname, m) for m in models):
+                logger.info("⏭️ 跳过 [%s] %s（%.0fs 内它刚超时过，先用快的那档）",
+                            preset["label"], model_name,
+                            (_slow_until[(pname, model_name)] - time.time()))
+                continue
             timeout_for_this = min(config.AI_TOTAL_TIMEOUT - elapsed,
                                    preset.get("timeout") or config.AI_TIMEOUT_SECONDS)
             idx = _key_idx.get(pname, 0)
@@ -745,7 +774,16 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
             except asyncio.TimeoutError:
                 logger.warning("⏰ [%s] %s 超过 %.1fs，尝试下一个...",
                                preset["label"], model_name, timeout_for_this)
-                _note_provider_fail(pname, hard=True)
+                # ⚠️ 超时是**这一档自己的事**：4.7 卡住不代表 4.5-air 也答不上来。
+                # 但光「去找下一档」是不够的 —— 下一轮它又排在队首，于是每一轮都先白等 20s，
+                # 而整轮预算只有 AI_TOTAL_TIMEOUT（30s），剩下的时间常常连第二档都跑不完
+                # ⇒ 用户看到的就是连续几句「刚才走神了」。
+                # 实测（2026-09-18 21:38 / 22:27 / 22:28 / 22:29）：glm-4.7 一小时里超时 4 次，
+                # 每次拖垮整轮，还顺手把整家供应商送进 120s 冷却，把后面几句一起赔进去。
+                # 所以给这一档记个「慢」的处罚：这段时间里梯队先跳过它，等它凉够了自己回来。
+                _penalize_slow_model(pname, model_name)
+                # 至于是不是要连坐整家，跟别的失败同一个规矩：有人兜底才狠，没人兜底就轻手。
+                _note_provider_fail(pname, hard=_someone_else_can_serve(pname, chains))
             except Exception as e:
                 err_msg = str(e)
                 logger.warning("⚠️ [%s] %s 异常: %s，尝试下一个...",

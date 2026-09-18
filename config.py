@@ -251,6 +251,14 @@ BUDGET_WARN_RATIO = _env_float("BUDGET_WARN_RATIO", 0.8)
 
 # ══════════════════ AI 调用 ══════════════════
 AI_TIMEOUT_SECONDS = _env_float("AI_TIMEOUT_SECONDS", 20.0)   # 单个模型
+
+# 单个模型超时后，这一档在多长时间内先跳过（默认 10 分钟）。
+# 理由见 bot._penalize_slow_model：梯队顺序是共享引用，「往下挪一位」就再也回不去，
+# 而晚高峰变慢的模型过一阵往往又快又好；所以记的是**到期时间**而不是新顺序，
+# 凉够了自己回到原位试运行 —— 答上来就留用，再超时就再罚一轮。
+# ⚠️ 不能省：每一轮都先撞一次队首的慢档，剩下的预算常常连第二档都跑不完
+# （实测 2026-09-18 晚，glm-4.7 一小时超时 4 次，每次都把整轮拖成就地兜底话术）。
+MODEL_SLOW_PENALTY_SECONDS = _env_float("MODEL_SLOW_PENALTY_SECONDS", 600.0)
 AI_TOTAL_TIMEOUT = _env_float("AI_TOTAL_TIMEOUT", 30.0)       # 整个模型梯队
 AI_MAX_TOKENS = _env_int("AI_MAX_TOKENS", 512)
 AI_MAX_TOKENS_BANTER = _env_int("AI_MAX_TOKENS_BANTER", 120)

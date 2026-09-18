@@ -583,5 +583,150 @@ class SoloProviderLadderTest(unittest.IsolatedAsyncioTestCase):
                            "结构性故障必须立刻进长隔离窗，不能因为没人兜底就降级成普通失败")
 
 
+class SlowModelTest(unittest.IsolatedAsyncioTestCase):
+    """超时是**那一档自己的事**，不许它占着队首让每一轮都白等一个满超时。
+
+    起因是 2026-09-18 晚用户的「又开始丢响应了」：glm-4.7 一小时里超时 4 次，每次
+    第一步就吃掉 20s，而整轮预算 `AI_TOTAL_TIMEOUT` 只有 30s —— 剩下 10s 常常连第二档
+    都跑不完，于是用户连着吃到「刚才走神了」；更糟的是超时还会把整家供应商送进 120s
+    冷却，把后面几句一起赔进去。
+
+    所以超时除了「去找下一档」，还要给这一档挂免战牌（按时过期，不是永久降级）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import bot as _bot
+        cls.bot = _bot
+
+    def setUp(self):
+        b = self.bot
+        self.saved = (dict(b._provider_state), dict(b._slow_until), dict(b.AI_CLIENTS),
+                      list(b.PROVIDER_CHAIN), b._TIER_CHAINS["chat"])
+        b._provider_state.clear()
+        b._slow_until.clear()
+        # Gemini 处于结构性隔离 ⇒ 智谱是唯一指望，正好触发「没人兜底」的轻手路径
+        b._provider_state["gemini"] = {
+            "fails": 0, "cooldown_until": time.time() + 900, "fatal_until": time.time() + 900}
+        b.PROVIDER_CHAIN[:] = ["gemini", "zhipu"]
+
+    def tearDown(self):
+        b = self.bot
+        state, slow, clients, chain, tiers = self.saved
+        b._provider_state.clear(); b._provider_state.update(state)
+        b._slow_until.clear(); b._slow_until.update(slow)
+        b.AI_CLIENTS.clear(); b.AI_CLIENTS.update(clients)
+        b.PROVIDER_CHAIN[:] = chain
+        b._TIER_CHAINS["chat"] = tiers
+
+    def _install(self, answer_map):
+        import types
+
+        def factory(who):
+            async def create(*a, **kw):
+                outcome = answer_map.get((who, kw.get("model")))
+                if isinstance(outcome, Exception):
+                    raise outcome
+                if outcome == "timeout":
+                    raise asyncio.TimeoutError()
+                return types.SimpleNamespace(choices=[types.SimpleNamespace(
+                    message=types.SimpleNamespace(content=outcome or f"{who}/{kw.get('model')}"))])
+            return create
+
+        self.bot.AI_CLIENTS.update({"gemini": [types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=factory("gemini"))))],
+            "zhipu": [types.SimpleNamespace(
+                chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=factory("zhipu"))))]})
+
+    async def test_slow_tier_gets_skipped_next_time(self):
+        """核心诉求：上一轮超时过的那一档，下一轮不许再占队首。"""
+        tried = []
+
+        def record(who, model):
+            tried.append(model)
+
+        self._install({("zhipu", "glm-4.7"): "timeout" if len(tried) < 1 else None})
+        # 第一次撞超时（只撞一次），之后全部正常
+        calls = {"n": 0}
+
+        import types
+
+        def factory(who):
+            async def create(*a, **kw):
+                model = kw.get("model")
+                tried.append(model)
+                calls["n"] += 1
+                if model == "glm-4.7" and calls["n"] == 1:
+                    raise asyncio.TimeoutError()
+                return types.SimpleNamespace(choices=[types.SimpleNamespace(
+                    message=types.SimpleNamespace(content=f"{model} 应答"))])
+            return create
+
+        self.bot.AI_CLIENTS.clear()
+        self.bot.AI_CLIENTS.update({"gemini": [types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=factory("gemini"))))],
+            "zhipu": [types.SimpleNamespace(
+                chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=factory("zhipu"))))]})
+        self.bot._TIER_CHAINS["chat"] = {"gemini": ["g"], "zhipu": ["glm-4.7", "glm-4.5-air"]}
+
+        await self.bot.call_model([{"role": "user", "content": "在吗"}], 100)
+        self.assertFalse(self.bot._provider_state.get("zhipu", {}).get("cooldown_until"),
+                         "没人兜底时，单档超时不该把整家拉黑")
+        self.assertTrue(self.bot._model_slow("zhipu", "glm-4.7"), "超时过的那一档该挂免战牌")
+
+        tried.clear()
+        got = await self.bot.call_model([{"role": "user", "content": "再一句"}], 100)
+        self.assertEqual(got, "glm-4.5-air 应答",
+                         "下一轮必须直接由没超时的那一档接住，而不是再撞一次慢档")
+        self.assertNotIn("glm-4.7", tried, "惩罚期内不该再叫它")
+
+    async def test_penalty_expires_and_the_model_comes_back(self):
+        """免战牌是按时过期的，不是永久降级 —— 凉够了自己回原位试运行。"""
+        self.bot._slow_until[("zhipu", "glm-4.7")] = time.time() - 1
+        self.assertFalse(self.bot._model_slow("zhipu", "glm-4.7"))
+
+        import types
+        self._install({("zhipu", "glm-4.7"): "4.7 又行了"})
+        self.bot._TIER_CHAINS["chat"] = {"gemini": ["g"], "zhipu": ["glm-4.7", "glm-4.5-air"]}
+        got = await self.bot.call_model([{"role": "user", "content": "在吗"}], 100)
+        self.assertEqual(got, "4.7 又行了", "过期后要给它机会，答得上来就继续用")
+
+    async def test_all_tiers_penalized_still_tries_somebody(self):
+        """全都被罚时不能硬躲 —— 躲到最后一个人都不出工，等于自己饿死。"""
+        import types
+        now = time.time() + 300
+        for m in ("glm-4.7", "glm-4.5-air"):
+            self.bot._slow_until[("zhipu", m)] = now
+        self._install({("zhipu", "glm-4.7"): "还是我接"})
+        self.bot._TIER_CHAINS["chat"] = {"gemini": ["g"], "zhipu": ["glm-4.7", "glm-4.5-air"]}
+        got = await self.bot.call_model([{"role": "user", "content": "在吗"}], 100)
+        self.assertEqual(got, "还是我接", "全罚了也要照常试，不能返回 None")
+
+    async def test_provider_still_benched_when_others_can_serve(self):
+        """对照组：有别家兜着时保持老规矩 —— 一次超时就把这家摁下去。"""
+        import types
+
+        def factory(who):
+            async def create(*a, **kw):
+                if who == "zhipu":
+                    raise asyncio.TimeoutError()
+                return types.SimpleNamespace(choices=[types.SimpleNamespace(
+                    message=types.SimpleNamespace(content="gemini 顶上了"))])
+            return create
+
+        self.bot._provider_state.pop("gemini")  # 让 Gemini 可用
+        # 把智谱摆到队首，否则 Gemini 先答上来就走不到超时那段
+        self.bot.PROVIDER_CHAIN[:] = ["zhipu", "gemini"]
+        self.bot.AI_CLIENTS.clear()
+        self.bot.AI_CLIENTS.update({"gemini": [types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=factory("gemini"))))],
+            "zhipu": [types.SimpleNamespace(
+                chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=factory("zhipu"))))]})
+        self.bot._TIER_CHAINS["chat"] = {"gemini": ["g"], "zhipu": ["glm-4.7"]}
+        await self.bot.call_model([{"role": "user", "content": "在吗"}], 100)
+        self.assertGreater(self.bot._provider_state["zhipu"]["cooldown_until"], time.time(),
+                           "有人兜底时维持一次即拉黑，别让用户陪它每一档都等一轮")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
