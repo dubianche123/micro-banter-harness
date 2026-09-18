@@ -165,6 +165,7 @@ Missing credentials make it **fail at startup and tell you which one is missing*
 | Exit a mode | 恢复正常 / 正常点 / 冷静点 / 散会 / 收摊 / 吃药了 | 0 |
 | Claim your name | 叫我阿远 / 我是阿远 / 取消我的称呼 / 别叫我了 | 0 if the wordlist rejects it / 1 if it needs a model review (~137 tokens) |
 | (Owner) name someone else | @someone 叫他阿远 (they must have spoken in the group first so the bot has their ID) | same as above |
+| (Owner) lock renaming | 锁起名 / 禁止起名; reopen with 解锁起名 / 开放起名 — while locked, member self-renames are refused and naming falls back to the owner only | 0 |
 | Check a relationship | 查好感 / 我跟你多熟 | 0 |
 | Leaderboard | 关系榜 / 点名册 / 群友榜 | 0 |
 | Name table | 称呼表 / 谁是谁 | 0 |
@@ -207,6 +208,7 @@ The fix is to treat names as **state**, not as text:
 | Before injection | A `refresh_names` pass rewrites old literals to the person's current name; revoked names become `（未留名）` — **with no id tail**, because a label carrying one gets read aloud as somebody's name |
 | A speaker with no name, when compressing | Signed as the generic 「一位群友」, **never as the last four of the openid**. The old fallback put strings like `6ABA` into the summary, and the summary is injected every turn — the model called people by it |
 | Stale names in the promise ledger | The nag prompt and the ledger command both run through the refresh pass first; the ledger stores whatever the name was back then |
+| Turning free renaming off entirely | The owner says 「锁起名」 and member self-renames stop in that group; naming falls back to the owner only (`@someone call them X` still works). 「解锁起名」 reopens it. The flag lives in the per-group state and survives restarts. Clearing your own name is never locked |
 | Coverage | Group chronicle, daily memory, recent-chat background, the previous summary fed back to the compression model, and the 群史记 command output |
 | On rename/revoke | The session window, long-term memory and daily MD are scrubbed too; `archive/` raw logs are never touched |
 | Off limits | Any literal in the primary-name list (`main_names()`) — no automatic logic may rewrite it, including the rename/revoke history sync |
@@ -345,7 +347,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | One real siege (2026-09-18) | 17 rename requests in 13 minutes: 10 blocked, 7 let through | The ones that slipped through were no cleaner than the blocked ones — they simply were not the sample drawn. This is where the rename throttle below comes from |
 | Compression throughput | 4.5-air swallowed 260 messages / 4732 chars; 4.7 returned contentFilter 1301 on the same input | Evidence for using the weaker tier |
 | Cost gates | Global ≤3000 calls/day; per-group bucket of 8, refilling 1 per 5s | Caps flooding at roughly 12 calls/minute |
-| Regression suite | **293 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, digest bylines, prompt order, no canned examples in prompts, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, failover |
+| Regression suite | **305 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, digest bylines, the rename lock, prompt order, no canned examples in prompts, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, failover |
 
 ---
 

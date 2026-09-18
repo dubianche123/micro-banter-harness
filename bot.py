@@ -338,6 +338,12 @@ NICK_OTHER_DENIED = (
     "（赶紧用手按住了小本本）给别人起外号这事得{owner}点头才行。"
     "你要是自己想改称呼，直接说「叫我 XXX」就好，随时能改。")
 
+# 起名锁上之后，普通群友想改称呼得到的答复。同一条铁律：没办成必须**明说** ——
+# 静默吞掉再掉进闲聊，是最糟的一种失败（看着像在商量、甚至像办成了）。
+NICK_LOCKED_DENIED = (
+    "（把小本本锁进了抽屉）现在群里锁着名字，改称呼这事我先不办。"
+    "要落名得{owner}点头 —— 让他 @你 说「叫 XXX」就行。")
+
 # 暗号本身就当敏感词注册掉：万一真有人在群里念出来，摘要出口会把它就地抹掉，
 # 不会顺着长期记忆回流进每一轮 prompt。
 wordfilter.add_runtime_words([config.OWNER_CLAIM_PHRASE])
@@ -1216,6 +1222,48 @@ def _reserved_nick_names(group_id, subject_openid=""):
     return names
 
 
+def nick_locked(group_id):
+    """这个群的起名锁当前是不是锁着的。状态存在每群自己的槽位里，重启不丢。"""
+    return bool((STATE.data.get("groups") or {}).get(group_id, {}).get("nick_locked"))
+
+
+def set_nick_locked(group_id, locked):
+    """掰起名锁。⚠️ 就地更新槽位 —— 整块替换会把同槽的其他标记冲掉。"""
+    STATE.data.setdefault("groups", {}).setdefault(group_id, {})["nick_locked"] = bool(locked)
+    STATE.mark_dirty()
+
+
+async def handle_nick_lock(message, group_id, action, is_owner):
+    """起名开关：群主一句话锁上/解开整个群的起名。0 token，纯本地。
+
+    为什么要有它：改名节流拦的是「试得太快」，拦不住「慢慢试」。锁是最后那道
+    手动闸 —— 群主看不下去的时候一句话把自由起名整个关掉，改名权收归自己
+    （他本来就能 @谁 说「叫 XXX」）。状态按群存，重启不丢。
+    """
+    owner = owner_label(group_id)
+    if not is_owner:
+        logger.info("🔒 非群主想%s起名，已明说", "锁" if action == "lock" else "解")
+        await safe_reply(message, f"（把钥匙揣回兜里）锁不锁名字，得{owner}说了算。")
+        return
+    if action == "lock":
+        if nick_locked(group_id):
+            await safe_reply(message, "（晃了晃上着锁的小本本）本来就是锁着的啊。")
+            return
+        set_nick_locked(group_id, True)
+        logger.info("🔒 起名已锁，普通群友改称呼先不办")
+        await safe_reply(message,
+            "（咔哒一声给小本本上了锁）成。从现在起改称呼这事我一律不办，"
+            f"只有你能落笔 —— @谁 说「叫 XXX」就行。想解开再说一声「解锁起名」。")
+        return
+    if not nick_locked(group_id):
+        await safe_reply(message, "（翻了翻小本本）本来就没锁啊，大家随时能改称呼。")
+        return
+    set_nick_locked(group_id, False)
+    logger.info("🔓 起名已解锁")
+    await safe_reply(message,
+        "（把抽屉钥匙转开）行，起名重新开放。想改称呼随时说「叫我 XXX」，以最新一次为准。")
+
+
 def _taken_nick_names(group_id, subject_openid=""):
     """**已被别人占用**的主名 —— 主名不能重叠，这份就是占用名单。
 
@@ -1323,6 +1371,13 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
     subject = (mentioned_others[0] if cmd["scope"] == "other" and len(mentioned_others) == 1
                else sender_openid)
     nick = cmd["nick"]
+
+    # 起名锁（群主可掰）：锁上之后普通群友的「叫我 XXX」一律不办。
+    # 只挡 self，不挡 self-clear（后悔总得让人能后悔），也不挡群主 —— 他本来就能给任何人落名。
+    if cmd["scope"] == "self" and not is_owner and nick_locked(group_id):
+        logger.info("🔒 起名已锁，挡下一笔（%s 想叫「%s」）", str(sender_openid)[-4:], nick)
+        await safe_reply(message, NICK_LOCKED_DENIED.format(owner=owner_label(group_id)))
+        return
 
     # 闸门排在这里，排在**名字本身合不合格**之前：先把一次围攻能试几次压住，
     # 再看名字本身 —— 顺序无所谓对错，只是前者是「能不能问」，后者是「问到的是什么」。
@@ -1943,6 +1998,14 @@ class GroupBot(botpy.Client):
         if current_mode != STATE.get_mode(group_id):
             STATE.set_mode(group_id, current_mode)
 
+        # 5.4 起名开关：群主一句话锁上/解开整个群的起名。0 token，纯本地。
+        #     排在昵称指令解析之前 —— 「锁起名」本身不含「叫我/叫X」，不会撞，
+        #     但万一撞了也要让开关先说话。
+        lock_cmd = relations.parse_nick_lock_command(user_input)
+        if lock_cmd:
+            await handle_nick_lock(message, group_id, lock_cmd, is_owner)
+            return
+
         # 5.5 昵称管理：本人随时认领或改（以最新一次为准），群主可以 @某人 给对方指定
         #     「机器人名，叫 小满」这种带称呼前缀的要先剥掉前缀才认得出来
         bot_names = naming.bot_names()
@@ -2244,6 +2307,12 @@ class GroupBot(botpy.Client):
             mentioned_others=(), allow_other=is_owner)
         if nick_cmd:
             logger.info("🚫 私聊收到改名命令（%s），已指回群里", nick_cmd.get("scope"))
+            await safe_reply(message, NICK_PRIVATE_CHAT_HINT)
+            return
+
+        # 起名开关同理：锁是按群存在的，私聊没有群号，指回群里办
+        if relations.parse_nick_lock_command(user_input):
+            logger.info("🚫 私聊收到起名开关指令，已指回群里")
             await safe_reply(message, NICK_PRIVATE_CHAT_HINT)
             return
 

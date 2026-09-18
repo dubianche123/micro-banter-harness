@@ -852,6 +852,40 @@ def parse_nick_command(text, bot_names=(), mentioned_others=(), allow_other=True
     return None
 
 
+# ══════════════════════════ 起名开关 ══════════════════════════
+
+# 群主一句话锁上/解开整个群的起名。词要够**短且硬**：这是配置指令不是闲聊，
+# 出现即算意图；但也要够**特异**，别把日常的话误吞进来（「别起名字了快跑」就别中招）。
+NICK_LOCK_WORDS = (
+    "锁起名", "锁定起名", "锁改名", "锁定改名", "禁止起名", "禁止改名",
+    "关闭起名", "关闭改名", "停起名", "不准起名", "起名锁",
+)
+NICK_UNLOCK_WORDS = (
+    "解锁起名", "解锁改名", "开放起名", "开放改名", "允许起名", "恢复起名",
+    "恢复改名", "允许改名",
+)
+
+
+def parse_nick_lock_command(text):
+    """把一条消息解析成起名开关指令，返回 "lock" / "unlock" / None。
+
+    刻意做成**子串匹配**而不是正则整句：群主的真实说法五花八门
+    （「小王锁起名」「把起名锁了」「先禁止改名吧」），唯一稳定的信号是
+    「锁/禁/停/关/不准」+「起名/改名」这两个词凑在一起。
+    解锁词放在锁词**之前**判断 —— 否则「解锁起名」会先撞上「锁起名」被当成上锁。
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    for w in NICK_UNLOCK_WORDS:
+        if w in t:
+            return "unlock"
+    for w in NICK_LOCK_WORDS:
+        if w in t:
+            return "lock"
+    return None
+
+
 def looks_like_other_nick(text, bot_names=(), mentioned_others=()):
     """这句话是不是**明确在给被 @ 的人起名**（带「叫/称呼/改名」这类动词）。
 
