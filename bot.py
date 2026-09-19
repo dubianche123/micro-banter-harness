@@ -94,6 +94,72 @@ def parse_group_message_create(self, payload):
 
 ConnectionState.parse_group_message_create = parse_group_message_create
 
+# ══════════════════════ 1.5 网关看门狗 ══════════════════════
+#
+# ⚠️ botpy 的重连链路有个盲区：掉线（1006）后重不重连，取决于 `ws_connect` 的接收循环
+# 能不能正常退出。如果 TCP 半死（对端静默掉线、没有 close 帧到达），`await receive()` 会
+# 永远挂住——不报错、不重连、心跳任务也各自闭嘴，整条链就这么干等。
+# 实测（2026-09-19 13:15:47）：1006 后 **18 分钟**没有任何重连尝试，期间一个日志都没有。
+#
+# 解法：包一层 `_is_system_event`（botpy 每收到一条下行都会经过它，心跳 ACK 也不例外），
+# 记下「最后一次网关动静」的时刻；再看门狗协程定期巡检，静默超过阈值就**主动踢一刀**——
+# 关掉当前 ws，让接收循环拿到 CLOSED 退出，botpy 自己的重连链路随即接手。
+# 心跳每 30s 一次，正常情况下静默永远不会超过一分钟。
+
+_ws_watch = {"last_rx": 0.0, "conn": None, "kicks": 0}
+
+
+def install_ws_watchdog():
+    """挂上「网关最后一响」的记录钩子。必须在 client.run() 之前调用一次。"""
+    from botpy.gateway import BotWebSocket
+
+    original = BotWebSocket._is_system_event
+
+    async def patched(self, message_event, ws):
+        _ws_watch["last_rx"] = time.time()
+        _ws_watch["conn"] = ws
+        return await original(self, message_event, ws)
+
+    BotWebSocket._is_system_event = patched
+    _ws_watch["last_rx"] = time.time()
+    logger.info("🐕 网关看门狗已挂上（静默 %.0f 秒即踢一刀重连）",
+                config.WS_WATCHDOG_STALE_SECONDS)
+
+
+async def _ws_watchdog_tick():
+    """看门狗巡检一轮。返回 True = 这次踢了。独立成函数是为了好测。"""
+    conn = _ws_watch.get("conn")
+    if not _ws_watch["last_rx"]:
+        return False
+    silent = time.time() - _ws_watch["last_rx"]
+    if silent <= config.WS_WATCHDOG_STALE_SECONDS:
+        return False
+    # 先记账再动手：不管踢没踢成都重置计时，防止重连进行中被连环误踢
+    _ws_watch["last_rx"] = time.time()
+    if conn is None or conn.closed:
+        # 连接已经是死的：重连链路理应正在跑，别再补刀，等新连接的下一响
+        logger.warning("🐾 看门狗：网关静默 %.0f 秒（连接已关闭，等重连链路接手）", silent)
+        return False
+    _ws_watch["kicks"] += 1
+    logger.warning("🐾 看门狗：网关 %.0f 秒没有任何下行（心跳 ACK 也没来），"
+                   "主动断开让它重连（第 %d 次）", silent, _ws_watch["kicks"])
+    await conn.close(code=4000)
+    return True
+
+
+async def ws_watchdog_loop():
+    """看门狗主循环：每 15 秒巡检一次。"""
+    await asyncio.sleep(config.WS_WATCHDOG_STALE_SECONDS)  # 先给首连留足时间
+    while True:
+        try:
+            await _ws_watchdog_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("❌ 看门狗巡检异常（不影响主流程）: %s", e)
+        await asyncio.sleep(15)
+
+
 # ══════════════════════ 2. AI 客户端 ══════════════════════
 
 _llm_http = httpx.AsyncClient(verify=config.SSL_VERIFY)
@@ -2502,6 +2568,7 @@ def run_bot():
 
     setup_logging()
     patch_aiohttp_ssl()
+    install_ws_watchdog()
     load_owner()
 
     logger.info("🤖 供应商=%s | 主模型=%s | Key 数=%d",
@@ -2513,6 +2580,7 @@ def run_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.create_task(STATE.flush_loop())
+    loop.create_task(ws_watchdog_loop())
     loop.create_task(prune_loop())
     if config.DIGEST_ENABLED:
         loop.create_task(digest_loop())

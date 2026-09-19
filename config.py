@@ -259,6 +259,12 @@ AI_TIMEOUT_SECONDS = _env_float("AI_TIMEOUT_SECONDS", 20.0)   # 单个模型
 # ⚠️ 不能省：每一轮都先撞一次队首的慢档，剩下的预算常常连第二档都跑不完
 # （实测 2026-09-18 晚，glm-4.7 一小时超时 4 次，每次都把整轮拖成就地兜底话术）。
 MODEL_SLOW_PENALTY_SECONDS = _env_float("MODEL_SLOW_PENALTY_SECONDS", 600.0)
+
+# 网关看门狗：botpy 收不到任何下行（含心跳 ACK）超过这么久，就主动断开 ws 触发重连。
+# 心跳每 30s 一来一回，正常静默不会超过一分钟；阈值取 90s = 连续 3 个 ACK 没来。
+# 为什么必须有它：botpy 的重连依赖「接收循环自己退出」，TCP 半死时 `receive()` 会永远挂住
+# —— 实测 2026-09-19 13:15 一次 1006 之后整整 18 分钟没有任何重连动作，全靠这个补。
+WS_WATCHDOG_STALE_SECONDS = _env_float("WS_WATCHDOG_STALE_SECONDS", 90.0)
 AI_TOTAL_TIMEOUT = _env_float("AI_TOTAL_TIMEOUT", 30.0)       # 整个模型梯队
 AI_MAX_TOKENS = _env_int("AI_MAX_TOKENS", 512)
 AI_MAX_TOKENS_BANTER = _env_int("AI_MAX_TOKENS_BANTER", 120)

@@ -473,16 +473,22 @@ class SoloProviderLadderTest(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         b = self.bot
-        self.saved = (dict(b._provider_state), dict(b.AI_CLIENTS), list(b.PROVIDER_CHAIN))
+        # ⚠️ _slow_until 也要清：前面 FailoverTest 的用例是真连供应商的，一次真实超时
+        # 就会给 glm-4.7 挂上免战牌，本类的假 4.7 会被「跳过慢档」逻辑跳过去，
+        # 「4.7 超时后必须轮到 4.5-air」的断言就永远走不到了（顺序依赖，单独跑是绿的）。
+        self.saved = (dict(b._provider_state), dict(b._slow_until),
+                      dict(b.AI_CLIENTS), list(b.PROVIDER_CHAIN))
         b._provider_state.clear()
+        b._slow_until.clear()
         b._provider_state["gemini"] = {
             "fails": 0, "cooldown_until": time.time() + 900, "fatal_until": time.time() + 900}
         b.PROVIDER_CHAIN[:] = ["gemini", "zhipu"]
 
     def tearDown(self):
         b = self.bot
-        state, clients, chain = self.saved
+        state, slow, clients, chain = self.saved
         b._provider_state.clear(); b._provider_state.update(state)
+        b._slow_until.clear(); b._slow_until.update(slow)
         b.AI_CLIENTS.clear(); b.AI_CLIENTS.update(clients)
         b.PROVIDER_CHAIN[:] = chain
 
