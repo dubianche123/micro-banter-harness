@@ -192,5 +192,36 @@ class PromptAntiTicTest(unittest.TestCase):
         self.assertIn("PROMPT_SHARED_RULES", src, "共享规则没被拼进稳定头")
 
 
+class PromptCallbackAndAttributionTest(unittest.TestCase):
+    """Gemini 上线一晚（2026-09-19 22:04-22:43，46 条）暴露的两类毛病：
+
+    1. 旧账复读：46 条里「家豪封号」「近代史」「原理拿小本本」被翻出来 20+ 次，
+       「少来这套，我可不接你这茬。当心原理在旁边拿着小本本…」几乎逐字出现 5 次 ——
+       它把整个上下文窗口当成素材库，每条回复都回去捞一把。
+    2. 张冠李戴：「嚷嚷着要当猫娘的人」一晚上被安给了至少三个不同的人，
+       因为背景材料里只标了发言人、没说清「这些主语都不是眼前这位」。
+    这里钉住两条新规则（都进共享块，换模型换人设都在）。
+    """
+
+    def test_callback_rule_is_in_the_shared_block(self):
+        rule = prompts.PROMPT_SHARED_RULES
+        self.assertIn("旧账", rule)
+        self.assertIn("最多提一次", rule)
+        self.assertIn("眼前这句话", rule)
+
+    def test_attribution_rule_is_in_the_shared_block(self):
+        rule = prompts.PROMPT_SHARED_RULES
+        self.assertIn("拿不准是谁干的", rule)
+        self.assertIn("别点名", rule)
+
+    def test_context_hint_header_pins_the_speaker_boundary(self):
+        """背景材料的引导语必须说清「主语不是眼前这位」—— 只靠共享规则不够，
+        因为模型最容易犯浑的位置就是读背景那一刻。"""
+        import inspect
+        src = inspect.getsource(bot)
+        self.assertIn("不是眼前这位说的", src)
+        self.assertIn("拿不准是谁就别点名", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

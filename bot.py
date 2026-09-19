@@ -2384,8 +2384,13 @@ class GroupBot(botpy.Client):
 
                 context_hint = refresh_names(
                     group_id, "\n".join(f"- {_who(b['sender'])}：{b['text']}" for b in prev))
-                context_hint = ("（注意：这是别人说过的话，标了发言人，别张冠李戴；"
-                                "也不要刻意复读）\n" + context_hint)
+                # ⚠️ 这行是对着「爱翻旧账的模型」写的（实测 Gemini 会把背景里别人的言行安到
+                # 当前说话人头上，一晚上把「当猫娘」安给了三个人）。所以要点名三件事：
+                # 每句都有主、主语不是眼前这位、引用前先核对名字。
+                context_hint = ("（注意：下面每一句开头都标了发言人 —— 这些话是「他们」说的，"
+                                "不是眼前这位说的。别把别人干的蠢事算到当前说话人头上，"
+                                "引用谁的言行就对准谁的名字，拿不准是谁就别点名；"
+                                "也别刻意复读这些内容）\n" + context_hint)
 
         active_mode = current_mode
         if is_fortune and current_mode == "normal":
