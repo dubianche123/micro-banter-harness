@@ -352,7 +352,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | One real siege (2026-09-18) | 17 rename requests in 13 minutes: 10 blocked, 7 let through | The ones that slipped through were no cleaner than the blocked ones — they simply were not the sample drawn. This is where the rename throttle below comes from |
 | Compression throughput | 4.5-air swallowed 260 messages / 4732 chars; 4.7 returned contentFilter 1301 on the same input | Evidence for using the weaker tier |
 | Cost gates | Global ≤3000 calls/day; per-group bucket of 8, refilling 1 per 5s | Caps flooding at roughly 12 calls/minute |
-| Regression suite | **321 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, digest bylines, the rename lock, prompt order, no canned examples in prompts, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, structural-failure isolation, failover |
+| Regression suite | **351 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, digest bylines, the rename lock, prompt order, no canned examples in prompts, tone restraint and free-target banter, people-roster injection, passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, structural-failure isolation, failover |
 
 ---
 
@@ -418,7 +418,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | `storage.py` | State persistence, session context, token bucket, daily budget |
 | `qqtext.py` | Message normalisation: turn "human text + machine placeholders" into readable text |
 | `wordfilter.py` | Sensitive words: one wordlist shared by the naming entry point and the summary exit |
-| `tests/` | 260 regression tests + a few one-off probe scripts |
+| `tests/` | 351 regression tests + a few one-off probe scripts |
 
 Run the tests (fully offline, no network or keys):
 

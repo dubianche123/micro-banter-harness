@@ -56,6 +56,19 @@ class RenderPeopleTest(unittest.TestCase):
         out = digest_mod.render_people(state, limit=8)
         self.assertEqual(out.count("\n- "), 8)
 
+    def test_capitalized_who_key_is_tolerated(self):
+        """压缩是模型产出的，key 大小写不保证 —— 实测 state 里出现过 "Who"（大写）。
+        严格只认小写会把人**静默漏掉**（罗老板整条消失，名册看着像生效实际缺人）。"""
+        state = {"data": {"people": [
+            {"who": "家豪", "note": "号刚解封"},
+            {"Who": "罗老板", "note": "热衷钓鱼话术"},
+            {"Who": "只有大写没小写", "Note": "大写对大写也要认"},
+        ]}}
+        out = digest_mod.render_people(state)
+        self.assertIn("- 罗老板：热衷钓鱼话术", out)
+        self.assertIn("- 家豪：号刚解封", out)
+        self.assertIn("- 只有大写没小写：大写对大写也要认", out)
+
     def test_people_block_is_not_in_the_group_visible_summary(self):
         """名册只喂给模型；发到群里的摘要（render_summary）不该把档案整段晒出去。"""
         self.assertNotIn("👥", digest_mod.render_summary(self.STATE))

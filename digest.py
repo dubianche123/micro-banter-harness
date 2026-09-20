@@ -174,11 +174,19 @@ def render_people(state, limit=8):
     只喂给模型，不进 render_summary（那个是发到群里的版本，群友不需要看档案）。
     """
     data = (state or {}).get("data") or {}
-    people = [p for p in (data.get("people") or [])
-              if isinstance(p, dict) and p.get("who") and p.get("note")]
+    # ⚠️ key 大小写要容忍：people 条目是模型压缩时产出的，实测出过 "Who"（大写）——
+    # 严格只认小写会**静默漏人**（罗老板整条消失，名册看着像生效实际缺人）。
+    people = []
+    for p in (data.get("people") or []):
+        if not isinstance(p, dict):
+            continue
+        who = p.get("who") or p.get("Who")
+        note = p.get("note") or p.get("Note")
+        if who and note:
+            people.append((who, note))
     if not people:
         return ""
-    lines = "\n".join(f"- {p['who']}：{p['note']}" for p in people[:limit])
+    lines = "\n".join(f"- {who}：{note}" for who, note in people[:limit])
     return ("👥 这阵子你观察到的几个人（系统整理的档案，谁的条目说的就是谁的事，"
             "引用前对准名字，别张冠李戴）：\n" + lines)
 
