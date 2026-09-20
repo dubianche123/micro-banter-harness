@@ -2419,8 +2419,16 @@ class GroupBot(botpy.Client):
             if summary and (summary.get("brief") or (summary.get("data") or {}).get("topics")):
                 # 名字统一刷新成当前称呼再注入：模型永远拿不到旧名，也就编不出
                 # 「那谁和这谁」这种把同一个人拆成两个人的往事。
+                # ⚠️ 人物名册（render_people）必须跟着一起注入：2026-09-20 实测，光给
+                # 【群史记】的连动长句，模型读的时候会把主语拧错（把「家豪解封」说成
+                # 「老王解封」）；「谁：什么事」一行一人的名册才是它能对准的事实底账。
+                people_block = digest_mod.render_people(summary)
+                if people_block:
+                    people_block = "\n" + people_block
                 group_memory = refresh_names(
-                    group_id, digest_mod.render_summary(summary, mode=active_mode))
+                    group_id,
+                    digest_mod.render_summary(summary, mode=active_mode)
+                    + people_block)
                 group_memory = (
                     "【这个群最近发生的事（系统整理的长期记忆，真实发生过，可以拿来接梗、催债、点名，"
                     "但不要编造记忆里没有的内容）】\n" + group_memory

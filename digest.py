@@ -164,6 +164,25 @@ def render_summary(state, mode="normal"):
     return "\n".join(parts)
 
 
+def render_people(state, limit=8):
+    """把摘要里的人物档案渲染成「谁：什么事」的名册，注入给模型用（0 token）。
+
+    ⚠️ 为什么单独加这一块（2026-09-20 实测）：人物档案此前**从不注入**，模型只能读
+    【群史记】里那种连动长句（「A 号刚解封就忙着跟 B 贴贴飙车」），读的时候把主语拧成
+    另一个人（把「家豪解封」说成「老王解封」），再把错的存进会话反复引用。
+    「谁：什么事」一行一人，主语想拧都没得拧。
+    只喂给模型，不进 render_summary（那个是发到群里的版本，群友不需要看档案）。
+    """
+    data = (state or {}).get("data") or {}
+    people = [p for p in (data.get("people") or [])
+              if isinstance(p, dict) and p.get("who") and p.get("note")]
+    if not people:
+        return ""
+    lines = "\n".join(f"- {p['who']}：{p['note']}" for p in people[:limit])
+    return ("👥 这阵子你观察到的几个人（系统整理的档案，谁的条目说的就是谁的事，"
+            "引用前对准名字，别张冠李戴）：\n" + lines)
+
+
 class GroupDigest:
     """每个群一份「当前摘要 + 上次压缩到哪」。
 

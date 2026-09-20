@@ -249,6 +249,15 @@ class SessionStore:
             self._sessions.pop(sid, None)
         return len(killed)
 
+    def drop_session(self, session_id):
+        """清掉**单个**会话的历史，返回是否清掉了东西。
+
+        什么时候用：模型在某个会话里说错了事实并把它当成了既定事实（说错→自己引用→
+        错上加错的自证循环），档案和摘要都是对的、脏的只有这个窗口 —— 换一个人继续聊
+        不受影响，就不该动 clear_group 连坐全群。
+        """
+        return self._sessions.pop(session_id, None) is not None
+
     def rename_user(self, group_id, old, new):
         """把该群会话历史里出现的旧称呼统一换成新称呼，返回改写的条数。
 
