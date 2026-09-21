@@ -1156,9 +1156,32 @@ DICE_TRIGGERS = ["摇骰子", "掷骰子", "掷点", "比大小", "决斗", "扔
 FORTUNE_TRIGGERS = ["算一卦", "算命", "看相", "占卜", "测字"]
 OWNER_COMMANDS = ["办他", "拖出去", "拿下", "拉出去", "掌嘴", "护驾"]
 
-# 关系档案的本地查询（0 token，直接读档，不打扰模型）
-RELATION_QUERY_TRIGGERS = ["查好感", "好感度", "我跟你多熟", "我们多熟", "查关系", "几级了",
-                           "操行分", "查操行", "几档了"]
+# 关系档案的本地查询（0 token，直接读档，不打扰模型）。
+#
+# ⚠️ 旧版是「好感度」「几级了」这种**裸词子串匹配**，结果是群里只要有人吐槽一句
+#   「这个好感度系统没啥用」，就被抢答成一张关系卡片 —— 正经聊天被打断。
+#   现在分两层：整句式的短语出现即算；「好感度」这类常见名词必须旁边带查询意图才算。
+RELATION_QUERY_PHRASES = (
+    "查好感", "查好感度", "看好感", "查关系", "查操行", "查亲密度",
+    "我们多熟", "我跟你多熟", "我和你多熟", "咱俩多熟", "跟你多熟", "和你多熟",
+    "我们熟吗", "我跟你熟吗", "咱俩熟吗", "关系怎么样", "关系如何",
+    "好感多少", "操行分多少", "亲密度多少",
+)
+RELATION_QUERY_NOUNS = ("好感度", "亲密度", "操行分")
+RELATION_QUERY_INTENTS = ("查", "看", "问", "报", "测", "显示", "多少", "怎么样", "如何",
+                          "几级", "几档")
+
+
+def matches_relation_query(text):
+    """是不是在**问**关系/好感度 —— 光提到这个词不算。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if any(p in t for p in RELATION_QUERY_PHRASES):
+        return True
+    # 「好感度」+ 查询意图（「查一下好感度」「好感度多少」）；只提这个词不算问
+    return (any(n in t for n in RELATION_QUERY_NOUNS)
+            and any(k in t for k in RELATION_QUERY_INTENTS))
 RELATION_BOARD_TRIGGERS = ["关系榜", "群友榜", "熟人榜", "查台账", "看台账", "查考勤", "点名册"]
 NAME_TABLE_TRIGGERS = ["称呼表", "名字表", "谁是谁", "改名册", "查称呼", "看称呼"]
 
@@ -1181,11 +1204,13 @@ def is_control_command(text):
         for k in triggers:
             if k and k in t:
                 return True
-    for family in (OWNER_COMMANDS, DICE_TRIGGERS, RELATION_QUERY_TRIGGERS,
-                   RELATION_BOARD_TRIGGERS, NAME_TABLE_TRIGGERS, DIGEST_TRIGGERS):
+    for family in (OWNER_COMMANDS, DICE_TRIGGERS, RELATION_BOARD_TRIGGERS,
+                   NAME_TABLE_TRIGGERS, DIGEST_TRIGGERS):
         for k in family:
             if k and k in t:
                 return True
+    if matches_relation_query(t):
+        return True
     return bool(relations.parse_nick_lock_command(t))
 
 # 群聊长期记忆（每日滚动压缩出来的《群史记》），同样是本地读取，0 token
@@ -2292,7 +2317,7 @@ class GroupBot(botpy.Client):
                         return
 
         # 8.5 关系档案本地查询（直接读档，0 token，不打扰模型）
-        if any(k in user_input for k in RELATION_QUERY_TRIGGERS):
+        if matches_relation_query(user_input):
             rec = RELATIONS.get(group_id, sender_openid)
             await safe_reply(message, relations.render_status(rec, sender_openid, mode=current_mode))
             return

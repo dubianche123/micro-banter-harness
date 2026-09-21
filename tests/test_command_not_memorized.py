@@ -40,6 +40,28 @@ class IsControlCommandTest(unittest.TestCase):
         self.assertTrue(bot.is_control_command("锁起名"))
 
 
+class RelationQueryNeedsIntentTest(unittest.TestCase):
+    """「好感度」这三个字本身不该触发查询 —— 吐槽系统时也会被抢答（2026-09-21 群主反馈）。"""
+
+    def test_real_questions_still_trigger(self):
+        for text in ("查好感", "查一下好感度", "好感度多少", "我跟你多熟", "我们熟吗",
+                     "关系怎么样", "操行分多少"):
+            self.assertTrue(bot.matches_relation_query(text), text)
+
+    def test_merely_mentioning_it_is_not_a_query(self):
+        """这几句是**提**到好感度，不是**问**好感度 —— 抢答会打断正经聊天。"""
+        for text in ("这个好感度系统没有啥体现", "好感度到底有啥用啊",
+                     "我觉得好感度就那样", "几级了也没见变化"):
+            self.assertFalse(bot.matches_relation_query(text), text)
+
+    def test_mentioning_it_is_not_archived_as_a_command(self):
+        """不是指令就不该打 cmd 标记 —— 它还是聊天内容，该进记忆。"""
+        self.assertFalse(bot.is_control_command("这个好感度系统没有啥体现"))
+
+    def test_board_triggers_are_untouched(self):
+        self.assertTrue(bot.is_control_command("关系榜"))
+
+
 class CommandNeverReachesCompressionTest(unittest.TestCase):
     """打了 cmd 标记的消息：磁盘上留痕，但压缩取数时看不见。"""
 
