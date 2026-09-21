@@ -62,8 +62,13 @@ class MessageArchive:
             self._fp_day = day
         return self._fp
 
-    def append(self, group_id, sender, text, ts=None, at=False, keep=True):
-        """落一条原始消息。返回写入的字典（被过滤掉则返回 None）。"""
+    def append(self, group_id, sender, text, ts=None, at=False, keep=True, cmd=False):
+        """落一条原始消息。返回写入的字典（被过滤掉则返回 None）。
+
+        cmd=True 表示这是一条**本地控制指令**（「猫娘模式」「查好感」「决斗」之类），
+        不是聊天内容。它照样落盘留痕，但压缩长期记忆时会跳过（见 since）——
+        否则「喊猫娘模式」会被当成「这人想变猫娘」写进人物档案，实测已经发生过。
+        """
         ts = time.time() if ts is None else ts
         t = (text or "").strip()
         if not t:
@@ -77,6 +82,8 @@ class MessageArchive:
         }
         if at:
             row["at"] = 1
+        if cmd:
+            row["cmd"] = 1
         fp = self._ensure_fp(row["day"])
         fp.write(json.dumps(row, ensure_ascii=False) + "\n")
         fp.flush()
@@ -141,11 +148,14 @@ class MessageArchive:
             cur += 86400.0
         return days
 
-    def since(self, group_id, since_ts, limit=5000):
+    def since(self, group_id, since_ts, limit=5000, include_cmd=False):
         """读出某群自某个时刻以来的所有原始消息。
 
         这是压缩的唯一数据来源：压缩成功才推进 last_run，失败就原样再读一遍，
         所以消息不会因为一次模型报错就永久丢失。
+
+        ⚠️ 默认**跳过带 cmd 标记的本地指令**（include_cmd=False）：它们是操作不是聊天，
+        进了压缩就变成人物事实（「他喊了猫娘模式」→「他想变猫娘」）。
         """
         out = []
         for day in self._days_between(since_ts):
@@ -165,6 +175,8 @@ class MessageArchive:
                         if row.get("group") != group_id:
                             continue
                         if float(row.get("ts") or 0) <= since_ts:
+                            continue
+                        if not include_cmd and row.get("cmd"):
                             continue
                         out.append(row)
             except OSError:

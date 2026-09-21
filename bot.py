@@ -1162,6 +1162,32 @@ RELATION_QUERY_TRIGGERS = ["查好感", "好感度", "我跟你多熟", "我们�
 RELATION_BOARD_TRIGGERS = ["关系榜", "群友榜", "熟人榜", "查台账", "看台账", "查考勤", "点名册"]
 NAME_TABLE_TRIGGERS = ["称呼表", "名字表", "谁是谁", "改名册", "查称呼", "看称呼"]
 
+
+def is_control_command(text):
+    """这条是不是「本地控制指令」（不经过模型的那种操作）？
+
+    模式切换、查关系、查台账、改名册、决斗……这些话是**操作**，不是聊天内容。
+    不加区分地归档，它们就会在每日压缩时被当成人物事实写进长期记忆 ——
+    实测事故：群主喊了句「猫娘模式」，摘要里就留下了「老王还想当猫娘」，
+    还被安到了别人头上。所以这里在**归档时就打标记**，压缩源头跳过（archive.since）。
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    for k in exit_triggers():
+        if k and k in t:
+            return True
+    for _mode, triggers, _line in MODE_ENTRIES:
+        for k in triggers:
+            if k and k in t:
+                return True
+    for family in (OWNER_COMMANDS, DICE_TRIGGERS, RELATION_QUERY_TRIGGERS,
+                   RELATION_BOARD_TRIGGERS, NAME_TABLE_TRIGGERS, DIGEST_TRIGGERS):
+        for k in family:
+            if k and k in t:
+                return True
+    return bool(relations.parse_nick_lock_command(t))
+
 # 群聊长期记忆（每日滚动压缩出来的《群史记》），同样是本地读取，0 token
 DIGEST_TRIGGERS = ["群史记", "最近聊了啥", "群里在聊什么", "群摘要", "长期记忆", "周报"]
 # 承诺台账 / 结清
@@ -2145,7 +2171,11 @@ class GroupBot(botpy.Client):
         logger.info("📩 [%s] %s | %s", "@艾特" if is_at else "群消息", sender_openid, user_input)
 
         # 3. 归档（这是查证用的底稿）
-        ARCHIVE.append(group_id, sender_openid, user_input, at=is_at)
+        # ⚠️ 本地控制指令（「猫娘模式」这类）照样落盘留痕，但打上 cmd 标记 ——
+        #    压缩长期记忆时会跳过它们。它们是操作不是聊天，进了压缩就变成
+        #    「这人想变猫娘」这种人物事实（2026-09-21 实测事故）。
+        ARCHIVE.append(group_id, sender_openid, user_input, at=is_at,
+                       cmd=is_control_command(user_input))
         if config.DIGEST_ENABLED:
             DIGESTS.touch(group_id)
         # 记一下这个群最近有人说话：主动催债前要确认群里还活着。
