@@ -36,6 +36,23 @@ class LevelHintsAreActionableTest(unittest.TestCase):
         self.assertEqual(len(set(relations.LEVEL_HINTS.values())), len(relations.LEVEL_HINTS))
 
 
+class InsultActuallyCostsAffinityTest(unittest.TestCase):
+    """「小王我操你妈」连着说，好感度一分没掉 —— 词表里根本没有这类指向性辱骂。"""
+
+    def test_directed_insults_score_negative(self):
+        for text in ("小王我操你妈", "小王我想操你", "傻逼小王谁问你了", "你去死吧",
+                     "小王你妈的"):
+            self.assertEqual(relations.local_sentiment(text), -1, text)
+
+    def test_plain_exclamations_are_not_punished(self):
+        """「我操了」「卧槽」是语气词不是骂人 —— 冤案比漏判更伤。"""
+        for text in ("我操了", "卧槽这也行", "我今天真累", ""):
+            self.assertEqual(relations.local_sentiment(text), 0, text)
+
+    def test_positive_words_still_win(self):
+        self.assertEqual(relations.local_sentiment("谢谢小王，太厉害了"), 1)
+
+
 class MilestoneIsAnnouncedTest(unittest.TestCase):
     REC = {
         "score": 12, "nick": "阿强", "interactions": 20,
