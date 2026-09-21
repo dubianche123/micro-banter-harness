@@ -143,6 +143,29 @@ def level_icon(key):
     return LEVEL_ICONS.get(key, "·")
 
 
+# 档位从低到高的顺序，用来比较「升了还是降了」
+LEVEL_ORDER = tuple(k for _, k, _ in LEVELS)
+
+
+def tier_of(value):
+    """把一个里程碑端点归一成档位名。
+
+    ⚠️ 存过两种格式：早期写的是档位名（"familiar"），现在写的是分数（7）。
+    老档里还有上一版留下的，读的时候都得认 —— 谁也不许在这崩。
+    """
+    if isinstance(value, str):
+        return value if value in LEVEL_ORDER else LEVEL_ORDER[0]
+    try:
+        return level_key(int(value))
+    except (TypeError, ValueError):
+        return level_key(0)
+
+
+def tier_rank(value):
+    """档位高低，用来判断里程碑是往熟了走还是往生分走。"""
+    return LEVEL_ORDER.index(tier_of(value))
+
+
 def clamp_delta(delta):
     return max(DELTA_MIN, min(DELTA_MAX, int(delta)))
 
@@ -281,7 +304,8 @@ class RelationStore:
         now = time.time() if now is None else now
         rec = self.get(group_id, member_openid)
         pinned = bool(rec.get("pinned"))
-        old_level = level_key(rec["score"])
+        old_score = int(rec["score"])
+        old_level = level_key(old_score)
         self._settle(rec, now)
         step = clamp_delta(delta) if span is None else max(-span, min(span, int(delta)))
         rec["score"] = clamp_score(rec["score"] + step)
@@ -290,9 +314,13 @@ class RelationStore:
         if count:
             rec["interactions"] += 1
         rec["last_seen"] = now
-        new_level = level_key(rec["score"])
-        if new_level != old_level:
-            rec["pending_milestone"] = {"from": old_level, "to": new_level, "ts": now}
+        new_score = int(rec["score"])
+        new_level = level_key(new_score)
+        # 提醒按**每 10 分一个台阶**，不看档位：档位间隔本身不均匀（0/10/30/60/85），
+        # 按档位提醒会出现「涨了 20 分才吭一声」。±10 分就提一次，涨了跌了都提。
+        # 存的是分数不是档位名 —— 渲染时才翻成「更熟/更生分」的说法（见 build_relation_note）。
+        if new_score // 10 != old_score // 10:
+            rec["pending_milestone"] = {"from": old_score, "to": new_score, "ts": now}
         return rec["score"], old_level, new_level
 
     def set_nick(self, group_id, member_openid, nick, source="claim"):
@@ -429,11 +457,15 @@ def build_relation_note(rec, member_openid, mode="normal", now=None, other_names
     if ms:
         # 「自然地流露」写得太软，实测模型经常一句话都不提 —— 档位变了群里却没人看得出来。
         # 这里改成硬性要求：这次必须说出来（一句带过），说完翻篇。
+        up = tier_rank(ms.get("to", 0)) > tier_rank(ms.get("from", 0))
         lines.append(
-            f"- 刚刚的变化：你们的关系刚从「{level_label(ms['from'], mode)}」变成"
-            f"「{level_label(ms['to'], mode)}」。这次回复里**要当场说出来**，"
-            "一句带过就行（拿这个变化开个玩笑、或者直接点一句「咱俩现在算…了」），"
-            "别装作没发生；说过这一次就翻篇，之后不再提。"
+            f"- 刚刚的变化：你们{'更熟了' if up else '更生分了'}一点"
+            f"（从「{level_label(tier_of(ms.get('from', 0)), mode)}」"
+            f"{'升' if up else '降'}到「{level_label(tier_of(ms.get('to', 0)), mode)}」）。"
+            "这次回复里**要当场说出来**，一句带过就行。"
+            "⚠️ 不许报任何数字、也不许提「好感度」这三个字 —— 就像人自己突然意识到"
+            "「咦我俩好像挺熟了」那样随口一提，或者拿这件小事开个玩笑。"
+            "说过这一次就翻篇，之后不再提。"
         )
     return "\n".join(lines)
 

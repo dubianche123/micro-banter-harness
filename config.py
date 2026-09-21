@@ -304,6 +304,11 @@ AFFINITY_DECAY_STEP_DAYS = _env_float("AFFINITY_DECAY_STEP_DAYS", 2.0)    # 之�
 AFFINITY_DECAY_AMOUNT = _env_int("AFFINITY_DECAY_AMOUNT", 1)
 AFFINITY_PRUNE_IDLE_DAYS = _env_float("AFFINITY_PRUNE_IDLE_DAYS", 90.0)   # 长期不互动就清掉档案
 AFFINITY_BOARD_SIZE = _env_int("AFFINITY_BOARD_SIZE", 5)                  # 排行榜显示人数
+# 切换人格模式（猫娘/风纪/发疯…）的最低交情分 —— 见 bot.mode_switch_allowed。
+# 事故：2026-09-21 群里家豪好感度 −6（一直骂人）照样一句「猫娘模式」就切换成功，太没分寸。
+# 默认 0 = familiar 档起步：打过交道但印象一般/更差的会被回绝；**没打过交道的新人放行**
+# （不能因为还不熟就被拒，那是把门槛用成排斥）。群主永远豁免。
+MODE_SWITCH_MIN_AFFINITY = _env_int("MODE_SWITCH_MIN_AFFINITY", 0)
 
 # ══════════════════ 群聊长期记忆（每日滚动摘要，见 digest.py）══════════════════
 DIGEST_ENABLED = _env_bool("DIGEST_ENABLED", True)

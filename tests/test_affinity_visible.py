@@ -54,11 +54,36 @@ class InsultActuallyCostsAffinityTest(unittest.TestCase):
 
 
 class MilestoneIsAnnouncedTest(unittest.TestCase):
+    """跨了 10 分的台阶要被播报 —— 但只给感觉，不给数字。"""
+
+    # 现在写的是分数（relations.apply：new_score // 10 != old_score // 10 就记一次）
     REC = {
         "score": 12, "nick": "阿强", "interactions": 20,
         "last_seen": 0, "first_seen": 0,
-        "pending_milestone": {"from": "familiar", "to": "acquaintance", "ts": 0},
+        "pending_milestone": {"from": 7, "to": 12, "ts": 0},
     }
+
+    def test_legacy_tier_names_still_render(self):
+        """老档里存的是档位名（"familiar" 这种），读的时候不能崩。"""
+        rec = dict(self.REC,
+                   pending_milestone={"from": "familiar", "to": "acquaintance", "ts": 0})
+        note = relations.build_relation_note(rec, "some-openid")
+        self.assertIn("更熟了", note)
+        self.assertIn("刚刚的变化", note)
+
+    def test_going_down_reads_as_drifted_apart(self):
+        rec = dict(self.REC, pending_milestone={"from": 12, "to": 2, "ts": 0})
+        self.assertIn("更生分了", relations.build_relation_note(rec, "some-openid"))
+
+    def test_no_numbers_leak_into_the_note(self):
+        """播报里一个数字都不许有 —— 分数是内部账本，群里只该听见「更熟了」。
+
+        （提示词里出现的「好感度」是给模型下的禁令，不是要说出去的内容，所以只查数字。）
+        """
+        note = relations.build_relation_note(self.REC, "some-openid")
+        line = [l for l in note.splitlines() if "刚刚的变化" in l][0]
+        self.assertFalse(any(c.isdigit() for c in line), line)
+        self.assertIn("熟人", line, "档位要用称谓说出来，不能光说「升了一档」")
 
     def test_note_demands_saying_it_out_loud(self):
         note = relations.build_relation_note(self.REC, "some-openid")

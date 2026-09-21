@@ -1152,6 +1152,15 @@ MODE_ENTRIES = (
      "（单手搭着方向盘，潇洒一推墨镜，脚下油门轰到底）\n嘟嘟——！滴滴学生卡！老司机{bot}发车了！车门已焊死，今天带大伙体验秒速五百公里的推背感！不过本车主打‘字面清白、内心狂野’的高铁概念车，谁要是敢搞低俗被超管抓了，{owner}可不掏保释金！"),
 )
 
+# 交情不够、点单换模式被回绝时说的话（见 mode_switch_allowed）。
+# ⚠️ 一个数字都不许有、也不许出现「好感度」「亲密度」—— 那等于把内部评分念给群里听。
+MODE_DENIED_LINES = (
+    "（歪头）诶……咱俩好像还没熟到能让我这么听话的程度吧？你先好好说话，处两天熟了再来点单～",
+    "（抱臂）不是谁喊一嗓子我就变的啊，多少给点面子。先聊两天让我认认你这张脸，行不？",
+    "（后退半步）慢着慢着，你哪位？这么生分就想使唤我，传出去我还要不要面子了。",
+    "（假装没听见）嗯？风太大没听清。等你跟我混熟了再说这话，我考虑考虑。",
+)
+
 DICE_TRIGGERS = ["摇骰子", "掷骰子", "掷点", "比大小", "决斗", "扔骰子", "色子"]
 FORTUNE_TRIGGERS = ["算一卦", "算命", "看相", "占卜", "测字"]
 OWNER_COMMANDS = ["办他", "拖出去", "拿下", "拉出去", "掌嘴", "护驾"]
@@ -1748,6 +1757,33 @@ def banter_chance(base, rec):
     return min(base * relations.banter_weight(rec), config.BANTER_CHANCE_MAX)
 
 
+def mode_switch_allowed(group_id, openid, is_owner=False):
+    """这个人够不够格点单换模式（好感度门槛，2026-09-21 群主提）。
+
+    事故：好感度 −6（一直骂人）的人一句「猫娘模式」就切换成功 —— 模式是群层面的
+    公共状态，交给一个跟它还没处熟的人按按钮不合理。
+
+    三条豁免：
+      · 群主永远能切（他要调试/演示）；
+      · 关掉好感度系统时不拦；
+      · **没打过交道的人放行** —— 门槛是防「处得不好还来使唤」，不是防新人。
+    """
+    if is_owner or not config.AFFINITY_ENABLED:
+        return True
+    rec = RELATIONS.get(group_id, openid, create=False)
+    if not rec or not rec.get("interactions"):
+        return True
+    return rec.get("score", 0) >= config.MODE_SWITCH_MIN_AFFINITY
+
+
+def mode_denied_line(group_id):
+    """被拦下时说的话：只给「还没熟到那份上」的感觉，不许报数字、不许提「好感度」。
+
+    写死一句会被念烦，所以几轮换着来；语气带点玩笑，别让人觉得被系统惩罚了。
+    """
+    return naming.render(random.choice(MODE_DENIED_LINES), owner=owner_label(group_id))
+
+
 def _reset_style(group_id, old_mode, new_mode):
     """切换模式后把该群的会话历史清掉。
 
@@ -2309,6 +2345,12 @@ class GroupBot(botpy.Client):
 
         for mode_name, triggers, entry_line in MODE_ENTRIES:
             if current_mode != mode_name and any(k in user_input for k in triggers):
+                # 交情不够别来点单：模式是整群的公共状态，不能让一个跟它还没处熟的人按按钮
+                if not mode_switch_allowed(group_id, sender_openid, is_owner):
+                    logger.info("🚫 模式切换被交情门槛拦下（%s → %s）",
+                                mode_name, sender_openid[-4:])
+                    await safe_reply(message, mode_denied_line(group_id))
+                    return
                 STATE.set_mode(group_id, mode_name)
                 _reset_style(group_id, current_mode, mode_name)
                 await safe_reply(message, naming.render(entry_line, owner=owner_label(group_id)))
@@ -2521,6 +2563,11 @@ class GroupBot(botpy.Client):
         if config.AFFINITY_ENABLED:
             if delta is None:
                 delta = relations.local_sentiment(user_input)
+            # 好感度怎么涨（2026-09-21 群主定的口径）：**不必命中「喜欢/谢谢」这种好话** ——
+            # 主动点名找它说话、又没说难听的，这本身就是往来，自然就熟了。
+            # （只认明确艾特/喊名字；群里路过的一句话不算「找它说话」。）
+            if is_at and delta == 0:
+                delta = 1
             apply_relation_delta(group_id, sender_openid, delta, "AI互动")
 
     async def on_c2c_message_create(self, message: Message):
