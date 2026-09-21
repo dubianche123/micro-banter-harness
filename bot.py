@@ -2542,10 +2542,9 @@ class GroupBot(botpy.Client):
                     group_id,
                     digest_mod.render_summary(summary, mode=active_mode)
                     + people_block)
-                group_memory = (
-                    "【这个群最近发生的事（系统整理的长期记忆，真实发生过，可以拿来接梗、催债、点名，"
-                    "但不要编造记忆里没有的内容）】\n" + group_memory
-                )
+                # 引导语见 prompts.PROMPT_MEMORY_HEADER：除了说清「是真的」，
+                # 还得说清「是旧事、别当万能梗」—— 否则它会逮着一件事反复说。
+                group_memory = prompts.PROMPT_MEMORY_HEADER + "\n" + group_memory
 
         reply_text, delta = await get_ai_reply(
             session_id, user_input,
