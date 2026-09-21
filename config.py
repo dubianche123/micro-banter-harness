@@ -284,6 +284,10 @@ BANTER_PROBABILITY = _env_float("BANTER_PROBABILITY", 0.08)
 # 三个来源在 bot.owner_reference_terms 里合起来判断，换个群、群主改个名都不用动代码。
 OWNER_MENTION_PROBABILITY = _env_float("OWNER_MENTION_PROBABILITY", 0.25)
 
+# 插嘴概率乘上「亲密度权重」之后的上限（relations.BANTER_WEIGHTS，熟 1.6× / 生 0.7×）。
+# 权重只调「更愿意接谁」，不该把谁变成刷屏 —— 万一哪天把基数调大，天花板在这儿兜着。
+BANTER_CHANCE_MAX = _env_float("BANTER_CHANCE_MAX", 0.5)
+
 MEME_COOLDOWN_SECONDS = _env_float("MEME_COOLDOWN_SECONDS", 60.0)
 MEME_PROBABILITY = _env_float("MEME_PROBABILITY", 0.40)
 

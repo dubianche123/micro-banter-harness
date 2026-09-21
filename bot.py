@@ -1738,6 +1738,16 @@ def mentions_owner(text, group_id, mentioned_ids=()):
     return any(t and t in (text or "") for t in owner_reference_terms(group_id))
 
 
+def banter_chance(base, rec):
+    """这条消息触发插嘴的实际概率：基数 × 亲密度权重，再压天花板。
+
+    基数（config.BANTER_PROBABILITY / OWNER_MENTION_PROBABILITY）不动 —— 群里整体
+    话量由它决定；权重只回答「更愿意接谁」（relations.BANTER_WEIGHTS）。
+    没档案的人权重 1.0：新人不能因为还不熟就被晾着。
+    """
+    return min(base * relations.banter_weight(rec), config.BANTER_CHANCE_MAX)
+
+
 def _reset_style(group_id, old_mode, new_mode):
     """切换模式后把该群的会话历史清掉。
 
@@ -2402,9 +2412,15 @@ class GroupBot(botpy.Client):
                     chance = config.OWNER_MENTION_PROBABILITY
                 else:
                     chance = config.BANTER_PROBABILITY
+                # 亲密度权重：越熟的人说话越容易被接（2026-09-21 群主提的机制）。
+                # 权重不是概率 —— 基数不动，熟人 1.6×、生人 0.7×，整体话量不变。
+                rec = RELATIONS.get(group_id, sender_openid, create=False)
+                chance = banter_chance(chance, rec)
                 if random.random() < chance:
                     should_reply = True
                     is_random = True
+                    logger.info("🎲 插嘴命中（亲密度权重 %.2f → 概率 %.3f，%s）",
+                                relations.banter_weight(rec), chance, sender_openid[-4:])
                     group_last_random_reply[group_id] = now
                     STATE.data["cooldowns"][group_id] = now
                     STATE.mark_dirty()

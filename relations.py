@@ -98,6 +98,27 @@ LEVEL_HINTS = {
 }
 
 
+# 亲密度越高，「小王」越容易被这个人的话点着 —— 插嘴概率的**权重**，不是概率本身。
+# 熟人不接不像话，生人抢着接才怪（2026-09-21 群主提的机制）。
+# ⚠️ familiar 定为 1.0 是有意的：绝大多数人落在这档，所以群里整体的话痨程度不变，
+#    变的只是「更愿意接谁」—— 概率基数（config.BANTER_PROBABILITY）保持原样。
+BANTER_WEIGHTS = {
+    "blacklist": 0.3, "cold": 0.5, "distant": 0.7, "familiar": 1.0,
+    "acquaintance": 1.15, "friend": 1.3, "buddy": 1.45, "soulmate": 1.6,
+}
+
+
+def banter_weight(rec):
+    """这个人说话时，插嘴概率要乘多少。
+
+    没档案/没互动过的人一律 1.0 —— 新人不能因为「还不熟」就被晾着，
+    那是把机制用成了排斥。
+    """
+    if not rec or not rec.get("interactions"):
+        return 1.0
+    return BANTER_WEIGHTS.get(level_key(rec.get("score", 0)), 1.0)
+
+
 def level_key(score):
     key = LEVELS[0][1]
     for lower, k, _ in LEVELS:
