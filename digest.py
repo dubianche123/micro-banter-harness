@@ -553,6 +553,7 @@ class PromiseBook:
                     "due_text": r.get("due_text") or "",
                     "nag": int(r.get("nag") or 0),
                     "last_nag": float(r.get("last_nag") or 0),
+                    "last_shown": str(r.get("last_shown") or ""),
                 })
             if kept:
                 self.items[gid] = kept
@@ -602,6 +603,45 @@ class PromiseBook:
         merged.sort(key=lambda r: r.get("since") or 0)
         self.items[group_id] = merged[: self.max_items]
         return added, max(0, dropped)
+
+    # ── 喂给模型的那一口：一天只露一次 ──
+    def take_for_prompt(self, group_id, rows, now=None):
+        """今天还没在上下文里露过面的承诺，才允许进 prompt。
+
+        ⚠️ 为什么要有这道闸（2026-09-23 实测）：摘要里那行「🧾 还没兑现：罗老板——
+        请全群吃酸菜蹄髈」是**每轮都灌进上下文**的，于是当天十几条回复句句不离这
+        四个字，收尾雷同，群里看着就是揪着一桌菜不放。催债本来就有 dun_promises
+        定时去做（最多 2 次），常态回复不需要天天领这块料。
+
+        所以台账一天最多露一次面；「查账 / 欠我 / 承诺」这类显式查询走 list()，
+        不受这道闸限制 —— 人家开口问了当然要如实报。
+        """
+        now = time.time() if now is None else now
+        today = time.strftime("%Y-%m-%d", time.localtime(now))
+        book = {r["id"]: r for r in self.items.get(group_id, [])}
+        visible, freshly_shown = [], []
+        for p in rows or []:
+            if not isinstance(p, dict):
+                continue
+            what = str(p.get("what") or "").strip()
+            if not what:
+                continue
+            who = str(p.get("who") or "有人").strip()[:20]
+            key = _norm_promise_key(who, what)
+            if (book.get(key) or {}).get("last_shown") == today:
+                continue
+            visible.append(p)
+            freshly_shown.append((key, who, what))
+        for key, who, what in freshly_shown:
+            row = book.get(key)
+            if row is None:
+                row = {"id": key, "who": who, "what": what[:80], "since": now,
+                       "due_ts": None, "due_text": "", "nag": 0, "last_nag": 0.0,
+                       "last_shown": ""}
+                self.items.setdefault(group_id, []).append(row)
+                book[key] = row
+            row["last_shown"] = today
+        return visible
 
     # ── 催债 ──
     def dunnable(self, group_id, now=None):

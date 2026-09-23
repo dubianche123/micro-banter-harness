@@ -2538,9 +2538,21 @@ class GroupBot(botpy.Client):
                 people_block = digest_mod.render_people(summary)
                 if people_block:
                     people_block = "\n" + people_block
+                # 承诺台账一天只在上下文里露一次（PromiseBook.take_for_prompt）：
+                # 「没兑现的某某事」每轮都在眼前，就会被当成万能收尾句用。
+                # 这里只改喂给模型的那份视图，state 里的摘要原文不动。
+                view = summary
+                promises = (summary.get("data") or {}).get("promises")
+                if promises:
+                    visible = PROMISES.take_for_prompt(group_id, promises)
+                    if len(visible) != len(promises):
+                        data = dict(summary.get("data") or {})
+                        data["promises"] = visible
+                        view = dict(summary, data=data)
+                        STATE.mark_dirty()
                 group_memory = refresh_names(
                     group_id,
-                    digest_mod.render_summary(summary, mode=active_mode)
+                    digest_mod.render_summary(view, mode=active_mode)
                     + people_block)
                 # 引导语见 prompts.PROMPT_MEMORY_HEADER：除了说清「是真的」，
                 # 还得说清「是旧事、别当万能梗」—— 否则它会逮着一件事反复说。
