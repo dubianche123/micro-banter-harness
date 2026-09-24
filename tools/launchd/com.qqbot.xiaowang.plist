@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.qqbot.xiaowang</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/a0000/code_repository/QQbot/.venv/bin/python</string>
+        <string>-u</string>
+        <string>bot.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/a0000/code_repository/QQbot</string>
+
+    <!-- ⚠️ 这儿必须带代理：launchd 起的进程不继承任何 shell 环境，
+         没有它 Gemini 那条路直接连不出去（智谱走 NO_PROXY 直连不受影响，照样能说话）。 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>https_proxy</key>
+        <string>http://192.168.5.2:7890</string>
+        <key>http_proxy</key>
+        <string>http://192.168.5.2:7890</string>
+        <key>HTTPS_PROXY</key>
+        <string>http://192.168.5.2:7890</string>
+        <key>HTTP_PROXY</key>
+        <string>http://192.168.5.2:7890</string>
+        <key>NO_PROXY</key>
+        <string>bigmodel.cn</string>
+        <key>no_proxy</key>
+        <string>bigmodel.cn</string>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 进程没了就拉回来（崩溃、被 kill、机器从睡眠醒过来时都靠它） -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- 崩溃后至少间隔 10 秒再拉起，避免疯狂 crash-loop 刷日志 -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/a0000/code_repository/QQbot/bot.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/a0000/code_repository/QQbot/bot.log</string>
+</dict>
+</plist>

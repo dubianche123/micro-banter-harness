@@ -153,6 +153,34 @@ Missing credentials make it **fail at startup and tell you which one is missing*
 
 ---
 
+## Staying resident: something restarts it, and the Mac must not sleep
+
+It is a **resident**, not a script you run by hand. Two lines hold uptime:
+
+| Line | Owner | What it covers |
+|:--|:--|:--|
+| Come back if the process dies | `com.qqbot.xiaowang` (launchd, `KeepAlive`, 10s throttle) | crashes, stray kills, dead process after wake |
+| Never let the machine sleep | `com.qqbot.keepawake` (every 5 min, re-arms `caffeinate`) | macOS idles into sleep after 1 minute, and it goes offline |
+
+```bash
+bash tools/launchd/install.sh          # install and start both agents
+bash tools/launchd/install.sh status   # check
+bash tools/launchd/install.sh stop     # unload (taking the Mac away, or want sleep back)
+```
+
+⚠️ Three limits, all learned the hard way:
+
+- **A launchd process inherits no shell environment** — the proxy has to be written into
+  the plist's `EnvironmentVariables`, or the outbound route simply cannot connect
+  (the fallback provider goes direct through `NO_PROXY` and keeps talking fine,
+  but the primary route is dead).
+- LaunchAgents belong to the **login session**: after a reboot with nobody logged in,
+  nothing loads. Turn on automatic login for unattended runs.
+- `caffeinate` blocks **idle** sleep only — not a closed lid, a dead battery,
+  or the power button. Those three need a human or a UPS.
+
+---
+
 ## What the group can do with it
 
 | Feature | How to trigger | Cost |
@@ -418,6 +446,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | `storage.py` | State persistence, session context, token bucket, daily budget |
 | `qqtext.py` | Message normalisation: turn "human text + machine placeholders" into readable text |
 | `wordfilter.py` | Sensitive words: one wordlist shared by the naming entry point and the summary exit |
+| `tools/launchd/` | macOS residency: keep-alive agent + anti-sleep patroller (`install.sh`) |
 | `tests/` | 419 regression tests + a few one-off probe scripts |
 
 Run the tests (fully offline, no network or keys):
