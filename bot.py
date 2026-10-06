@@ -2654,7 +2654,11 @@ class GroupBot(botpy.Client):
         if config.AFFINITY_ENABLED:
             if delta is None:
                 delta = relations.local_sentiment(user_input)
-            apply_affinity_delta_capped(group_id, sender_openid, delta, "AI互动")
+                apply_affinity_delta_capped(group_id, sender_openid, delta, "词表兜底")
+            else:
+                # reason 区分开是有用的：跑几天就能从日志里看出「模型判方向」和
+                # 「词表兜底」各自的占比与准头，再决定要不要把权重挪向压缩结算。
+                apply_affinity_delta_capped(group_id, sender_openid, delta, "模型判方向")
 
     async def on_c2c_message_create(self, message: Message):
         """私聊。以前这里连去重都没有，重复投递会重复扣额度。"""
