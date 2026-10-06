@@ -294,9 +294,16 @@ MEME_PROBABILITY = _env_float("MEME_PROBABILITY", 0.40)
 # ══════════════════ 群友关系档案（见 relations.py）══════════════════
 AFFINITY_ENABLED = _env_bool("AFFINITY_ENABLED", True)
 # 每轮是否让模型在回复末尾吐一行 <CMD>{"aff":n}</CMD>。
-# 关掉（默认）后好感度改由每日压缩统一评估 —— 压缩看得到一整天完整对话，判得比每轮自评准，
-# 且不再要求模型额外吐 JSON，注意力全留在角色上。想回退老行为设 CMD_PROTOCOL_ENABLED=true。
-CMD_PROTOCOL_ENABLED = _env_bool("CMD_PROTOCOL_ENABLED", False)
+#
+# 2026-10-06 改过语义：以前是让它给 -3~+3 的**自由数字**，实测很虚（普通聊天也给 +3），
+# 而且没有任何东西能拦住它。现在只让它判**方向**（-1/0/1）——「这句对我是什么态度」是它的
+# 强项，绝对幅度交给代码：命中本地词表就扣，方向对上就加，最后还要过每日封顶。
+# 关掉（默认）后好感度只由每日压缩统一评估。
+CMD_PROTOCOL_ENABLED = _env_bool("CMD_PROTOCOL_ENABLED", True)
+# 每日加分/扣分封顶（对称）。为什么需要：模型偶尔会判错，而好感度是**长期账本** ——
+# 没有封顶的话，一次判错就可能把「铁哥们」直接扣成「生疏」，且要靠很多天才能涨回来。
+AFFINITY_DAILY_GAIN_CAP = _env_int("AFFINITY_DAILY_GAIN_CAP", 10)
+AFFINITY_DAILY_LOSS_CAP = _env_int("AFFINITY_DAILY_LOSS_CAP", 5)
 # 压缩时一次性结算一整天的印象变化，幅度上限比单次互动（±3）放宽些
 AFFINITY_DIGEST_SPAN = _env_int("AFFINITY_DIGEST_SPAN", 6)
 AFFINITY_DECAY_GRACE_DAYS = _env_float("AFFINITY_DECAY_GRACE_DAYS", 3.0)  # 这几天不来往不扣

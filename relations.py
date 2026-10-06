@@ -324,8 +324,14 @@ class RelationStore:
         # 提醒按**每 10 分一个台阶**，不看档位：档位间隔本身不均匀（0/10/30/60/85），
         # 按档位提醒会出现「涨了 20 分才吭一声」。±10 分就提一次，涨了跌了都提。
         # 存的是分数不是档位名 —— 渲染时才翻成「更熟/更生分」的说法（见 build_relation_note）。
+        #
+        # ⚠️ 但**一天只提一次**（2026-10-06）：日加分上限放宽到 10 之后，攒得动一整个台阶，
+        #  于是「我们更熟了」会变成每天一次的例行播报 —— 那正是记忆续杯的另一种形态：
+        # 同一句话每天被念一遍，很快就是复读。跨台阶本身照常记账，只是不再重复报。
+        today = time.strftime("%Y-%m-%d", time.localtime(now))
         if new_score // 10 != old_score // 10:
-            rec["pending_milestone"] = {"from": old_score, "to": new_score, "ts": now}
+            if rec.get("told_day") != today:
+                rec["pending_milestone"] = {"from": old_score, "to": new_score, "ts": now}
         return rec["score"], old_level, new_level
 
     def set_nick(self, group_id, member_openid, nick, source="claim"):

@@ -2087,6 +2087,70 @@ def apply_relation_delta(group_id, member_openid, delta, reason=""):
     return score
 
 
+def _affinity_daily_key(group_id, member_openid):
+    return f"{group_id}|{member_openid}"
+
+
+def affinity_budget(group_id, member_openid, now=None):
+    """今天这个人还剩多少加减分额度。跨天自动重置（只留今天和昨天，别让存档无限长）。"""
+    now = time.time() if now is None else now
+    day = time.strftime("%Y-%m-%d", time.localtime(now))
+    yesterday = time.strftime("%Y-%m-%d", time.localtime(now - 86400))
+    table = STATE.data.setdefault("affinity_daily", {})
+    for k in [k for k, v in table.items()
+              if isinstance(v, dict) and v.get("day") not in (day, yesterday)]:
+        table.pop(k, None)
+    rec = table.get(_affinity_daily_key(group_id, member_openid)) or {}
+    if rec.get("day") != day:
+        rec = {"day": day, "gain": 0, "loss": 0}
+        table[_affinity_daily_key(group_id, member_openid)] = rec
+    return rec
+
+
+def apply_affinity_delta_capped(group_id, member_openid, delta, reason="", span=None,
+                                now=None, count=True):
+    """带**每日封顶**的好感度写入。返回真正落库的分数（None = 被封顶吃掉了）。
+
+    为什么非要封顶：好感度是长期账本，而打分有两个会出错的来源 ——
+    模型的判断会漂、本地词表会有冤案。没有封顶的话，一次误判就能把「铁哥们」
+    直接扣成「生疏」，而涨回来要很多天。封顶把单次事故的伤害压到可恢复的范围内。
+    封顶是**不对称**的：加分放宽（关系本来就该越聊越近），扣分收紧（误判更伤人）。
+    """
+    if not config.AFFINITY_ENABLED or not delta:
+        return None
+    budget = affinity_budget(group_id, member_openid, now)
+    # ⚠️ 这里**不**做幅度 clamp：压缩结算一次能到 ±6，削成 ±3 就把它的语义废了。
+    # 幅度的收窄交给 RELATIONS.apply（它知道 span 是一次互动还是一整天）。
+    # 这里只管**封顶截断**，让单日额度真的成为硬上限。
+    delta = int(delta)
+    # ⚠️ 关键：不只是「超了没」，还得把这一笔**截断到剩余额度** ——
+    #    压缩结算一次能到 ±6，只判断不截断的话，一次就能把一天的额度穿个洞（实测 -6 > cap 5）。
+    if delta > 0:
+        room = config.AFFINITY_DAILY_GAIN_CAP - budget["gain"]
+        if room <= 0:
+            logger.info("💗 [%s/%s] %+d 被日封顶吃掉（今天已加 %d/%d）",
+                        group_id[-6:], member_openid[-6:], delta,
+                        budget["gain"], config.AFFINITY_DAILY_GAIN_CAP)
+            return None
+        delta = min(delta, room)
+    elif delta < 0:
+        room = config.AFFINITY_DAILY_LOSS_CAP - budget["loss"]
+        if room <= 0:
+            logger.info("💗 [%s/%s] %d 被日封顶吃掉（今天已扣 %d/%d）",
+                        group_id[-6:], member_openid[-6:], abs(delta),
+                        budget["loss"], config.AFFINITY_DAILY_LOSS_CAP)
+            return None
+        delta = -min(-delta, room)
+    if not delta:
+        return None
+    budget["gain"] += max(0, delta)
+    budget["loss"] += max(0, -delta)
+    STATE.mark_dirty()
+    if span is None and count:
+        return apply_relation_delta(group_id, member_openid, delta, reason)
+    return RELATIONS.apply(group_id, member_openid, delta, span=span, count=count)
+
+
 def apply_digest_affinity(group_id, rows):
     """把每日压缩结算出来的「对某人的印象变化」写进关系档案。
 
@@ -2120,10 +2184,14 @@ def apply_digest_affinity(group_id, rows):
             continue
         if not delta:
             continue
-        score, old_lv, new_lv = RELATIONS.apply(
-            group_id, target, delta,
-            span=config.AFFINITY_DIGEST_SPAN, count=False,
-        )
+        # 压缩结算也走同一道每日封顶 —— 它一次能到 ±6，不封的话一天就能把分数洗一遍
+        got = apply_affinity_delta_capped(
+            group_id, target, delta, reason="压缩结算",
+            span=config.AFFINITY_DIGEST_SPAN, count=False)
+        if got is None:
+            notes.append(f"{who}{delta:+d}→封顶")
+            continue
+        score, old_lv, new_lv = got
         applied += 1
         notes.append(f"{who}{delta:+d}→{score}")
     if applied:
@@ -2528,7 +2596,10 @@ class GroupBot(botpy.Client):
                 other_names=_other_names(group_id, sender_openid),
             )
             if target_record.get("pending_milestone"):
+                # 消费掉，并记下「今天已经报过一次」—— 台阶播报一天只说一次，
+                # 免得放宽日上限之后它把同一句播成每日常态（见 relations.apply 里的说明）。
                 target_record["pending_milestone"] = None
+                target_record["told_day"] = time.strftime("%Y-%m-%d")
                 STATE.mark_dirty()
 
         # 群聊长期记忆：有就注入，让它可以说「上周撺掇打牌那事儿我可还记着」
@@ -2575,17 +2646,15 @@ class GroupBot(botpy.Client):
             reply_text = f"{reply_text}\n{OWNER_CLAIM_HINT}"
         await safe_reply(message, reply_text)
 
-        # 日内微调：模型不再为每条回复打分（那活儿挪到每日压缩了），这里默认拿到的是
-        # 本地关键词的 ±1，只负责「当天就有点反馈」；真正的印象结算在压缩里做。
+        # 日内微调（2026-10-06 改）：
+        #   「被 @ 且没扣分就 +1」撤掉了 —— 那等于把好感度变成「被搭理次数」，
+        #   实测一天 100 多次记账里 108 次 +1，连一直骂人的也在涨。
+        # 现在是：模型判**方向**（-1/0/1，见 CMD_PROTOCOL），拿不到模型判定时退回本地词表，
+        #   最后统一过每日封顶。真正的印象结算仍在压缩里做（它看得到一整天，更准）。
         if config.AFFINITY_ENABLED:
             if delta is None:
                 delta = relations.local_sentiment(user_input)
-            # 好感度怎么涨（2026-09-21 群主定的口径）：**不必命中「喜欢/谢谢」这种好话** ——
-            # 主动点名找它说话、又没说难听的，这本身就是往来，自然就熟了。
-            # （只认明确艾特/喊名字；群里路过的一句话不算「找它说话」。）
-            if is_at and delta == 0:
-                delta = 1
-            apply_relation_delta(group_id, sender_openid, delta, "AI互动")
+            apply_affinity_delta_capped(group_id, sender_openid, delta, "AI互动")
 
     async def on_c2c_message_create(self, message: Message):
         """私聊。以前这里连去重都没有，重复投递会重复扣额度。"""

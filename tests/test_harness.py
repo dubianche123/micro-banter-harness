@@ -138,19 +138,28 @@ class HarnessOrderTest(unittest.IsolatedAsyncioTestCase):
 
     # ── 协议与历史 ──
 
-    async def test_cmd_protocol_off_by_default(self):
-        """默认不再逼模型吐 <CMD> 记账行 —— 好感度改由压缩结算。"""
+    async def test_cmd_protocol_on_by_default(self):
+        """2026-10-06 起默认让模型判**方向**（-1/0/1）——「被 @ 就 +1」那条撤掉了。
+
+        判方向是模型的强项，绝对幅度交给代码和每日封顶；关掉它（CMD_PROTOCOL_ENABLED=false）
+        好感度就只剩本地词表 + 每日压缩。
+        """
         msgs = await self.grab("th_cmd_1", "你好", is_owner=True, mode="normal",
                                relation_note="【记忆】x")
         blob = "\n".join(m["content"] for m in msgs)
-        self.assertFalse(config.CMD_PROTOCOL_ENABLED)
-        self.assertNotIn("<CMD>", blob)
+        self.assertTrue(config.CMD_PROTOCOL_ENABLED)
+        self.assertIn("<CMD>", blob)
+        self.assertIn("-1、0、1", blob)
 
-    async def test_scoring_rubric_travels_with_protocol(self):
-        """「记账口径」是协议的一部分，协议关了它也不该占稳定头的位置。"""
+    async def test_scoring_rubric_rides_along_with_the_protocol(self):
+        """「记账口径」跟着协议一起进稳定头 —— 协议开着时它在，关系才判得准。
+
+        反过来：协议关掉（CMD_PROTOCOL_ENABLED=false）它就该消失，否则白占 token。
+        """
         msgs = await self.grab("th_hint_1", "喵", mode="catgirl",
                                relation_note="【记忆】x")
-        self.assertNotIn("记账口径", msgs[0]["content"])
+        self.assertEqual(bool(config.CMD_PROTOCOL_ENABLED),
+                         "记账口径" in msgs[0]["content"])
 
     async def test_envelope_never_stored_in_history(self):
         """信封只贴在发出去的请求上，历史里存的是原话，否则会一轮轮堆成雪球。"""

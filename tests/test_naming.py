@@ -81,7 +81,7 @@ class RenderTest(unittest.TestCase):
         KeyError，而且是运行到那一段才炸，等于把记账协议整个搞坏。
         """
         out = naming.render(prompts.CMD_PROTOCOL + "{owner}", owner="老张")
-        self.assertIn('{"aff": 2}', out)
+        self.assertIn('{"aff": 0}', out)   # 协议示例值随口径变（三档），花括号本身必须活着
         self.assertFalse(out.endswith("{owner}"))
 
     def test_all_personas_render_clean(self):
