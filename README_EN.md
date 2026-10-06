@@ -382,7 +382,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | One real siege (2026-09-18) | 17 rename requests in 13 minutes: 10 blocked, 7 let through | The ones that slipped through were no cleaner than the blocked ones — they simply were not the sample drawn. This is where the rename throttle below comes from |
 | Compression throughput | 4.5-air swallowed 260 messages / 4732 chars; 4.7 returned contentFilter 1301 on the same input | Evidence for using the weaker tier |
 | Cost gates | Global ≤3000 calls/day; per-group bucket of 8, refilling 1 per 5s | Caps flooding at roughly 12 calls/minute |
-| Regression suite | **429 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, digest bylines, the rename lock, prompt order, no canned examples in prompts, tone restraint and free-target banter, people-roster injection, local commands never entering long-term memory, affinity queries requiring explicit intent, affinity-weighted banter chance, directed insults costing affinity, affinity tiers and level-up announcements, the affinity gate on mode switching, long-term memory never being used as a running gag (stale items are not auto-renewed), passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, structural-failure isolation, failover |
+| Regression suite | **430 tests** green, fully offline, no keys required | Dedicated tests for renaming, the primary-name guard, name-collision blocking, owner-claim and anti-hijack, name refresh, digest bylines, the rename lock, prompt order, no canned examples in prompts, tone restraint and free-target banter, people-roster injection, local commands never entering long-term memory, affinity queries requiring explicit intent, affinity-weighted banter chance, directed insults costing affinity, affinity tiers and level-up announcements, the affinity gate on mode switching, long-term memory never being used as a running gag (stale items are not auto-renewed), passive-reply expiry, private-chat rename redirect, no raw ids in replies, group-display-name pairing and fallback, rename throttle, structural-failure isolation, failover |
 
 ---
 
@@ -402,6 +402,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | Multimodal (image reading) | Faces and images that read as nothing are dropped entirely, not archived — the complexity of adding multimodal far outweighs the benefit |
 | A database | One group's data fits in JSON; one less dependency is one less deployment trap |
 | Regex-enumerating message formats | A new platform placeholder is one new `@renderer`, the parser is untouched |
+| Never name a real incident inside the prompts | Writing a rule tempts you to illustrate it with the very thing you just cleaned up (which is exactly what happened here), and that word then sits in front of the model every single turn — you put it back yourself. Illustrate abstractly; a dedicated test guards this |
 | Canned example lines in prompts | The model copies examples as templates (5 of 5 outputs started with the same phrase), so prompts describe the effect instead. ⚠️ This has to hold **all the way down**: on one day the bot said the same plumbing line 5 times and the same takeout line 6 times, and every one of them came from two example sentences in the deflecting-a-bait section. A prop written into the prompt becomes a verbal tic |
 | Relying on prompts to keep relationships correct | Prompts do not stop homophones and do not stop invented kinship — so relationships live in the archive, old names in the ledger, and code enforces both |
 | Letting automatic logic touch primary names | One override and the person stops trusting the bot; the only write sources are "the person themself" and "owner-authorised rename", and an illegal source cannot even clear the name |
@@ -449,7 +450,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 | `qqtext.py` | Message normalisation: turn "human text + machine placeholders" into readable text |
 | `wordfilter.py` | Sensitive words: one wordlist shared by the naming entry point and the summary exit |
 | `tools/launchd/` | macOS residency: keep-alive agent + anti-sleep patroller (`install.sh`) |
-| `tests/` | 429 regression tests + a few one-off probe scripts |
+| `tests/` | 430 regression tests + a few one-off probe scripts |
 
 Run the tests (fully offline, no network or keys):
 

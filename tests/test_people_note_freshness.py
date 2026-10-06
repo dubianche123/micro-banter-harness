@@ -18,7 +18,7 @@ sys.path.insert(0, "..")
 
 import config
 import digest
-import relations  # noqa: F401  （与 bot 同目录，确保 import 路径一致）
+import prompts
 
 
 def _people(people):
@@ -100,8 +100,23 @@ class PromptWordingTest(unittest.TestCase):
     """光有代码闸不够，压缩时也该明确禁止写时效标签。"""
 
     def test_reduce_forbids_perishable_wording(self):
-        self.assertIn("刚解封", digest.SYSTEM_REDUCE)
+        self.assertIn("时效词", digest.SYSTEM_REDUCE)
         self.assertIn("过期", digest.SYSTEM_REDUCE)
+
+    def test_prompt_text_never_names_a_real_incident(self):
+        """⚠️ 提示词里**不许出现真实发生过的那件事**。
+
+        这条不是洁癖：写规则时为了举例很容易顺手把刚处理掉的事写进去
+        （当时就写了那个「被平台处置」的真实案例），而这个词每轮都在模型眼前 ——
+        等于亲手把它塞回上下文，它照样会被翻出来当梗用。举例只能用抽象说法。
+        """
+        for mod in (prompts, digest):
+            body = "\n".join(
+                str(v) for k, v in vars(mod).items()
+                if isinstance(v, str) and k.isupper() and len(v) > 40)
+            for token in ("封号", "解封", "蹄髈", "蹄膀"):
+                self.assertNotIn(token, body,
+                                 f"{mod.__name__} 的提示词常量里出现了 {token}")
 
 
 if __name__ == "__main__":
