@@ -239,7 +239,7 @@ CONTEXT_TTL_SECONDS = _env_float("CONTEXT_TTL_SECONDS", 1800.0)  # 静默 30 分
 
 # ══════════════════ 群聊背景缓存 ══════════════════
 GROUP_BUFFER_SIZE = _env_int("GROUP_BUFFER_SIZE", 10)
-# 背景条目的保鲜期（秒）。⚠️ 只此一份：GROUP_BUFFER_TTL_SECONDS（342 行）是唯一在用的名字，
+# 背景条目的保鲜期（秒）。⚠️ 只此一份：GROUP_BUFFER_TTL_SECONDS 是唯一在用的名字，
 # 插嘴提示词「由头只从最近的话里挑」的口径就建立在它之上 —— 改这里会同时改变插嘴的眼界。
 
 # ══════════════════ 限流（群级 + 全局，刻意不做 per-user 配额）══════════════════
@@ -342,6 +342,10 @@ MEME_NOTE_MAX_AGE_DAYS = _env_float("MEME_NOTE_MAX_AGE_DAYS", 3.0)
 # 群聊背景（【群聊最近背景】）最多回看多久。buffer 会落盘、跨重启保留，
 # 不用时间过滤的话，安静半天后的第一条消息配到的还是半天前的话。
 GROUP_BUFFER_TTL_SECONDS = _env_float("GROUP_BUFFER_TTL_SECONDS", 1800.0)
+# QQ 官方 API 的 HTTP 超时（秒）。botpy 默认 5s，晚间高峰实测会超 —— 而且 botpy 的
+# http 层把 TimeoutError 吞掉不抛（只打警告返回 None），超时=这条回复凭空消失。
+# 放宽到 10s 减少发生频率；真发生了由 safe_reply 的「None 检测 + 同 seq 重试」兜底。
+QQ_API_TIMEOUT = _env_float("QQ_API_TIMEOUT", 10.0)
 # 摘要产出后顺手写一份 MD，人直接看这个；原始消息另存 JSONL 备查
 DIGEST_WRITE_MD = _env_bool("DIGEST_WRITE_MD", True)
 

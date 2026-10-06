@@ -533,8 +533,7 @@ async def safe_reply(message, reply_text):
             int(age), window)
         return
     try:
-        await message.reply(content=reply_text, msg_type=0)
-        logger.info("📤 [已回复]: %s", reply_text.replace("\n", " ")[:200])
+        sent = await message.reply(content=reply_text, msg_type=0)
     except Exception as e:
         err_str = str(e)
         logger.error("❌ 消息发送失败: %s", err_str[:200])
@@ -549,6 +548,31 @@ async def safe_reply(message, reply_text):
                 )
             except Exception:
                 pass
+        return
+
+    if sent:
+        mid = sent.get("id", "?") if isinstance(sent, dict) else getattr(sent, "id", "?")
+        logger.info("📤 [已回复] id=%s: %s", str(mid)[:24], reply_text.replace("\n", " ")[:200])
+        return
+
+    # ⚠️ 走到这里 = botpy 的 http 层把 TimeoutError **吞掉**了（只打一行警告，
+    # 不重试、不抛异常，直接 return None），于是「发送」其实生死未卜 ——
+    # 2026-10-06 22:27 实测：日志里记了 📤，群里什么都没有，看起来像掉线。
+    # 同一 msg_id+msg_seq 重试一次是安全的：首条若已在腾讯落地，重试会被
+    # seq 去重拒绝（消息本来就在群里）；若没落地，这次正好补上。
+    logger.warning("📤 上一次发送超时（botpy 吞错返回 None），同一 msg_seq 重试一次")
+    try:
+        sent = await message.reply(content=reply_text, msg_type=0)
+    except Exception as e:
+        logger.warning("⚠️ 重试被拒（多半是首条其实已送达，被 msg_seq 去重挡下）: %s",
+                       str(e)[:160])
+        return
+    if sent:
+        mid = sent.get("id", "?") if isinstance(sent, dict) else getattr(sent, "id", "?")
+        logger.info("📤 [已回复·重试成功] id=%s: %s",
+                    str(mid)[:24], reply_text.replace("\n", " ")[:200])
+    else:
+        logger.error("❌ 两次发送都超时 —— 这条回复大概率没进群")
 
 
 def _throttled_notice_key(group_id, kind):
@@ -1906,7 +1930,8 @@ def run_bot():
         started_at = time.time()
         try:
             intents = botpy.Intents(public_messages=True, public_guild_messages=True)
-            client = GroupBot(intents=intents)
+            # timeout：QQ API 的 HTTP 超时（botpy 默认 5s，见 config.QQ_API_TIMEOUT 的注释）
+            client = GroupBot(intents=intents, timeout=int(config.QQ_API_TIMEOUT))
             client.run(appid=config.QQ_APP_ID, secret=config.QQ_APP_SECRET)
             attempt = 0
         except SystemExit:

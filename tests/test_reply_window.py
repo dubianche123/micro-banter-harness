@@ -148,6 +148,51 @@ class ReplyWindowTest(unittest.IsolatedAsyncioTestCase):
         await bot.safe_reply(m, "在的")
         self.assertEqual(len(calls), 2, "第一次被风控拒了之后，应当再补一句")
 
+    async def test_silently_swallowed_timeout_is_retried(self):
+        """2026-10-06 22:27 实测：botpy 的 http 层把 TimeoutError 吞成 None
+        （不抛异常、不重试），safe_reply 误记 📤，群里却什么都没有 ——
+        看起来像掉线，其实是发送静默失败。返回 None 必须重试一次。"""
+        calls = []
+
+        async def flaky_reply(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return None              # 第一次：超时，被 botpy 吞掉
+            return {"id": "ok-2"}
+
+        m = FakeGroupMessage(_stamp(1))
+        m.reply = flaky_reply
+        await bot.safe_reply(m, "在的")
+        self.assertEqual(len(calls), 2, "返回 None 应当触发一次重试")
+
+    async def test_double_timeout_is_reported_not_looped(self):
+        """两次都超时：老实报失败，绝不无限重试。"""
+        calls = []
+
+        async def dead_reply(**kwargs):
+            calls.append(kwargs)
+            return None
+
+        m = FakeGroupMessage(_stamp(1))
+        m.reply = dead_reply
+        await bot.safe_reply(m, "在的")
+        self.assertEqual(len(calls), 2, "只重试一次")
+
+    async def test_seq_conflict_on_retry_reads_as_delivered(self):
+        """重试被 seq 去重拒绝 = 首条其实已经在群里了 —— 不算失败，别再补。"""
+        calls = []
+
+        async def landed_then_rejected(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return None              # 首条超时，但其实已送达
+            raise RuntimeError("msg_seq 重复")
+
+        m = FakeGroupMessage(_stamp(1))
+        m.reply = landed_then_rejected
+        await bot.safe_reply(m, "在的")
+        self.assertEqual(len(calls), 2)
+
     async def test_stale_message_never_hits_the_api(self):
         """关键性质：老消息连一次请求都不该打出去（这才是省下那次的全部意义）。"""
         m = FakeGroupMessage(_stamp(30 * 60))
