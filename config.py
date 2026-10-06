@@ -326,6 +326,13 @@ DIGEST_MAX_TOKENS = _env_int("DIGEST_MAX_TOKENS", 800)
 # 名册的定位本来就是「最近在干什么」，不是永久档案；模型每次压缩又习惯把旧条目原样抄回，
 # 所以靠时间戳让它自然过期 —— 实测「号刚解封」这条标签挂了五天，天天被拿来说。
 PEOPLE_NOTE_MAX_AGE_DAYS = _env_float("PEOPLE_NOTE_MAX_AGE_DAYS", 2.0)
+# 「名场面/梗」同样有时效（见 digest.stamp_memes / render_summary）。
+# 原先只喂列表里第一条、且不限时，于是排到首位的那条梗天天在模型眼前 ——
+# 收录进去的偏偏是「你死了十二天」这种针对它自己的吐槽。
+MEME_NOTE_MAX_AGE_DAYS = _env_float("MEME_NOTE_MAX_AGE_DAYS", 3.0)
+# 群聊背景（【群聊最近背景】）最多回看多久。buffer 会落盘、跨重启保留，
+# 不用时间过滤的话，安静半天后的第一条消息配到的还是半天前的话。
+GROUP_BUFFER_TTL_SECONDS = _env_float("GROUP_BUFFER_TTL_SECONDS", 1800.0)
 # 摘要产出后顺手写一份 MD，人直接看这个；原始消息另存 JSONL 备查
 DIGEST_WRITE_MD = _env_bool("DIGEST_WRITE_MD", True)
 

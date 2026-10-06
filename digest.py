@@ -66,6 +66,10 @@ SYSTEM_REDUCE = """你在为 QQ 群「{bot}」整理长期记忆。你会拿到�
 字段规则：
 - topics：近期话题，heat 用 1~5 表示热度。最多 6 条。
 - memes：值得复用的金句/梗，quote 尽量照抄原话。最多 5 条。
+  ⚠️ **这两类一律不进 memes**：一是别人的糗事、不体面的事（被平台处置、当众出丑、翻车），
+  二是**针对{bot}自己的吐槽**（说你掉线、说你宕机、说你死了几天的）。
+  前者留着就是标签，说出去是揭短；后者会被当成好素材天天复读，把一次意外变成永久梗。
+  要留的是那种「大家一起玩得起来」的梗，不涉及谁倒霉、也不涉及{bot}自己。
 - promises：没有兑现的承诺或待办，这是为了以后「催债」用的，玩笑也算。最多 5 条。
 - people：对具体某个人的新认知（在玩什么、什么处境）。最多 6 条。
 - affinity：**这一段时间里，每个人跟「{bot}」相处给你的整体印象变化**。delta 取 -3~3 的整数：
@@ -177,7 +181,23 @@ def render_summary(state, mode="normal"):
         parts.append("🧾 还没兑现：" + "；".join(
             f"{p.get('who','有人')}——{p.get('what','')}" for p in data["promises"] if p.get("what")))
     if data.get("memes"):
-        best = data["memes"][0].get("quote") if isinstance(data["memes"][0], dict) else ""
+        # ⚠️ 这块原先只喂 memes[0]（固定第一条、每轮都喂、还没有时限），于是某条梗
+        # 一旦排到首位就天天在模型眼前 —— 哪怕那条记录的是「某人被平台处置」或者
+        # 「群友吐槽它掉线」这种根本不该复用的东西。
+        # 现在三道处理：过期的不喂（和名册同一套时间戳）、按最新优先取、
+        # 而「为什么新鲜」由 stamp_memes 判定（内容没变 = 没有新料，继续变老）。
+        best = ""
+        for m in data["memes"]:
+            if not isinstance(m, dict):
+                continue
+            quote = str(m.get("quote") or "").strip()
+            if not quote:
+                continue
+            ts = float(m.get("ts") or 0)
+            if not ts or (time.time() - ts) > config.MEME_NOTE_MAX_AGE_DAYS * 86400.0:
+                continue
+            best = quote
+            break
         if best:
             parts.append(f"😂 名场面：「{best}」")
     return "\n".join(parts)
@@ -201,7 +221,7 @@ def render_people(state, limit=8, now=None):
     #    说事，最后被群友当面吐槽。代码按 ts 卡掉过期的：没写新内容就是没有新消息。
     now = time.time() if now is None else now
     max_age = getattr(config, "PEOPLE_NOTE_MAX_AGE_DAYS", 2.0) * 86400.0
-    people = []
+    fresh, stale = [], []
     for p in (data.get("people") or []):
         if not isinstance(p, dict):
             continue
@@ -210,9 +230,11 @@ def render_people(state, limit=8, now=None):
         if not (who and note):
             continue
         ts = float(p.get("ts") or 0)
-        if ts and (now - ts) > max_age:
-            continue      # 老黄历了：这条「近况」早就不近了
-        people.append((who, note))
+        (fresh if ts and (now - ts) <= max_age else stale).append((who, note))
+    # ⚠️ 一条都不新鲜时宁可给陈旧的，也不要给空 —— 名册空着，模型就只能去读
+    # 【群史记】里那种连动长句，「把谁干的安到谁头上」的老病立刻复发（09-20 实测）。
+    # 所以这里是「有新的用新的，全旧了用旧的」，而不是「过期的宁可不喂」。
+    people = fresh or stale
     if not people:
         return ""
     lines = "\n".join(f"- {who}：{note}" for who, note in people[:limit])
@@ -450,8 +472,33 @@ async def compress_group(store, group_id, entries, ask, resolver=None, budget=No
     # 不这么比对的话，模型每次把「家豪：号刚解封」原样抄回来，这条标签就永远年轻。
     stamp_people((slot.get("summary") or {}).get("data"), summary["data"],
                  now=summary["updated"])
+    stamp_memes((slot.get("summary") or {}).get("data"), summary["data"],
+                now=summary["updated"])
     slot["summary"] = summary
     return slot["summary"]
+
+
+def stamp_memes(old_data, new_data, now=None):
+    """梗也要有时间戳，判定口径和名册一样：**换个说法才算新料**。
+
+    ⚠️ 抄回来的旧梗不给新时间戳：老 state 里的梗压根没有 ts，那就让它继续没有 ——
+    render 时会被当成过期的跳过。给 now 等于白送它两天的保质期，
+    这正是名册那次「文本没变却当成新信息」续杯的翻版。
+    """
+    now = time.time() if now is None else now
+    old = {}
+    for m in ((old_data or {}).get("memes") or []):
+        if isinstance(m, dict):
+            q = str(m.get("quote") or "").strip()
+            if q:
+                old[q] = float(m.get("ts") or 0)
+    for m in ((new_data or {}).get("memes") or []):
+        if not isinstance(m, dict):
+            continue
+        q = str(m.get("quote") or "").strip()
+        if not q:
+            continue
+        m["ts"] = now if q not in old else old[q]
 
 
 def stamp_people(old_data, new_data, now=None):
@@ -477,8 +524,12 @@ def stamp_people(old_data, new_data, now=None):
         note = str(p.get("note") or p.get("Note") or "").strip()
         if not (who and note):
             continue
-        prev_note, prev_ts = old.get(who, ("", 0.0))
-        p["ts"] = now if note != prev_note else (prev_ts or now)
+        prev_note, prev_ts = old.get(who, ("", None))
+        if prev_note == note:
+            # 原样抄回来的：沿用旧时间戳（旧数据没有 ts 就仍然没有 ⇒ 会被当成过期的）
+            p["ts"] = prev_ts
+        else:
+            p["ts"] = now
         stamped += 1
     return stamped
 

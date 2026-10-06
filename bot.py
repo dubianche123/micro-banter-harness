@@ -2483,7 +2483,13 @@ class GroupBot(botpy.Client):
         context_hint = ""
         buf = group_buffers.get(group_id)
         if buf and len(buf) > 1:
-            prev = [b for b in list(buf)[:-1] if b["text"] != user_input][-3:]
+            # ⚠️ 必须按时间过滤（2026-10-06 实测）：buffer 是落盘的、跨重启保留，
+            # 机器睡了 12 天再醒来的第一条消息，配到的还是 12 天前的对话 ——
+            # 那不叫「最近背景」，叫考古。
+            now_ts = time.time()
+            fresh = [b for b in buf if now_ts - float(b.get("time") or 0)
+                     <= config.GROUP_BUFFER_TTL_SECONDS]
+            prev = [b for b in fresh[:-1] if b["text"] != user_input][-3:]
             if prev:
                 # 必须标出发言人。之前只给一串裸文本，模型分不清哪句是谁说的，
                 # 于是把别人认领的名字安到了当前这位头上 —— 叫错人就是这么来的

@@ -62,11 +62,28 @@ class StampTest(unittest.TestCase):
 class RenderExpiryTest(unittest.TestCase):
     """过期的不再进上下文。"""
 
-    def test_stale_note_is_not_injected(self):
+    def test_stale_note_is_not_mixed_in_with_fresh_ones(self):
+        """有过期的就只给新的。"""
         now = time.time()
         old_ts = now - (config.PEOPLE_NOTE_MAX_AGE_DAYS + 1) * 86400
-        state = _state([{"who": "家豪", "note": "号刚解封", "ts": old_ts}])
-        self.assertEqual(digest.render_people(state, now=now), "")
+        state = _state([
+            {"who": "家豪", "note": "号刚解封", "ts": old_ts},
+            {"who": "罗老板", "note": "爱整活", "ts": now - 60},
+        ])
+        out = digest.render_people(state, now=now)
+        self.assertNotIn("家豪", out)
+        self.assertIn("罗老板", out)
+
+    def test_all_stale_falls_back_instead_of_going_blank(self):
+        """全过期时宁可给陈旧的，也不要给空 —— 名册空着，张冠李戴立刻复发。"""
+        now = time.time()
+        old_ts = now - (config.PEOPLE_NOTE_MAX_AGE_DAYS + 5) * 86400
+        state = _state([{"who": "家豪", "note": "很久以前的观察", "ts": old_ts}])
+        self.assertIn("家豪", digest.render_people(state, now=now))
+
+    def test_empty_roster_is_still_empty(self):
+        """回退只兜「有但旧」，真的没有就该是空。"""
+        self.assertEqual(digest.render_people(_state([])), "")
 
     def test_fresh_note_still_shows(self):
         now = time.time()
