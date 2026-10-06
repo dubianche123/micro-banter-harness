@@ -61,7 +61,7 @@ class DigestDoesNotRefillOldNewsTest(unittest.TestCase):
         self.assertIn("续杯", digest_mod.SYSTEM_REDUCE)
 
     def test_reduce_prompt_says_people_notes_are_current_state(self):
-        self.assertIn("近况", digest_mod.SYSTEM_REDUCE)
+        self.assertIn("稳定状态", digest_mod.SYSTEM_REDUCE)
 
 
 if __name__ == "__main__":

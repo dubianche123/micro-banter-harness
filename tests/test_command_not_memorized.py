@@ -99,7 +99,9 @@ class DigestPromptKnowsCommandsTest(unittest.TestCase):
     def test_reduce_prompt_told_not_to_record_commands(self):
         """存量归档里还有没标记的旧指令，靠提示词这层兜住。"""
         self.assertIn("不是聊天内容", digest_mod.SYSTEM_REDUCE)
-        self.assertIn("猫娘模式", digest_mod.SYSTEM_REDUCE)
+        # 2026-10-06 去事故例句化：不再写「有人喊了猫娘模式…」的真实事件，
+        # 用抽象写法「XX模式」举例（例句本身就是复读素材，见提示词铁律）
+        self.assertIn("XX模式", digest_mod.SYSTEM_REDUCE)
 
 
 if __name__ == "__main__":

@@ -937,6 +937,7 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
             head += prompts.AFFINITY_MODE_HINTS.get(mode) or ""
             head += prompts.CMD_PROTOCOL
 
+        # ── 2) 每日记忆 / 3) 会话历史 由 SESSIONS.build_messages 按稳定度插入 ──
         # ── 4) 本轮动态：随发言人和轮次变化的东西，一律压到最末尾 ──
         bits = []
         if is_owner:
@@ -1193,6 +1194,25 @@ def matches_relation_query(text):
             and any(k in t for k in RELATION_QUERY_INTENTS))
 RELATION_BOARD_TRIGGERS = ["关系榜", "群友榜", "熟人榜", "查台账", "看台账", "查考勤", "点名册"]
 NAME_TABLE_TRIGGERS = ["称呼表", "名字表", "谁是谁", "改名册", "查称呼", "看称呼"]
+# 群聊长期记忆（每日滚动压缩出来的《群史记》），同样是本地读取，0 token
+DIGEST_TRIGGERS = ["群史记", "最近聊了啥", "群里在聊什么", "群摘要", "长期记忆", "周报"]
+# 承诺台账 / 结清
+PROMISE_TRIGGERS = ["查账", "承诺", "欠我", "催债", "画饼", "欠账", "谁请客"]
+PROMISE_CLEAR_TRIGGERS = ["结清", "兑现了", "已兑现", "我做到了", "清账", "销账"]
+# 手动触发一次压缩，不用等定时器
+MANUAL_DIGEST_TRIGGERS = ["立刻总结", "马上总结", "压缩记忆", "现在总结", "生成群史记"]
+# 回原文查证：翻旧账 <关键词>
+RE_LOOKUP = re.compile(r"^翻旧账\s*(\S{1,20})\s*$")
+
+
+def hits(text, words):
+    """本地触发词匹配的**唯一入口**：子串匹配、空词安全。
+
+    以前每个判断点都手写一遍 `any(k in text for k in words)`，十一处轮子；
+    收敛到这里之后，匹配规则要改（比如加词边界、做归一化）只改这一处。
+    """
+    t = text or ""
+    return any(w and w in t for w in words)
 
 
 def is_control_command(text):
@@ -1206,31 +1226,15 @@ def is_control_command(text):
     t = (text or "").strip()
     if not t:
         return False
-    for k in exit_triggers():
-        if k and k in t:
+    for family in (exit_triggers(),
+                   *(triggers for _mode, triggers, _line in MODE_ENTRIES),
+                   OWNER_COMMANDS, DICE_TRIGGERS, RELATION_BOARD_TRIGGERS,
+                   NAME_TABLE_TRIGGERS, DIGEST_TRIGGERS, MANUAL_DIGEST_TRIGGERS):
+        if hits(t, family):
             return True
-    for _mode, triggers, _line in MODE_ENTRIES:
-        for k in triggers:
-            if k and k in t:
-                return True
-    for family in (OWNER_COMMANDS, DICE_TRIGGERS, RELATION_BOARD_TRIGGERS,
-                   NAME_TABLE_TRIGGERS, DIGEST_TRIGGERS):
-        for k in family:
-            if k and k in t:
-                return True
     if matches_relation_query(t):
         return True
     return bool(relations.parse_nick_lock_command(t))
-
-# 群聊长期记忆（每日滚动压缩出来的《群史记》），同样是本地读取，0 token
-DIGEST_TRIGGERS = ["群史记", "最近聊了啥", "群里在聊什么", "群摘要", "长期记忆", "周报"]
-# 承诺台账 / 结清
-PROMISE_TRIGGERS = ["查账", "承诺", "欠我", "催债", "画饼", "欠账", "谁请客"]
-PROMISE_CLEAR_TRIGGERS = ["结清", "兑现了", "已兑现", "我做到了", "清账", "销账"]
-# 回原文查证：翻旧账 <关键词>
-RE_LOOKUP = re.compile(r"^翻旧账\s*(\S{1,20})\s*$")
-# 手动触发一次压缩，不用等定时器
-MANUAL_DIGEST_TRIGGERS = ["立刻总结", "马上总结", "压缩记忆", "现在总结", "生成群史记"]
 
 
 async def reply_duel(message, group_id, sender_openid):
@@ -2409,7 +2413,7 @@ class GroupBot(botpy.Client):
             return
 
         # 6. 群主专属特权指令
-        if is_owner and any(k in user_input for k in OWNER_COMMANDS):
+        if is_owner and hits(user_input, OWNER_COMMANDS):
             await safe_reply(message,
                 "（唰地拔出四十米纯钛合金绣春刀，单膝跪地抱拳）\n"
                 f"锦衣卫{naming.bot_name()}领旨！大胆刁民，竟敢触犯天颜！\n"
@@ -2418,12 +2422,12 @@ class GroupBot(botpy.Client):
             return
 
         # 6. 极速本地彩蛋：赛博决斗（免@ 0 延迟，结果也计入交情）
-        if any(k in user_input for k in DICE_TRIGGERS):
+        if hits(user_input, DICE_TRIGGERS):
             await reply_duel(message, group_id, sender_openid)
             return
 
         # 7. 模式切换（免@生效，纯本地文案，不消耗 AI）
-        if any(k in user_input for k in exit_triggers()):
+        if hits(user_input, exit_triggers()):
             if current_mode != "normal":
                 STATE.set_mode(group_id, "normal")
                 _reset_style(group_id, current_mode, "normal")
@@ -2432,7 +2436,7 @@ class GroupBot(botpy.Client):
                 return
 
         for mode_name, triggers, entry_line in MODE_ENTRIES:
-            if current_mode != mode_name and any(k in user_input for k in triggers):
+            if current_mode != mode_name and hits(user_input, triggers):
                 # 交情不够别来点单：模式是整群的公共状态，不能让一个跟它还没处熟的人按按钮
                 if not mode_switch_allowed(group_id, sender_openid, is_owner):
                     logger.info("🚫 模式切换被交情门槛拦下（%s → %s）",
@@ -2462,24 +2466,24 @@ class GroupBot(botpy.Client):
             await safe_reply(message, relations.render_status(rec, sender_openid, mode=current_mode))
             return
 
-        if any(k in user_input for k in RELATION_BOARD_TRIGGERS):
+        if hits(user_input, RELATION_BOARD_TRIGGERS):
             rows = RELATIONS.rank(group_id, topn=config.AFFINITY_BOARD_SIZE)
             await safe_reply(message, relations.render_rank(rows, mode=current_mode))
             return
 
         # 名字绑错人时用它当场核对：谁的名字挂在哪个人头上
-        if any(k in user_input for k in NAME_TABLE_TRIGGERS):
+        if hits(user_input, NAME_TABLE_TRIGGERS):
             rows = _all_named(group_id)
             await safe_reply(message, relations.render_name_table(rows, mode=current_mode))
             return
 
-        if config.DIGEST_ENABLED and any(k in user_input for k in DIGEST_TRIGGERS):
+        if config.DIGEST_ENABLED and hits(user_input, DIGEST_TRIGGERS):
             await safe_reply(message, render_digest_reply(group_id, current_mode))
             return
 
         # 8.7 承诺台账：查账是本地读取，结清按昵称匹配撤下
         if config.PROMISE_ENABLED:
-            if any(k in user_input for k in PROMISE_CLEAR_TRIGGERS):
+            if hits(user_input, PROMISE_CLEAR_TRIGGERS):
                 rec = RELATIONS.get(group_id, sender_openid)
                 nick = (rec or {}).get("nick") or ""
                 removed = PROMISES.resolve(group_id, keyword=nick or sender_openid[-4:])
@@ -2491,7 +2495,7 @@ class GroupBot(botpy.Client):
                     await safe_reply(message, "（翻遍台账）你名下好像没欠着什么啊，别急着邀功。")
                 return
 
-            if any(k in user_input for k in PROMISE_TRIGGERS):
+            if hits(user_input, PROMISE_TRIGGERS):
                 # 同上：发到群里之前先刷新，别拿旧名当众叫人
                 await safe_reply(message, refresh_names(group_id, PROMISES.render(group_id)))
                 return
@@ -2499,13 +2503,13 @@ class GroupBot(botpy.Client):
         # 8.8 回原文查证：摘要出错时用它翻底稿
         m_lookup = RE_LOOKUP.match(user_input)
         if m_lookup:
-            hits = ARCHIVE.search(group_id, m_lookup.group(1), limit=8)
-            if not hits:
+            found = ARCHIVE.search(group_id, m_lookup.group(1), limit=8)
+            if not found:
                 await safe_reply(message, f"（翻遍归档）没找着含「{m_lookup.group(1)}」的发言，"
                                           "要么你记错了，要么这事只在你脑子里发生过。")
             else:
                 lines = []
-                for h in hits[-8:]:
+                for h in found[-8:]:
                     when = time.strftime("%m-%d %H:%M", time.localtime(h["ts"]))
                     # 翻旧账是**发出去给人看的**：称呼 > 显示名 > 泛称，不吐 openid
                     who = (_resolve_name(group_id)(h["sender"])
@@ -2517,14 +2521,14 @@ class GroupBot(botpy.Client):
             return
 
         # 8.9 手动压一次：不用等定时器，方便立刻验证效果
-        if config.DIGEST_ENABLED and any(k in user_input for k in MANUAL_DIGEST_TRIGGERS):
+        if config.DIGEST_ENABLED and hits(user_input, MANUAL_DIGEST_TRIGGERS):
             await safe_reply(message, "（摊开小本本，把最近的聊天从头捋一遍）稍等，我理一理。")
             await run_digest(group_id, reason="手动触发")
             await safe_reply(message, render_digest_reply(group_id, current_mode))
             return
 
         # 9. 判定这条要不要接
-        is_fortune = any(k in user_input for k in FORTUNE_TRIGGERS)
+        is_fortune = hits(user_input, FORTUNE_TRIGGERS)
 
         should_reply = False
         is_random = False
