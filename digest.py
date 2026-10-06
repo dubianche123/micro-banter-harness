@@ -28,6 +28,7 @@ import json
 import re
 import time
 
+import config
 import naming
 
 DIGEST_TAG = re.compile(r"<DIGEST>(.*?)</DIGEST>", re.S)
@@ -88,6 +89,10 @@ SYSTEM_REDUCE = """你在为 QQ 群「{bot}」整理长期记忆。你会拿到�
   群里看着就像揪着人不放）。只有今天又被人提起、或者还在产生影响（承诺没兑现、
   事情还没了结）时才留下。⚠️ 别人倒霉/出糗的事尤其要按这条办：留在记忆里它就变成了
   那个人的标签，说出口就是揭短。people 的 note 同理，写**近况**不写标签。
+- ⚠️ **people 的 note 不许带当天就过期的时效词**（「刚解封」「刚说过」「昨天」「这会儿」）：
+  名册会被反复引用很久，这类字眼过一天就假了 —— 实测「号刚解封」挂了五天，机器人天天拿它
+  说事，最后被群友当面吐槽。要写就写**稳定状态**（在玩什么、平时什么风格、跟谁走得近）；
+  非写不可的临时状态，下一次压缩若没被新的事实印证，就整条删掉。
 - 压缩稿里的署名有时会写成「一位群友」：那是**系统给不出名字的人**共用的泛称，
   不是谁的外号也不是真名。别把它当成某一个人来总结，也别写进 people / promises 的 who；
   真要提到就说「某位群友」，不要复读这个泛称。
@@ -178,7 +183,7 @@ def render_summary(state, mode="normal"):
     return "\n".join(parts)
 
 
-def render_people(state, limit=8):
+def render_people(state, limit=8, now=None):
     """把摘要里的人物档案渲染成「谁：什么事」的名册，注入给模型用（0 token）。
 
     ⚠️ 为什么单独加这一块（2026-09-20 实测）：人物档案此前**从不注入**，模型只能读
@@ -190,14 +195,24 @@ def render_people(state, limit=8):
     data = (state or {}).get("data") or {}
     # ⚠️ key 大小写要容忍：people 条目是模型压缩时产出的，实测出过 "Who"（大写）——
     # 严格只认小写会**静默漏人**（罗老板整条消失，名册看着像生效实际缺人）。
+    #
+    # ⚠️ 时效闸（2026-09-24）：名册定位是「最近在干什么」，但模型每次压缩都会把旧条目
+    #    原样抄回来，于是「号刚解封」这种**当天就过期**的标签挂了五天，机器人天天拿它
+    #    说事，最后被群友当面吐槽。代码按 ts 卡掉过期的：没写新内容就是没有新消息。
+    now = time.time() if now is None else now
+    max_age = getattr(config, "PEOPLE_NOTE_MAX_AGE_DAYS", 2.0) * 86400.0
     people = []
     for p in (data.get("people") or []):
         if not isinstance(p, dict):
             continue
         who = p.get("who") or p.get("Who")
         note = p.get("note") or p.get("Note")
-        if who and note:
-            people.append((who, note))
+        if not (who and note):
+            continue
+        ts = float(p.get("ts") or 0)
+        if ts and (now - ts) > max_age:
+            continue      # 老黄历了：这条「近况」早就不近了
+        people.append((who, note))
     if not people:
         return ""
     lines = "\n".join(f"- {who}：{note}" for who, note in people[:limit])
@@ -426,12 +441,46 @@ async def compress_group(store, group_id, entries, ask, resolver=None, budget=No
     if not body and not data:
         return None
 
-    slot["summary"] = {
+    summary = {
         "brief": body[:400],
         "data": normalize(data),
         "updated": time.time(),
     }
+    # 人物名册打时间戳：只有**内容变了**才算刷新，否则沿用旧时间。
+    # 不这么比对的话，模型每次把「家豪：号刚解封」原样抄回来，这条标签就永远年轻。
+    stamp_people((slot.get("summary") or {}).get("data"), summary["data"],
+                 now=summary["updated"])
+    slot["summary"] = summary
     return slot["summary"]
+
+
+def stamp_people(old_data, new_data, now=None):
+    """给名册条目记「这条认知是什么时候更新的」，返回更新过的条数。
+
+    判定口径故意很直白：**文本完全一样 = 没新信息 = 继续变老**。
+    换个说法（哪怕只改几个字）才算刷新。这样模型偷懒照抄旧条目时，
+    那条会一路老化到被 render_people 拦下。
+    """
+    now = time.time() if now is None else now
+    old = {}
+    for p in ((old_data or {}).get("people") or []):
+        if isinstance(p, dict):
+            who = str(p.get("who") or p.get("Who") or "").strip()
+            note = str(p.get("note") or p.get("Note") or "").strip()
+            if who and note:
+                old[who] = (note, float(p.get("ts") or 0))
+    stamped = 0
+    for p in ((new_data or {}).get("people") or []):
+        if not isinstance(p, dict):
+            continue
+        who = str(p.get("who") or p.get("Who") or "").strip()
+        note = str(p.get("note") or p.get("Note") or "").strip()
+        if not (who and note):
+            continue
+        prev_note, prev_ts = old.get(who, ("", 0.0))
+        p["ts"] = now if note != prev_note else (prev_ts or now)
+        stamped += 1
+    return stamped
 
 
 # ══════════════════════════ 承诺账本 ══════════════════════════

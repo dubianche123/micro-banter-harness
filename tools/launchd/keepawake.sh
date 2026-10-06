@@ -40,3 +40,9 @@ else
             "$HOME/Library/LaunchAgents/com.qqbot.xiaowang.plist" 2>>"$LOG"
     fi
 fi
+
+# ── 3) 每次跑都留一行「心跳」 ──
+# 为什么需要：人不在家的时候，唯一能回答「它还活着吗」的地方就是这个日志。
+# 09-24 → 10-06 这次断档了十二天，就是因为守护被卸了、而没有任何东西会喊你一声。
+say "--- 巡检 $(uptime | sed 's/.*up //;s/,.*//') ---"
+

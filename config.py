@@ -322,6 +322,10 @@ DIGEST_MAX_BLOCKS = _env_int("DIGEST_MAX_BLOCKS", 10)              # 一次最�
 DIGEST_MAX_PENDING = _env_int("DIGEST_MAX_PENDING", 2000)          # 单次最多喂给模型多少条
 DIGEST_CHECK_INTERVAL = _env_float("DIGEST_CHECK_INTERVAL", 1800.0)  # 后台检查间隔（秒）
 DIGEST_MAX_TOKENS = _env_int("DIGEST_MAX_TOKENS", 800)
+# 人物名册里一条「近况」能喂给模型多少天（见 digest.stamp_people / render_people）。
+# 名册的定位本来就是「最近在干什么」，不是永久档案；模型每次压缩又习惯把旧条目原样抄回，
+# 所以靠时间戳让它自然过期 —— 实测「号刚解封」这条标签挂了五天，天天被拿来说。
+PEOPLE_NOTE_MAX_AGE_DAYS = _env_float("PEOPLE_NOTE_MAX_AGE_DAYS", 2.0)
 # 摘要产出后顺手写一份 MD，人直接看这个；原始消息另存 JSONL 备查
 DIGEST_WRITE_MD = _env_bool("DIGEST_WRITE_MD", True)
 
