@@ -59,6 +59,12 @@ class QuoteOnceKeepItShortTest(unittest.TestCase):
         self.assertIn("别人的原话：一晚上最多引用一次", prompts.PROMPT_SHARED_RULES)
         self.assertIn("第二次出现在你嘴里就是复读", prompts.PROMPT_SHARED_RULES)
 
+    def test_no_recap_tail_by_default(self):
+        """Gemini 的结构性碎嘴：正文说完，再用「不过说真的」起头把旧话捋一遍。
+        09-21 起的日志里这个尾巴就没断过——是模型体质，得用结构规则卡。"""
+        self.assertIn("默认不写回忆尾巴", prompts.PROMPT_NORMAL)
+        self.assertIn("放在开头当由头", prompts.PROMPT_NORMAL)
+
     def test_length_is_a_number_not_a_vibe(self):
         """「短」这种抽象要求实测会被无视，得给数字。"""
         self.assertIn("顶多三句", prompts.PROMPT_NORMAL)
