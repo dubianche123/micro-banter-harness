@@ -24,6 +24,7 @@ tokens；更要命的是模型对长文本的「中段遗忘」，一整周的�
 state.json 也不必再塞几千条聊天记录。
 """
 
+import difflib
 import json
 import re
 import time
@@ -644,10 +645,14 @@ class PromiseBook:
         self.nag_interval_hours = float(nag_interval_hours)
         self.max_nag = int(max_nag)
         self.max_items = int(max_items)
-        self.items = {}   # group_id -> [promise, ...]
+        self.items = {}      # group_id -> [promise, ...]
+        # 催满上限的承诺的**墓碑**：谁、什么事。没有它，下一次压缩 sync 会把
+        # 同一件事当新承诺加回来（nag 清零）—— 催债上限形同虚设，
+        # 实测罗老板一天被 @ 三次（09-23、10-06 16:40、10-06 20:16）。
+        self.finished = {}   # group_id -> [{"who","what"}, ...]
 
     # ── 存取 ──
-    def hydrate(self, raw):
+    def hydrate(self, raw, finished=None):
         restored = 0
         for gid, rows in (raw or {}).items():
             if not isinstance(rows, list):
@@ -670,10 +675,33 @@ class PromiseBook:
             if kept:
                 self.items[gid] = kept
                 restored += len(kept)
+        for gid, tombs in (finished or {}).items():
+            if isinstance(tombs, list) and tombs:
+                self.finished[gid] = [t for t in tombs if isinstance(t, dict)]
         return restored
 
     def dump_into(self, data):
         data["promises"] = {gid: rows for gid, rows in self.items.items() if rows}
+        if self.finished:
+            data["promises_finished"] = {
+                gid: tombs for gid, tombs in self.finished.items() if tombs
+            }
+
+    def _is_finished(self, group_id, who, what):
+        """这事是不是已经催满上限、被撤下过？是的话 sync 不许把它当新承诺复活。"""
+        who_n = str(who or "").strip().lower()
+        what_n = re.sub(r"[\s，,。.、!！?？;；:：'\"“”‘’]", "", str(what or ""))
+        for t in self.finished.get(group_id, []):
+            if str(t.get("who") or "").strip().lower() != who_n:
+                continue
+            tomb = re.sub(r"[\s，,。.、!！?？;；:：'\"“”‘’]", "", str(t.get("what") or ""))
+            if not tomb or not what_n:
+                continue
+            if tomb in what_n or what_n in tomb:
+                return True
+            if difflib.SequenceMatcher(None, tomb, what_n).ratio() >= 0.5:
+                return True
+        return False
 
     def list(self, group_id):
         return self.items.get(group_id) or []
@@ -706,9 +734,14 @@ class PromiseBook:
             prev = old.get(key)
             if prev:
                 merged.append(prev)          # 已存在的保留催债次数，别被重置
-            else:
-                merged.append(row)
-                added += 1
+                continue
+            # ⚠️ 催满上限的承诺已被撤下（见 mark_nagged），但压缩模型看到群里还在聊
+            # 这件事，就会把它再写进摘要 —— 不拦的话 sync 会把它当新承诺加回来，
+            # nag 清零，催债上限形同虚设（实测罗老板一天被 @ 三次）。
+            if self._is_finished(group_id, row["who"], row["what"]):
+                continue
+            merged.append(row)
+            added += 1
         # 摘要里不再出现 = 模型认为过时或已完结，撤下
         dropped = len(old) - sum(1 for k in old if k in fresh)
 
@@ -780,6 +813,11 @@ class PromiseBook:
                 r["nag"] = int(r.get("nag") or 0) + 1
                 r["last_nag"] = now
                 if r["nag"] >= self.max_nag:
+                    # 催满撤下，但要**留墓碑**：压缩模型看到群里还在聊这事就会把它
+                    # 写进摘要，没有墓碑的话 sync 会把它当新承诺加回来（nag 清零），
+                    # 催债上限形同虚设 —— 实测罗老板一天被 @ 三次就是这么来的。
+                    self.finished.setdefault(group_id, []).append(
+                        {"who": r.get("who") or "有人", "what": r.get("what") or ""})
                     self.items[group_id] = [
                         x for x in self.items[group_id] if x["id"] != promise_id
                     ]

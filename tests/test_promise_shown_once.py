@@ -50,6 +50,51 @@ class PromiseShownOnceADayTest(unittest.TestCase):
         self.book.take_for_prompt("g1", self.rows)
         self.assertEqual(len(self.book.list("g1")), 1)
 
+    def test_maxed_out_promise_leaves_a_tombstone(self):
+        """催满上限 → 撤下 + 留墓碑。没有墓碑的话，压缩 sync 会把它当新承诺
+        复活（nag 清零）—— 实测罗老板一天被 @ 三次，第 3 次绕过了 max_nag=2。"""
+        self.book.sync("g1", self.rows)
+        pid = self.book.list("g1")[0]["id"]
+        self.book.mark_nagged("g1", pid)
+        self.book.mark_nagged("g1", pid)
+        self.assertEqual(self.book.list("g1"), [], "催满上限的行要撤下")
+        tombs = self.book.finished["g1"]
+        self.assertEqual(len(tombs), 1)
+        self.assertEqual(tombs[0]["who"], "罗老板")
+
+    def test_sync_does_not_resurrect_a_finished_promise(self):
+        """压缩模型看到群里还在聊这事，就会把它再写进摘要 —— sync 必须拦住。"""
+        self.book.sync("g1", self.rows)
+        pid = self.book.list("g1")[0]["id"]
+        self.book.mark_nagged("g1", pid)
+        self.book.mark_nagged("g1", pid)
+        added, _ = self.book.sync("g1", [{"who": "罗老板", "what": "答应请全群吃酸菜蹄髈"}])
+        self.assertEqual(added, 0, "催满的承诺改个措辞也不许复活")
+        self.assertEqual(self.book.list("g1"), [])
+
+    def test_genuinely_new_promise_still_lands(self):
+        """墓碑只拦「同一件事」，谁换了新花样照常记账。"""
+        self.book.sync("g1", self.rows)
+        pid = self.book.list("g1")[0]["id"]
+        self.book.mark_nagged("g1", pid)
+        self.book.mark_nagged("g1", pid)
+        added, _ = self.book.sync("g1", [{"who": "罗老板", "what": "下周请大家喝奶茶"}])
+        self.assertEqual(added, 1, "真正的新承诺要正常入账")
+        self.assertEqual(self.book.list("g1")[0]["what"], "下周请大家喝奶茶")
+
+    def test_finished_persists_through_dump_and_hydrate(self):
+        """墓碑要跨重启活着，不然重启一次压缩就把旧账全复活了。"""
+        self.book.sync("g1", self.rows)
+        pid = self.book.list("g1")[0]["id"]
+        self.book.mark_nagged("g1", pid)
+        self.book.mark_nagged("g1", pid)
+        data = {}
+        self.book.dump_into(data)
+        book2 = digest.PromiseBook()
+        book2.hydrate(data.get("promises", {}), finished=data.get("promises_finished", {}))
+        added, _ = book2.sync("g1", [{"who": "罗老板", "what": "说要请全群吃酸菜蹄髈"}])
+        self.assertEqual(added, 0, "重启后墓碑必须还在")
+
     def test_ledger_never_rides_the_per_turn_injection(self):
         """2026-10-06 对照实验后台账彻底退出常规注入（实验里它是回忆尾巴的最大引力源）：
         bot.py 不再渲染摘要正文，只喂名册；「take_for_prompt 过滤后陪跑」的旧接线随之拆除。

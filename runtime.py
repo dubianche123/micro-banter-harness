@@ -77,7 +77,8 @@ PROMISES = digest_mod.PromiseBook(
     max_nag=config.PROMISE_MAX_NAG,
     max_items=config.PROMISE_MAX_ITEMS,
 )
-PROMISES.hydrate(STATE.data.get("promises", {}))
+PROMISES.hydrate(STATE.data.get("promises", {}),
+                 finished=STATE.data.get("promises_finished", {}))
 STATE.register_collector(PROMISES.dump_into)
 
 # 群级令牌桶 + 全局日预算。按需求刻意【不做】per-user 额度限制。

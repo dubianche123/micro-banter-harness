@@ -1253,13 +1253,13 @@ async def dun_promises(group_id):
         logger.warning("🛑 今日额度已用尽，本次催债跳过（%d/%d）", runtime.BUDGET.used, runtime.BUDGET.limit)
         return
     runtime.STATE.mark_dirty()
-    lines = []
-    for r in runtime.PROMISES.list(group_id):
-        due = r.get("due_text") or "没说时间"
-        lines.append(f"- {r.get('who','有人')}：{r.get('what','')}（说的时间：{due}）")
-    # 和长期记忆一样，账本里存的是**当时**那个称呼。不刷新的话，人改了名，
-    # 催债的话还是会用旧名叫人 —— 而且这段是直接进 prompt 的。
-    payload = refresh_names(group_id, "未兑现清单：\n" + "\n".join(lines))
+    # 催谁就只给谁的材料。以前把整个未兑现清单都塞进 payload，模型看着清单自由发挥，
+    # 文案说的是 A、记账却记在 dunnable[0]（B）头上 —— 账实分离
+    # （实测 20:16 文案 @ 的是罗老板的蹄髈，mark 的却是家豪的账）。
+    due = row.get("due_text") or "没说时间"
+    payload = refresh_names(
+        group_id,
+        f"- {row.get('who', '有人')}：{row.get('what', '')}（说的时间：{due}）")
     text = await call_model(
         [{"role": "system", "content": naming.render(digest_mod.SYSTEM_DUN)},
          {"role": "user", "content": payload}],
