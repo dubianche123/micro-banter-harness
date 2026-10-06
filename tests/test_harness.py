@@ -12,6 +12,8 @@ import time
 import unittest
 
 sys.path.insert(0, "..")
+import providers
+import runtime
 
 import config  # noqa: E402
 import digest  # noqa: E402
@@ -207,15 +209,15 @@ class ModelTierTest(unittest.TestCase):
         cls.bot = _bot
 
     def test_chat_chain_puts_quality_first(self):
-        self.assertEqual(self.bot.MODEL_CHAINS["zhipu"][0], "glm-4.7")
+        self.assertEqual(providers.MODEL_CHAINS["zhipu"][0], "glm-4.7")
 
     def test_digest_chain_is_cheap(self):
-        chain = self.bot.MODEL_CHAINS_DIGEST["zhipu"]
+        chain = providers.MODEL_CHAINS_DIGEST["zhipu"]
         self.assertEqual(chain[0], "glm-4.5-air")
 
     def test_digest_chain_never_falls_back_to_chat_models(self):
         """两个压缩模型都挂了就该等下一轮，不能悄悄退到对话梯队去烧 4.7 的额度。"""
-        chain = self.bot.MODEL_CHAINS_DIGEST["zhipu"]
+        chain = providers.MODEL_CHAINS_DIGEST["zhipu"]
         self.assertNotIn("glm-4.7", chain)
 
     def test_digest_chain_follows_preset_or_falls_back(self):
@@ -224,7 +226,7 @@ class ModelTierTest(unittest.TestCase):
         这条以前是拿 Gemini 当样本写死的（它当时没配 models_digest）。后来给 Gemini
         也补上压缩梯队，断言就跟着过时了 —— 规则稳定，样本会变，所以直接测规则。
         """
-        for name, chain in self.bot.MODEL_CHAINS_DIGEST.items():
+        for name, chain in providers.MODEL_CHAINS_DIGEST.items():
             preset = config.PROVIDER_PRESETS[name]
             expected = list(preset.get("models_digest") or preset["models"])
             self.assertEqual(chain, expected, name)
@@ -232,7 +234,7 @@ class ModelTierTest(unittest.TestCase):
 
     def test_judge_chain_follows_preset_or_falls_back(self):
         """judge 梯队同理：审核这种活宁可只留一档，也不能静默退到弱档去。"""
-        for name, chain in self.bot.MODEL_CHAINS_JUDGE.items():
+        for name, chain in providers.MODEL_CHAINS_JUDGE.items():
             preset = config.PROVIDER_PRESETS[name]
             expected = list(preset.get("models_judge") or preset["models"])
             self.assertEqual(chain, expected, name)
@@ -284,7 +286,7 @@ class BuildMessagesTest(unittest.TestCase):
         cls.bot = _bot
 
     def test_blocks_land_in_place(self):
-        msgs = self.bot.SESSIONS.build_messages(
+        msgs = runtime.SESSIONS.build_messages(
             "th_build_1", "HEAD", "原话", memory_block="MEM", turn_context="CTX")
         self.assertEqual([m["role"] for m in msgs], ["system", "system", "user"])
         self.assertEqual(msgs[0]["content"], "HEAD")
@@ -292,7 +294,7 @@ class BuildMessagesTest(unittest.TestCase):
         self.assertEqual(msgs[2]["content"], "CTX\n\n原话")
 
     def test_optional_blocks_omitted_when_empty(self):
-        msgs = self.bot.SESSIONS.build_messages("th_build_2", "HEAD", "原话")
+        msgs = runtime.SESSIONS.build_messages("th_build_2", "HEAD", "原话")
         self.assertEqual([m["role"] for m in msgs], ["system", "user"])
         self.assertEqual(msgs[1]["content"], "原话")
 
@@ -331,13 +333,13 @@ class ApplyDigestAffinityTest(unittest.TestCase):
         cls.relations = _relations
 
     def setUp(self):
-        self.bot.RELATIONS.set_nick(self.GID, "OPENID_STRONG", "阿强")
-        self.bot.RELATIONS.set_nick(self.GID, "OPENID_QUIET", "阿远")
+        runtime.RELATIONS.set_nick(self.GID, "OPENID_STRONG", "阿强")
+        runtime.RELATIONS.set_nick(self.GID, "OPENID_QUIET", "阿远")
 
     def tearDown(self):
         prefix = f"{self.GID}|"
-        for k in [k for k in list(self.bot.RELATIONS.records) if k.startswith(prefix)]:
-            self.bot.RELATIONS.records.pop(k, None)
+        for k in [k for k in list(runtime.RELATIONS.records) if k.startswith(prefix)]:
+            runtime.RELATIONS.records.pop(k, None)
 
     def test_maps_nick_and_clamps_span(self):
         n, detail = self.bot.apply_digest_affinity(self.GID, [
@@ -346,16 +348,16 @@ class ApplyDigestAffinityTest(unittest.TestCase):
             {"who": "查无此人", "delta": 5},     # 名字对不上：宁可不记，也不能记错人
         ])
         self.assertEqual(n, 2)
-        strong = self.bot.RELATIONS.get(self.GID, "OPENID_STRONG", create=False)
-        quiet = self.bot.RELATIONS.get(self.GID, "OPENID_QUIET", create=False)
+        strong = runtime.RELATIONS.get(self.GID, "OPENID_STRONG", create=False)
+        quiet = runtime.RELATIONS.get(self.GID, "OPENID_QUIET", create=False)
         self.assertEqual(strong["score"], config.AFFINITY_DIGEST_SPAN)
         self.assertEqual(quiet["score"], -2)
         self.assertIn("阿强", detail)
 
     def test_does_not_inflate_interactions(self):
-        before = self.bot.RELATIONS.get(self.GID, "OPENID_STRONG")["interactions"]
+        before = runtime.RELATIONS.get(self.GID, "OPENID_STRONG")["interactions"]
         self.bot.apply_digest_affinity(self.GID, [{"who": "阿强", "delta": 2}])
-        after = self.bot.RELATIONS.get(self.GID, "OPENID_STRONG", create=False)
+        after = runtime.RELATIONS.get(self.GID, "OPENID_STRONG", create=False)
         self.assertEqual(after["interactions"], before)
 
     def test_bad_rows_are_skipped(self):
@@ -386,11 +388,11 @@ class CompressAffinityIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         prefix = f"{self.GID}|"
-        for k in [k for k in list(self.bot.RELATIONS.records) if k.startswith(prefix)]:
-            self.bot.RELATIONS.records.pop(k, None)
+        for k in [k for k in list(runtime.RELATIONS.records) if k.startswith(prefix)]:
+            runtime.RELATIONS.records.pop(k, None)
 
     async def test_compress_then_land_in_store(self):
-        self.bot.RELATIONS.set_nick(self.GID, "OPENID_STRONG", "阿强")
+        runtime.RELATIONS.set_nick(self.GID, "OPENID_STRONG", "阿强")
 
         raw = ('这阵子群里天天在聊黑猴。\n'
                '<DIGEST>{"affinity":[{"who":"阿强","delta":2,"why":"一直在接梗"}],'
@@ -409,7 +411,7 @@ class CompressAffinityIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
         n, _ = self.bot.apply_digest_affinity(self.GID, out["data"]["affinity"])
         self.assertEqual(n, 1)
-        rec = self.bot.RELATIONS.get(self.GID, "OPENID_STRONG", create=False)
+        rec = runtime.RELATIONS.get(self.GID, "OPENID_STRONG", create=False)
         self.assertEqual(rec["score"], 2)
 
     async def test_compress_survives_missing_affinity(self):
@@ -443,13 +445,13 @@ class NameRefreshTest(unittest.TestCase):
         cls.bot = _bot
 
     def setUp(self):
-        self.bot.RELATIONS.set_nick(self.GID, self.OPENID, "小满")
-        self.bot.RENAMES.note(self.GID, "阿龙", self.OPENID)
+        runtime.RELATIONS.set_nick(self.GID, self.OPENID, "小满")
+        runtime.RENAMES.note(self.GID, "阿龙", self.OPENID)
 
     def tearDown(self):
         for oid in (self.OPENID, self.OTHER):
-            self.bot.RELATIONS.records.pop(f"{self.GID}|{oid}", None)
-        self.bot.RENAMES.groups.pop(self.GID, None)
+            runtime.RELATIONS.records.pop(f"{self.GID}|{oid}", None)
+        runtime.RENAMES.groups.pop(self.GID, None)
 
     def test_old_name_is_translated_to_current(self):
         out = self.bot.refresh_names(self.GID, "阿龙昨天迟到，阿龙还欠我一杯奶茶")
@@ -457,13 +459,13 @@ class NameRefreshTest(unittest.TestCase):
         self.assertEqual(out.count("小满"), 2)
 
     def test_revoked_name_becomes_placeholder(self):
-        self.bot.RELATIONS.set_nick(self.GID, self.OPENID, None)
+        runtime.RELATIONS.set_nick(self.GID, self.OPENID, None)
         out = self.bot.refresh_names(self.GID, "阿龙来了")
         self.assertNotIn("阿龙", out)
         self.assertIn("未留名", out)
 
     def test_name_now_held_by_someone_else_is_left_alone(self):
-        self.bot.RELATIONS.set_nick(self.GID, self.OTHER, "阿龙")
+        runtime.RELATIONS.set_nick(self.GID, self.OTHER, "阿龙")
         self.assertEqual(self.bot.refresh_names(self.GID, "阿龙在吗"), "阿龙在吗")
 
     def test_text_without_old_names_is_untouched(self):
@@ -496,26 +498,26 @@ class PrimaryNameTest(unittest.TestCase):
     def tearDown(self):
         for gid in (self.GID, self.OTHER_GID):
             prefix = f"{gid}|"
-            for k in [k for k in list(self.bot.RELATIONS.records) if k.startswith(prefix)]:
-                self.bot.RELATIONS.records.pop(k, None)
-            self.bot.RENAMES.groups.pop(gid, None)
+            for k in [k for k in list(runtime.RELATIONS.records) if k.startswith(prefix)]:
+                runtime.RELATIONS.records.pop(k, None)
+            runtime.RENAMES.groups.pop(gid, None)
 
     # ── 写权限：只有两个来源 ──
 
     def test_claim_and_owner_are_the_only_writers(self):
         self.assertEqual(
-            self.bot.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim"), "阿强")
+            runtime.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim"), "阿强")
         self.assertEqual(
-            self.bot.RELATIONS.set_nick(self.GID, self.B, "阿远", source="owner"), "阿远")
+            runtime.RELATIONS.set_nick(self.GID, self.B, "阿远", source="owner"), "阿远")
 
     def test_any_other_source_is_refused(self):
         """摘要、模型推断、任何自动同步来的名字，一个都写不进来。"""
-        self.bot.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
+        runtime.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
         for bad in ("digest", "model", "summary", "auto", "guess", "", None):
             with self.subTest(source=bad):
                 self.assertIsNone(
-                    self.bot.RELATIONS.set_nick(self.GID, self.A, "阿龙", source=bad))
-                rec = self.bot.RELATIONS.get(self.GID, self.A, create=False)
+                    runtime.RELATIONS.set_nick(self.GID, self.A, "阿龙", source=bad))
+                rec = runtime.RELATIONS.get(self.GID, self.A, create=False)
                 self.assertEqual(rec["nick"], "阿强")
 
     def test_refusal_does_not_even_clear(self):
@@ -524,31 +526,31 @@ class PrimaryNameTest(unittest.TestCase):
         留个「不能改、但能被抹掉」的半开门没有意义 —— 抹掉之后模型再顺手补一个，
         等于绕过去了。
         """
-        self.bot.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
+        runtime.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
         self.assertIsNone(
-            self.bot.RELATIONS.set_nick(self.GID, self.A, None, source="digest"))
+            runtime.RELATIONS.set_nick(self.GID, self.A, None, source="digest"))
         self.assertEqual(
-            self.bot.RELATIONS.get(self.GID, self.A, create=False)["nick"], "阿强")
+            runtime.RELATIONS.get(self.GID, self.A, create=False)["nick"], "阿强")
 
     def test_refusal_leaves_no_empty_record(self):
         """守卫在取档案之前就返回，不该顺手建出一条空记录。"""
-        self.bot.RELATIONS.set_nick(self.GID, "OPENID_NEVER_SEEN", "阿龙", source="digest")
+        runtime.RELATIONS.set_nick(self.GID, "OPENID_NEVER_SEEN", "阿龙", source="digest")
         self.assertIsNone(
-            self.bot.RELATIONS.get(self.GID, "OPENID_NEVER_SEEN", create=False))
+            runtime.RELATIONS.get(self.GID, "OPENID_NEVER_SEEN", create=False))
 
     # ── 豁免名单：主名不许被自动逻辑改写 ──
 
     def test_main_names_are_scoped_per_group(self):
-        self.bot.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
-        self.bot.RELATIONS.set_nick(self.OTHER_GID, self.B, "阿远", source="claim")
-        self.assertEqual(self.bot.RELATIONS.main_names(self.GID), {"阿强"})
-        self.assertEqual(self.bot.RELATIONS.main_names(self.OTHER_GID), {"阿远"})
+        runtime.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
+        runtime.RELATIONS.set_nick(self.OTHER_GID, self.B, "阿远", source="claim")
+        self.assertEqual(runtime.RELATIONS.main_names(self.GID), {"阿强"})
+        self.assertEqual(runtime.RELATIONS.main_names(self.OTHER_GID), {"阿远"})
 
     def test_refresh_leaves_a_name_held_by_someone_else(self):
         """台账里「阿龙」记的是 A，可 B 现在正拿它当主名 —— 一个字都不许改。"""
-        self.bot.RELATIONS.set_nick(self.GID, self.A, "小满", source="claim")
-        self.bot.RENAMES.note(self.GID, "阿龙", self.A)
-        self.bot.RELATIONS.set_nick(self.GID, self.B, "阿龙", source="claim")
+        runtime.RELATIONS.set_nick(self.GID, self.A, "小满", source="claim")
+        runtime.RENAMES.note(self.GID, "阿龙", self.A)
+        runtime.RELATIONS.set_nick(self.GID, self.B, "阿龙", source="claim")
         self.assertEqual(self.bot.refresh_names(self.GID, "阿龙在吗"), "阿龙在吗")
 
     def test_sync_rename_spares_a_name_held_by_someone_else(self):
@@ -557,14 +559,14 @@ class PrimaryNameTest(unittest.TestCase):
         调用顺序就是真实顺序：set_nick 先跑（A 已经叫新名了），再同步历史文本。
         此刻旧名还在主名名单里，只可能是别人正用着。
         """
-        self.bot.RELATIONS.set_nick(self.GID, self.A, "阿远", source="claim")
-        self.bot.RELATIONS.set_nick(self.GID, self.B, "阿强", source="claim")
+        runtime.RELATIONS.set_nick(self.GID, self.A, "阿远", source="claim")
+        runtime.RELATIONS.set_nick(self.GID, self.B, "阿强", source="claim")
         self.assertFalse(self.bot._sync_rename(self.GID, "阿强", "阿远"))
 
     def test_sync_clear_spares_a_name_held_by_someone_else(self):
         """A 撤销了自己的称呼，B 还叫这个 —— 撤销的是「我不用了」，不是名字作废。"""
-        self.bot.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
-        self.bot.RELATIONS.set_nick(self.GID, self.B, "阿强", source="claim")
+        runtime.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
+        runtime.RELATIONS.set_nick(self.GID, self.B, "阿强", source="claim")
         self.assertFalse(self.bot._sync_clear(self.GID, self.A, "阿强"))
 
     # ── 模型那条路：只读，不回写 ──
@@ -574,13 +576,13 @@ class PrimaryNameTest(unittest.TestCase):
 
         这是「模型总结出来的名字把主名顶掉」唯一可能存在的那条路，单独钉一道。
         """
-        self.bot.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
+        runtime.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
         self.bot.apply_digest_affinity(
             self.GID, [{"who": "阿强", "delta": 2}, {"who": "阿龙", "delta": 3}])
         self.assertEqual(
-            self.bot.RELATIONS.get(self.GID, self.A, create=False)["nick"], "阿强")
+            runtime.RELATIONS.get(self.GID, self.A, create=False)["nick"], "阿强")
         # 摘要里冒出来的「阿龙」没人认领过：不建档案，也不会变成谁的称呼
-        self.assertEqual(self.bot.RELATIONS.main_names(self.GID), {"阿强"})
+        self.assertEqual(runtime.RELATIONS.main_names(self.GID), {"阿强"})
 
 
 class NickCollisionEndToEndTest(unittest.IsolatedAsyncioTestCase):
@@ -601,12 +603,12 @@ class NickCollisionEndToEndTest(unittest.IsolatedAsyncioTestCase):
         global bot
         import bot as _bot
         cls.bot = _bot
-        cls.saved_owner = _bot.OWNER_OPENID
+        cls.saved_owner = runtime.OWNER_OPENID
 
     def setUp(self):
         # 改名节流是按群记流水账的模块级状态，测试之间不清理会互相串味。
         self.bot.reset_nick_flood()
-        self.bot.OWNER_OPENID = self.OWNER
+        runtime.OWNER_OPENID = self.OWNER
         self.sent = []
         self._orig_reply = self.bot.safe_reply
         self._orig_judge = self.bot.judge_nick
@@ -619,20 +621,20 @@ class NickCollisionEndToEndTest(unittest.IsolatedAsyncioTestCase):
 
         self.bot.safe_reply = fake_reply
         self.bot.judge_nick = fake_judge
-        self.bot.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
-        self.bot.RELATIONS.set_nick(self.GID, self.B, "阿远", source="claim")
+        runtime.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
+        runtime.RELATIONS.set_nick(self.GID, self.B, "阿远", source="claim")
 
     def tearDown(self):
         self.bot.safe_reply = self._orig_reply
         self.bot.judge_nick = self._orig_judge
-        self.bot.OWNER_OPENID = self.saved_owner
+        runtime.OWNER_OPENID = self.saved_owner
         prefix = f"{self.GID}|"
-        for k in [k for k in list(self.bot.RELATIONS.records) if k.startswith(prefix)]:
-            self.bot.RELATIONS.records.pop(k, None)
-        self.bot.RENAMES.groups.pop(self.GID, None)
+        for k in [k for k in list(runtime.RELATIONS.records) if k.startswith(prefix)]:
+            runtime.RELATIONS.records.pop(k, None)
+        runtime.RENAMES.groups.pop(self.GID, None)
 
     def _nick_of(self, oid):
-        return (self.bot.RELATIONS.get(self.GID, oid, create=False) or {}).get("nick")
+        return (runtime.RELATIONS.get(self.GID, oid, create=False) or {}).get("nick")
 
     async def test_member_claiming_a_taken_name_is_refused(self):
         await self.bot.handle_nick_command(

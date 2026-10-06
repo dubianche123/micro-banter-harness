@@ -8,6 +8,7 @@ import sys
 import unittest
 
 sys.path.insert(0, "..")
+import runtime
 
 import bot
 import config
@@ -20,16 +21,16 @@ OTHER = "OTHER_OPENID_FOR_TEST"
 class OwnerReferenceTest(unittest.TestCase):
 
     def setUp(self):
-        self._saved_owner = bot.OWNER_OPENID
-        bot.OWNER_OPENID = OWNER
+        self._saved_owner = runtime.OWNER_OPENID
+        runtime.OWNER_OPENID = OWNER
         # 只动内存里的档案，不调 mark_dirty，免得把测试数据刷进 state.json
-        bot.RELATIONS.get(GROUP, OWNER)["nick"] = None
-        bot.RELATIONS.get(GROUP, OTHER)["nick"] = "阿强"
+        runtime.RELATIONS.get(GROUP, OWNER)["nick"] = None
+        runtime.RELATIONS.get(GROUP, OTHER)["nick"] = "阿强"
 
     def tearDown(self):
-        bot.OWNER_OPENID = self._saved_owner
-        for k in [k for k in bot.RELATIONS.records if k.startswith(GROUP)]:
-            bot.RELATIONS.records.pop(k, None)
+        runtime.OWNER_OPENID = self._saved_owner
+        for k in [k for k in runtime.RELATIONS.records if k.startswith(GROUP)]:
+            runtime.RELATIONS.records.pop(k, None)
 
     def test_generic_terms_always_present(self):
         """群主还没认领称呼时，靠通用词仍然认得出来。"""
@@ -40,12 +41,12 @@ class OwnerReferenceTest(unittest.TestCase):
     def test_claimed_nick_joins_terms(self):
         """群主说一句「我是老张」，之后「老张」就自动算指代他。"""
         self.assertNotIn("老张", bot.owner_reference_terms(GROUP))
-        bot.RELATIONS.get(GROUP, OWNER)["nick"] = "老张"
+        runtime.RELATIONS.get(GROUP, OWNER)["nick"] = "老张"
         self.assertIn("老张", bot.owner_reference_terms(GROUP))
 
     def test_no_owner_openid_does_not_crash(self):
         """owner 还没识别出来（启动早期）也不能炸。"""
-        bot.OWNER_OPENID = None
+        runtime.OWNER_OPENID = None
         self.assertEqual(bot.owner_reference_terms(GROUP), {"群主", "群管"})
         self.assertTrue(bot.mentions_owner("群主呢", GROUP))
 
@@ -54,7 +55,7 @@ class OwnerReferenceTest(unittest.TestCase):
         self.assertTrue(bot.mentions_owner("群管在吗", GROUP))
 
     def test_detects_claimed_nick_mention(self):
-        bot.RELATIONS.get(GROUP, OWNER)["nick"] = "老张"
+        runtime.RELATIONS.get(GROUP, OWNER)["nick"] = "老张"
         self.assertTrue(bot.mentions_owner("老张又加班了吧", GROUP))
 
     def test_detects_direct_at(self):

@@ -21,6 +21,7 @@ import types
 import unittest
 
 sys.path.insert(0, "..")
+import runtime
 
 import config  # noqa: E402
 import wordfilter  # noqa: E402
@@ -80,11 +81,11 @@ class _StubSink:
 class BaseClaimTest(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
-        cls.saved_owner = bot.OWNER_OPENID
+        cls.saved_owner = runtime.OWNER_OPENID
         cls.saved_owner_file = config.OWNER_FILE
         cls.saved_phrase = config.OWNER_CLAIM_PHRASE
-        cls.saved_archive = bot.ARCHIVE
-        cls.saved_digests = bot.DIGESTS
+        cls.saved_archive = runtime.ARCHIVE
+        cls.saved_digests = runtime.DIGESTS
 
     def setUp(self):
         # 认领会写 owner.txt —— 指向临时文件，绝不碰线上那一份
@@ -98,23 +99,23 @@ class BaseClaimTest(unittest.IsolatedAsyncioTestCase):
             self.sent.append(text)
 
         bot.safe_reply = fake_reply
-        bot.ARCHIVE = _StubSink()
-        bot.DIGESTS = _StubSink()
-        bot.OWNER_OPENID = None
+        runtime.ARCHIVE = _StubSink()
+        runtime.DIGESTS = _StubSink()
+        runtime.OWNER_OPENID = None
         config.OWNER_CLAIM_PHRASE = self.saved_phrase
         # 清掉每群标记，让「只提示一次」这类用例彼此独立
-        bot.STATE.data.get("groups", {}).pop(GROUP, None)
+        runtime.STATE.data.get("groups", {}).pop(GROUP, None)
         self._mid = 0
 
     def tearDown(self):
         bot.safe_reply = self._orig_reply
-        bot.OWNER_OPENID = self.saved_owner
+        runtime.OWNER_OPENID = self.saved_owner
         config.OWNER_FILE = self.saved_owner_file
         config.OWNER_CLAIM_PHRASE = self.saved_phrase
-        bot.ARCHIVE = self.saved_archive
-        bot.DIGESTS = self.saved_digests
-        bot.RELATIONS.pinned.discard(OWNER)
-        bot.STATE.data.get("groups", {}).pop(GROUP, None)
+        runtime.ARCHIVE = self.saved_archive
+        runtime.DIGESTS = self.saved_digests
+        runtime.RELATIONS.pinned.discard(OWNER)
+        runtime.STATE.data.get("groups", {}).pop(GROUP, None)
         self.tmpdir.cleanup()
 
     # ── 两个入口的便捷调用 ──
@@ -160,18 +161,18 @@ class OtherNickPermissionTest(BaseClaimTest):
             return "（测试替身）别当真。"
 
         bot.call_model = fake_call_model
-        bot.OWNER_OPENID = OWNER
+        runtime.OWNER_OPENID = OWNER
         self.bot_name = naming.bot_names()[0]
 
     def tearDown(self):
         bot.judge_nick = self._orig_judge
         bot.call_model = self._orig_call
         for oid in (OWNER, OTHER):
-            bot.RELATIONS.records.pop(f"{GROUP}|{oid}", None)
+            runtime.RELATIONS.records.pop(f"{GROUP}|{oid}", None)
         super().tearDown()
 
     def _nick(self, openid):
-        return (bot.RELATIONS.get(GROUP, openid, create=False) or {}).get("nick")
+        return (runtime.RELATIONS.get(GROUP, openid, create=False) or {}).get("nick")
 
     async def _say(self, text, sender, target=()):
         await bot.GroupBot.handle_group_msg(
@@ -192,9 +193,9 @@ class OtherNickPermissionTest(BaseClaimTest):
 
     async def test_refusal_costs_no_quota(self):
         """本地拦下的事不该调模型 —— 它是确定性判断，不是生成任务。"""
-        before = bot.BUDGET.used
+        before = runtime.BUDGET.used
         await self._say(f"{self.bot_name}，叫@老王 儿子", sender=OTHER, target=[OWNER])
-        self.assertEqual(bot.BUDGET.used, before, "一句本地回绝居然扣了额度")
+        self.assertEqual(runtime.BUDGET.used, before, "一句本地回绝居然扣了额度")
 
     async def test_owner_can_still_rename(self):
         """放行权限不能把群主自己的路也堵了。"""
@@ -214,7 +215,7 @@ class GroupChatNeverClaimsTest(BaseClaimTest):
 
     async def test_claim_attempt_in_group_does_not_grant(self):
         await self.say_in_group("我是群主")
-        self.assertIsNone(bot.OWNER_OPENID, "群里认领居然生效了 —— 大喇叭又回来了")
+        self.assertIsNone(runtime.OWNER_OPENID, "群里认领居然生效了 —— 大喇叭又回来了")
         self.assertEqual(os.path.exists(config.OWNER_FILE), False,
                          "群里认领居然还写了 owner.txt")
 
@@ -256,16 +257,16 @@ class PrivateChatClaimTest(BaseClaimTest):
 
     async def test_correct_phrase_claims_and_persists(self):
         await self.say_in_private(config.OWNER_CLAIM_PHRASE)
-        self.assertEqual(bot.OWNER_OPENID, OWNER)
+        self.assertEqual(runtime.OWNER_OPENID, OWNER)
         with open(config.OWNER_FILE, encoding="utf-8") as f:
             self.assertEqual(f.read().strip(), OWNER, "认领结果没落到 owner.txt")
-        self.assertIn(OWNER, bot.RELATIONS.pinned, "认领之后好感度该钉在顶格")
+        self.assertIn(OWNER, runtime.RELATIONS.pinned, "认领之后好感度该钉在顶格")
 
     async def test_phrase_is_inert_once_someone_else_claimed(self):
         """认领是一次性的：口令将来就算泄了，也换不掉主人。"""
         await self.say_in_private(config.OWNER_CLAIM_PHRASE)
         await self.say_in_private(config.OWNER_CLAIM_PHRASE, sender=OTHER)
-        self.assertEqual(bot.OWNER_OPENID, OWNER, "第二位说对暗号的人把主人顶掉了")
+        self.assertEqual(runtime.OWNER_OPENID, OWNER, "第二位说对暗号的人把主人顶掉了")
 
     async def test_claim_is_not_transferable_and_says_nothing_about_who_owns_it(self):
         """被顶替的尝试：只回「有人认领过」，不透露是谁，也不说口令对不对。"""
@@ -280,13 +281,13 @@ class PrivateChatClaimTest(BaseClaimTest):
         self.sent.clear()
         await self.say_in_private(config.OWNER_CLAIM_PHRASE)
         self.assertEqual(len(self.sent), 1)
-        self.assertEqual(bot.OWNER_OPENID, OWNER)
+        self.assertEqual(runtime.OWNER_OPENID, OWNER)
 
     async def test_old_phrase_is_not_a_valid_phrase(self):
         """「我是群主」不再是口令 —— 它现在只会收到一句「得说对暗号」。"""
         self.assertNotEqual(config.OWNER_CLAIM_PHRASE, "我是群主")
         await self.say_in_private("我是群主")
-        self.assertIsNone(bot.OWNER_OPENID)
+        self.assertIsNone(runtime.OWNER_OPENID)
         self.assertTrue(self.sent)
         self.assertIn("暗号", self.sent[-1])
 
@@ -294,7 +295,7 @@ class PrivateChatClaimTest(BaseClaimTest):
         """暗号留空 = 关掉私聊认主通道（那台机器只能手动写 owner.txt）。"""
         config.OWNER_CLAIM_PHRASE = ""
         await self.say_in_private("我是群主")
-        self.assertIsNone(bot.OWNER_OPENID)
+        self.assertIsNone(runtime.OWNER_OPENID)
         self.assertTrue(self.sent)
         self.assertIn("通道", self.sent[-1])
 
@@ -302,9 +303,9 @@ class PrivateChatClaimTest(BaseClaimTest):
         """换成自定义暗号之后，默认那句就该失效。"""
         config.OWNER_CLAIM_PHRASE = "芝麻开门"
         await self.say_in_private("我是群主")
-        self.assertIsNone(bot.OWNER_OPENID)
+        self.assertIsNone(runtime.OWNER_OPENID)
         await self.say_in_private("芝麻开门")
-        self.assertEqual(bot.OWNER_OPENID, OWNER)
+        self.assertEqual(runtime.OWNER_OPENID, OWNER)
 
 
 class PrivateChatNicknameTest(BaseClaimTest):
@@ -319,7 +320,7 @@ class PrivateChatNicknameTest(BaseClaimTest):
     """
 
     def _nick(self, openid=OWNER):
-        return (bot.RELATIONS.get(GROUP, openid, create=False) or {}).get("nick")
+        return (runtime.RELATIONS.get(GROUP, openid, create=False) or {}).get("nick")
 
     async def test_private_chat_never_writes_a_nick(self):
         await self.say_in_private("小王，叫我奶龙")
@@ -333,13 +334,13 @@ class PrivateChatNicknameTest(BaseClaimTest):
 
     async def test_redirect_costs_no_quota(self):
         """本地拦下的事不该调模型 —— 它是确定性判断，不是生成任务。"""
-        before = bot.BUDGET.used
+        before = runtime.BUDGET.used
         await self.say_in_private("小王，叫我奶龙")
-        self.assertEqual(bot.BUDGET.used, before, "一句本地引导居然扣了额度")
+        self.assertEqual(runtime.BUDGET.used, before, "一句本地引导居然扣了额度")
 
     async def test_owner_is_redirected_too(self):
         """群主本人也一样 —— 私聊缺的是群号，不是权限。"""
-        bot.OWNER_OPENID = OWNER
+        runtime.OWNER_OPENID = OWNER
         await self.say_in_private("小王，叫我奶龙")
         self.assertTrue(self.sent)
         self.assertIn("群", self.sent[-1])

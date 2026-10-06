@@ -160,177 +160,41 @@ async def ws_watchdog_loop():
         await asyncio.sleep(15)
 
 
-# ══════════════════════ 2. AI 客户端 ══════════════════════
 
-_llm_http = httpx.AsyncClient(verify=config.SSL_VERIFY)
-ai_clients = [
-    AsyncOpenAI(api_key=k, base_url=config.PROVIDER["base_url"], http_client=_llm_http)
-    for k in config.AI_KEYS
-]
-client_idx = 0
-CANDIDATE_MODELS = list(config.CANDIDATE_MODELS)
+# ══════════════ 领域模块（2026-10-06 拆分；以下是兼容别名） ══════════════
+# 运行时单例：runtime.py │ 供应商容错：providers.py │ 好感度结算：affinity.py │ 昵称域：nicking.py
+# bot.py 本体只留「消息流 + 指令路由 + 组装」。别名让既有引用与测试完全兼容。
+import runtime
+from runtime import hits, owner_label, load_owner, save_owner, _all_named
+from providers import (PROVIDER_CHAIN, AI_CLIENTS, MODEL_CHAINS, MODEL_CHAINS_DIGEST,
+                       MODEL_CHAINS_JUDGE, _TIER_CHAINS, _provider_state, _key_idx,
+                       _slow_until, _activity, _HARD_FAIL_MARKS, _FATAL_FAIL_MARKS,
+                       _last_msg_ts, _note_activity, _provider_available, _penalize_slow_model,
+                       _model_slow, _someone_else_can_serve, _pick_last_resort,
+                       _provider_serving, _provider_block_reason, _is_hard_fail,
+                       _is_fatal_fail, _note_provider_fail, _note_provider_ok,
+                       call_model, probe_provider)
+from affinity import (apply_relation_delta, affinity_budget, apply_affinity_delta_capped,
+                      apply_digest_affinity, _affinity_ledger)
+from nicking import (extract_mentions, mention_nicks_from_content, mention_nick_from_content,
+                     learn_display_names, mention_label_for, _strip_call, refresh_names,
+                     _sync_rename, _sync_clear, _reserved_nick_names, nick_locked,
+                     set_nick_locked, _taken_nick_names, reset_nick_flood,
+                     _nick_block_reason, _nick_note_reject, _nick_note_accept,
+                     NICK_FLOOD, _nick_rejects, _nick_cool, _nick_done,
+                     _RE_PLAIN_MENTION, _RE_TRAILING_DOTS, _RE_MACHINE_ID)
 
-# 供应商梯队：主供应商打不通时依次回落。每家各自持有一组 client（对应各自的 Key 池）。
-PROVIDER_CHAIN = [config.AI_PROVIDER]
-if config.FALLBACK_PROVIDER and config.FALLBACK_PROVIDER not in PROVIDER_CHAIN:
-    PROVIDER_CHAIN.append(config.FALLBACK_PROVIDER)
 
-AI_CLIENTS = {}
-MODEL_CHAINS = {}         # 供应商 -> 对话梯队（要好）
-MODEL_CHAINS_DIGEST = {}  # 供应商 -> 压缩/批处理梯队（要便宜、要能吞原始聊天）
-MODEL_CHAINS_JUDGE = {}   # 供应商 -> 称呼审核梯队（要认得出谐音、拆字、暗指）
-for _name in PROVIDER_CHAIN:
-    _keys = config.load_api_keys(_name)
-    if not _keys:
-        continue
-    AI_CLIENTS[_name] = [
-        AsyncOpenAI(api_key=k, base_url=config.PROVIDER_PRESETS[_name]["base_url"],
-                    http_client=_llm_http)
-        for k in _keys
-    ]
-    _preset = config.PROVIDER_PRESETS[_name]
-    MODEL_CHAINS[_name] = list(_preset["models"])
-    # 压缩梯队刻意**不追加**对话梯队：两个都挂了就等下一轮，消息留在归档里不会丢
-    # （run_digest 失败时不会推进 last_run）。宁可晚点压，也不要拿敏感 transcript 去撞强模型的过滤器。
-    MODEL_CHAINS_DIGEST[_name] = (list(_preset.get("models_digest") or [])
-                                  or list(_preset["models"]))
-    # 审核梯队同理独立：这活只有强档干得了，用弱档等于没开（实测 4.5-air 会漏谐音、还误杀正常昵称）
-    MODEL_CHAINS_JUDGE[_name] = (list(_preset.get("models_judge") or [])
-                                 or list(_preset["models"]))
-
-# tier 名 -> 梯队。加新梯队只要在这里登记一行，call_model 不用动。
-_TIER_CHAINS = {
-    "chat": MODEL_CHAINS,
-    "digest": MODEL_CHAINS_DIGEST,
-    "judge": MODEL_CHAINS_JUDGE,
-}
-
-if len(PROVIDER_CHAIN) > 1 and len(AI_CLIENTS) > 1:
-    print(f"🔀 供应商梯队：{' → '.join(config.PROVIDER_PRESETS[n]['label'] for n in PROVIDER_CHAIN)}")
-
-# 供应商熔断：连续失败就暂时拉黑，免得代理断了之后每条消息都干等一个超时周期
-_provider_state = {}   # name -> {"fails": int, "cooldown_until": float}
-_key_idx = {}          # name -> 轮到第几个 Key
-# 单模型「慢」处罚：(供应商, 模型名) -> 到期时间戳。超时过的一档在这个时间前会被跳过，
-# 免得它占着队首让每一轮都先白等一个满超时 —— 见 _penalize_slow_model。
-_slow_until = {}
-# 最近一条群消息的时刻。它决定「被让位的供应商什么时候能回来」—— 见 _provider_available。
-# 内存态即可：重启后当作「群刚静下来」，立刻重试一次主供应商，代价只有一次 prefill。
-_activity = {"ts": 0.0}
-# 不可恢复错误：连接层（代理断、DNS 挂）+ 地区/权限类。它们跟配额错误不同 ——
-# 换模型、换 Key 都救不回来，必须立刻熔断换供应商，
-# 否则几个模型逐个试一遍，用户要白等十几秒。
-#
-# ⚠️ 判定时用的是 f"{异常类名}: {消息}" 并统一转小写，不是光看 str(e)。因为连接层错误的
-#    字符串往往只有一句 "Connection error."，类名反而只存在于 type(e).__name__ 里 ——
-#    而「代理挂了」正是靠 APIConnectionError 才认得出来（实测 str(e) 里不含任何标记串）。
-#    各家 SDK 的大小写不一致（API key not valid / api_key_invalid），所以标记一律小写。
-_HARD_FAIL_MARKS = (
-    "connecterror", "proxyerror", "remoteprotocolerror", "apiconnectionerror",
-    # 超时：httpx 会抛 ConnectTimeout/ReadTimeout/PoolTimeout，但 SDK 通常把它们
-    # 统一包成 APITimeoutError 再抛出，所以这个类名才是实际会撞上的那个。
-    "apitimeouterror", "connecttimeout", "readtimeout", "pooltimeout",
-    "connection error",
-    "connection refused", "upstream connect failed", "connect call failed",
-    "name or service not known", "temporary failure in name resolution",
-    "nodename nor servname", "connection reset", "network is unreachable",
-    # 地区/凭证类：Gemini 对某些出口 IP 直接返回 400/403，且短时间内不会变
-    "location is not supported", "not supported for the api use",
-    "api key not valid", "api_key_invalid", "invalid api key", "permission denied",
-)
-
-# 「结构性故障」＝上面的硬失败里，那种**等一分钟也不会好**的子集：地区封禁、Key 失效。
-# 它们和抖动的区别不是严重等级，而是**会不会自己恢复** —— 代理抖一下几十秒就回来，
-# 而 Gemini 的 400 "User location is not supported" 是出口 IP 决定的，两分钟后再试还是同一个错。
-#
-# 实测（2026-09-17 02:15 → 09-18 15:45，见日志复盘）：这一类 400 在一天半里撞了 **39 次**，
-# 每两分钟冷却一到期就被放回来重撞一轮（每次还会顺着模型梯队连试 3 档），
-# 全员熔断时甚至被 `_pick_last_resort` 当成「冷却剩余最短」的那家挑去带伤上阵 ——
-# 明知道它结构性不可用还让它出工。所以这类错要单独记一笔长的隔离窗，并且在里面
-# 不许它在「带伤上阵」里跟别家抢。
-_FATAL_FAIL_MARKS = (
-    "location is not supported", "not supported for the api use",
-    "api key not valid", "api_key_invalid", "invalid api key", "permission denied",
-)
-
-# ══════════════════════ 3. 持久化状态 ══════════════════════
-
-STATE = storage.StateStore(config.STATE_FILE, config.STATE_SAVE_INTERVAL)
-SESSIONS = storage.SessionStore(
-    max_turns=config.CONTEXT_MAX_TURNS,
-    max_chars=config.CONTEXT_MAX_CHARS,
-    ttl=config.CONTEXT_TTL_SECONDS,
-)
-SESSIONS.hydrate(STATE.data.get("sessions", {}))
-STATE.register_collector(SESSIONS.dump_into)
-
-# 群友关系档案：跨重启记住「跟谁熟」。分工是——
-#   分数、分级、衰减由代码负责；模型只负责判断一次互动的情感倾向 + 把分数说成人话。
-RELATIONS = relations.RelationStore(
-    grace_days=config.AFFINITY_DECAY_GRACE_DAYS,
-    step_days=config.AFFINITY_DECAY_STEP_DAYS,
-    amount=config.AFFINITY_DECAY_AMOUNT,
-    prune_idle_days=config.AFFINITY_PRUNE_IDLE_DAYS,
-)
-RELATIONS.hydrate(STATE.data.get("relations", {}))
-STATE.register_collector(RELATIONS.dump_into)
-
-# 旧称呼台账：改名/撤销称呼时登记「这个名字曾经属于谁」，注入 prompt 前用它把历史文本里的
-# 旧字面改写成当前称呼。**它本身不进模型上下文** —— 模型看到的永远只有最新那一版名字。
-RENAMES = relations.RenameLedger()
-RENAMES.hydrate(STATE.data.get("renames", {}))
-STATE.register_collector(RENAMES.dump_into)
-
-# 群里平台侧的显示名（QQ 群昵称）。只在正文里有明文 @ 时才学得到，
-# 纯显示兜底 —— 认领过的称呼永远优先，它不参与任何判断，也不进模型上下文。
-DISPLAY_NAMES = relations.DisplayNames()
-DISPLAY_NAMES.hydrate(STATE.data.get("display_names", {}))
-STATE.register_collector(DISPLAY_NAMES.dump_into)
-
-# 原始消息归档：所有收到的消息按天存 JSONL。摘要是有损的，出错了要能回来查原文。
-ARCHIVE = archive_mod.MessageArchive(
-    base_dir=config.BASE_DIR,
-    archive_dir=config.ARCHIVE_DIR,
-    memory_dir=config.MEMORY_DIR,
-    keep_days=config.ARCHIVE_KEEP_DAYS,
-    max_text=config.ARCHIVE_MAX_TEXT,
-)
-
-# 群聊长期记忆：每天把当天的新聊天滚动压缩进一份摘要，开销恒定，不随群活跃度膨胀。
-# 待压缩的数据来自 ARCHIVE（按 last_run 水位线切分），这里只存摘要本身。
-DIGESTS = digest_mod.GroupDigest(
-    chunk_chars=config.DIGEST_CHUNK_CHARS,
-    max_blocks=config.DIGEST_MAX_BLOCKS,
-    max_entries=config.DIGEST_MAX_PENDING,
-)
-DIGESTS.hydrate(STATE.data.get("digests", {}))
-STATE.register_collector(DIGESTS.dump_into)
-_digest_locks = {}
-
-# 承诺账本：群里立下却没兑现的话，到期就催
-PROMISES = digest_mod.PromiseBook(
-    grace_hours=config.PROMISE_GRACE_HOURS,
-    nag_interval_hours=config.PROMISE_NAG_INTERVAL_HOURS,
-    max_nag=config.PROMISE_MAX_NAG,
-    max_items=config.PROMISE_MAX_ITEMS,
-)
-PROMISES.hydrate(STATE.data.get("promises", {}))
-STATE.register_collector(PROMISES.dump_into)
-
-# 群级令牌桶 + 全局日预算。按需求刻意【不做】per-user 额度限制。
-GROUP_BUCKET = storage.TokenBucket(config.GROUP_RATE_CAPACITY, config.GROUP_RATE_REFILL_SECONDS)
-BUDGET = storage.DailyBudget(config.DAILY_BUDGET, STATE.data.setdefault("usage", {}))
 
 group_buffers = collections.defaultdict(
     lambda: collections.deque(maxlen=config.GROUP_BUFFER_SIZE)
 )
-for gid, items in (STATE.data.get("buffers") or {}).items():
+for gid, items in (runtime.STATE.data.get("buffers") or {}).items():
     group_buffers[gid] = collections.deque(items, maxlen=config.GROUP_BUFFER_SIZE)
 
-group_last_random_reply = dict(STATE.data.get("cooldowns") or {})
+group_last_random_reply = dict(runtime.STATE.data.get("cooldowns") or {})
 processed_msg_ids = collections.deque(maxlen=config.DEDUP_MAX)
 
-OWNER_OPENID = None
 
 # 主动发言（催债）需要拿到 client 实例，这里存个引用
 _bot_ref = {"client": None}
@@ -351,30 +215,8 @@ FALLBACK_REPLIES = [
 _throttle_notice = {}  # group_id -> last notice timestamp
 
 
-def load_owner():
-    global OWNER_OPENID
-    if os.path.exists(config.OWNER_FILE):
-        try:
-            with open(config.OWNER_FILE, encoding="utf-8") as f:
-                saved = f.read().strip()
-            if saved:
-                OWNER_OPENID = saved
-                # 群主的好感度钉死在最高档：亲近靠档案体现，不靠谄媚台词
-                RELATIONS.pin(OWNER_OPENID)
-                logger.info("👑 已加载持久化群主 OpenID: %s（好感度已锁定顶格）", OWNER_OPENID)
-        except Exception as e:
-            logger.warning("读取 owner.txt 失败: %s", e)
 
 
-def owner_label(group_id=None):
-    """群里怎么称呼群主：他自己认领的称呼；还没认领就退回通用词「群主」。
-
-    刻意**不写死任何人名**：换个群、群主改个名，这套东西得开箱能用。
-    """
-    if not OWNER_OPENID or not group_id:
-        return naming.DEFAULT_OWNER_LABEL
-    rec = RELATIONS.get(group_id, OWNER_OPENID, create=False) or {}
-    return naming.owner_label(rec.get("nick"))
 
 
 # 群主身份**只在私聊里认**：私聊机器人发一句暗号（`config.OWNER_CLAIM_PHRASE`），
@@ -427,13 +269,13 @@ wordfilter.add_runtime_words([config.OWNER_CLAIM_PHRASE])
 
 def owner_hint_pending(group_id):
     """这次回复要不要捎上「怎么认领群主」的引导。每个群最多捎一次。"""
-    if OWNER_OPENID or not group_id:
+    if runtime.OWNER_OPENID or not group_id:
         return False
-    slot = STATE.data.setdefault("groups", {}).setdefault(group_id, {})
+    slot = runtime.STATE.data.setdefault("groups", {}).setdefault(group_id, {})
     if slot.get("owner_hint"):
         return False
     slot["owner_hint"] = True
-    STATE.mark_dirty()
+    runtime.STATE.mark_dirty()
     return True
 
 
@@ -443,13 +285,13 @@ def claim_redirect_pending(group_id):
     单独一个槽位，**不和 owner_hint 共用**：一个是「悄悄捎在回复末尾」，一个是「正面顶一句」，
     两条路都可能先被触发；共用一个标记会让另一条永远不出现。
     """
-    if OWNER_OPENID or not group_id:
+    if runtime.OWNER_OPENID or not group_id:
         return False
-    slot = STATE.data.setdefault("groups", {}).setdefault(group_id, {})
+    slot = runtime.STATE.data.setdefault("groups", {}).setdefault(group_id, {})
     if slot.get("claim_redirect"):
         return False
     slot["claim_redirect"] = True
-    STATE.mark_dirty()
+    runtime.STATE.mark_dirty()
     return True
 
 
@@ -491,386 +333,39 @@ def looks_like_back_off(text):
     return bool(RE_BACK_OFF.search(text or ""))
 
 
-def save_owner(openid):
-    try:
-        with open(config.OWNER_FILE, "w", encoding="utf-8") as f:
-            f.write(openid)
-    except Exception as e:
-        logger.warning("写入 owner.txt 失败: %s", e)
 
 
 # ══════════════════════ 4. AI 调用 ══════════════════════
 
 
-async def probe_provider():
-    """启动时单次探活：只做 TLS 握手 + 校验 Key/模型可用性，全程 0 token 消耗。
-
-    刻意【不调 chat 接口】：/chat/completions 哪怕 max_tokens=5 也是真实计费并占 RPM；
-    而 GET /models 免费，同样能达到「建连接池 + 验凭证 + 验模型名」三个目的。
-    """
-    url = config.PROVIDER["base_url"].rstrip("/") + "/models"
-    logger.info("🔌 正在探活 [%s] 连接（0 token 消耗）...", config.PROVIDER["label"])
-    try:
-        t0 = time.time()
-        resp = await _llm_http.get(
-            url,
-            headers={"Authorization": f"Bearer {config.AI_KEYS[client_idx % len(config.AI_KEYS)]}"},
-            timeout=15.0,
-        )
-        elapsed = time.time() - t0
-        if resp.status_code != 200:
-            logger.warning("⚠️ 探活返回异常状态码 %s: %s", resp.status_code, resp.text[:120])
-            return
-        available = {m.get("id") for m in (resp.json().get("data") or []) if isinstance(m, dict)}
-        # Gemini 的 id 带 "models/" 前缀，智谱不带，剥掉再比，否则会误报模型不存在
-        available |= {i.rsplit("/", 1)[-1] for i in available}
-        logger.info(
-            "✅ 连接预热完成（耗时 %.2fs，含 TLS 握手）| 平台可用模型 %d 个", elapsed, len(available)
-        )
-        # /models 只收录付费档（此刻 10 个），flash 档常年不在其中却照样能调 ——
-        # 「不在列表」不等于「不可用」，所以这里只能提示、不能断言失败。
-        # 真正的可用性判据是调用时的 429/1113，交给 failover 梯队接管。
-        missing = [m for m in CANDIDATE_MODELS if available and m not in available]
-        if missing:
-            logger.info(
-                "ℹ️ 配置的模型 %s 未出现在 /models 列表 —— 该列表只收录付费档，flash 档常年不在其中，"
-                "不代表不可调用；若确已下线，调用会自动回落到梯队下一档", missing
-            )
-    except Exception as e:
-        logger.warning("⚠️ 探活跳过（不影响运行）: %s", str(e)[:120])
 
 
-def _provider_available(name, allow_yield=True):
-    """这家现在能不能用。两条都满足才行：
-
-    1) 熔断冷却过了 —— 失败之后的最短让位时间；
-    2) **群已经静下来够久，缓存大概率凉了**（`allow_yield=False` 时跳过这条，
-       只看熔断 —— 全员让位时用它破死锁，见 call_model）。
-
-    第 2 条是「缓存优先」的核心。被让位的那家前缀缓存还热着的时候切回去，等于把
-    已经付过钱的 prefill 白扔：换一家就要把整段稳定头 + 历史重新算一遍，而群聊的
-    每一条消息都紧挨着上一条，命中一次就够本。所以群里还在聊就一直留在正在服务
-    的那家；等群静到超过缓存时效，切换才是免费的，这时候才回去重试。
-
-    例外（很重要）：只有「别家顶得上」时才让位。备用也挂了就必须让主供应商自己上，
-    否则一级熔断 + 一级失效 = 整条链全哑，宁可多花点 prefill 也不能不说话。
-    """
-    st = _provider_state.get(name)
-    if not st:
-        return True
-    now = time.time()
-    if now < st.get("cooldown_until", 0.0):
-        return False
-    if allow_yield and now - _last_msg_ts() < config.PROVIDER_CACHE_WARM_SECONDS:
-        if any(p != name and _provider_serving(p) for p in PROVIDER_CHAIN):
-            return False
-    return True
 
 
-def _penalize_slow_model(pname, model_name):
-    """给「刚超时过」的这一档记一笔，让它在 MODEL_SLOW_PENALTY_SECONDS 内先靠边站。
-
-    不是永久降级：记的是**到期时间戳**，凉够了自己回到原位试运行 —— 答上来就留用，
-    再超时就再罚一轮。写的是时间而不是改梯队顺序，是因为顺序变了就回不去了：
-    晚高峰变慢的模型，过一小时可能又快又好用，把它永久沉到队尾等于白丢一档质量。
-    """
-    _slow_until[(pname, model_name)] = time.time() + config.MODEL_SLOW_PENALTY_SECONDS
-    logger.warning("🐢 [%s] %s 这一档暂时挂免战牌（%.0f 分钟内先跳过去）",
-                   config.PROVIDER_PRESETS[pname]["label"], model_name,
-                   config.MODEL_SLOW_PENALTY_SECONDS / 60.0)
 
 
-def _model_slow(pname, model_name):
-    """这一档现在是不是还在「慢」的处罚期里。"""
-    return time.time() < _slow_until.get((pname, model_name), 0.0)
 
 
-def _someone_else_can_serve(name, chains):
-    """除这家以外，还有别人能出工吗（不看缓存、只看熔断）。
-
-    用来回答「这一脚我可以踹多重」：有别家兜着时，单个模型超时就该立刻把整家摁下去
-    （它后面的模型大概率也是一样的慢，别让用户白等）；**没人兜着时**就得手下留情 ——
-    整家拉黑等于这一次彻底没话说，而剩下的便宜模型很可能立刻就答上来了。
-    """
-    return any(
-        p != name and AI_CLIENTS.get(p) and chains.get(p)
-        and _provider_available(p, allow_yield=False)
-        for p in PROVIDER_CHAIN)
 
 
-def _pick_last_resort(chains):
-    """全员真熔断时挑一家「带伤上阵」—— 冷却剩余最短的那家。
-
-    破锁只解决了「互让」，解决不了「两家都在冷却」。实测事故（2026-09-18 14:18）：
-    智谱偶发一次 20s 超时被关 120s，而 Gemini 正卡在地区不可用上，于是整整两分钟
-    机器人只会回「刚才走神了」。**这时候沉默比多等一次更糟** —— 让最可能已经恢复
-    的那家再试一次，成了就成，不成也只是多等一轮。
-    """
-    def _still_fatal(p):
-        """这家是不是还戴着「结构性出局」的帽子（地区封禁 / Key 失效）。"""
-        return time.time() < (_provider_state.get(p) or {}).get("fatal_until", 0.0)
-
-    cands = [p for p in PROVIDER_CHAIN if AI_CLIENTS.get(p) and (chains.get(p))]
-    if not cands:
-        return None
-
-    # 结构性出局的那家不许跟别家抢「带伤上阵」的机会：它只是恰好冷却剩得短，
-    # 而它这轮必挂（实测 14:53：让 [Google Gemini] 带伤上阵 → 立刻又一个
-    # "User location is not supported"，白等一轮）。只有别无选择时才轮到它。
-    healthy = [p for p in cands if not _still_fatal(p)]
-    pool = healthy or cands
-    return min(pool,
-               key=lambda p: (_provider_state.get(p) or {}).get("cooldown_until", 0.0))
 
 
-def _provider_serving(name):
-    """这家现在顶得上吗：有 client、且不在熔断冷却里。"""
-    if not AI_CLIENTS.get(name):
-        return False
-    st = _provider_state.get(name) or {}
-    return time.time() >= st.get("cooldown_until", 0.0)
 
 
-def _provider_block_reason(name):
-    """让位的原因，只用于日志 —— 这两种「不可用」的含义完全不同，别混着报。"""
-    st = _provider_state.get(name) or {}
-    if time.time() < st.get("cooldown_until", 0.0):
-        left = st["cooldown_until"] - time.time()
-        # 冷却原因要分开说：这两种不可用**能不能靠等**完全不同 —— 前者等一分钟可能就回来了，
-        # 后者（地区封禁/凭证失效）等多久都一样，看到它就别再盼它恢复了。
-        if time.time() < st.get("fatal_until", 0.0):
-            return f"结构性故障（地区/凭证），隔离中，还剩 {left:.0f}s"
-        return f"熔断中，还剩 {left:.0f}s"
-    idle = time.time() - _last_msg_ts()
-    return f"缓存还热（群 {idle:.0f}s 前还在聊 < {config.PROVIDER_CACHE_WARM_SECONDS:.0f}s），先不切回去"
 
 
-def _last_msg_ts():
-    """最近一条群消息的时刻。缓存还热不热，看的就是它。"""
-    return _activity["ts"]
 
 
-def _note_activity():
-    """收到群消息就记一笔。让被让位的供应商一直等到群静下来才回来。"""
-    _activity["ts"] = time.time()
 
 
-def _is_hard_fail(exc):
-    """这个异常是不是「换模型、换 Key 都救不回来」的那种。
-
-    必须连异常类名一起看：连接层错误的 str(e) 往往只有一句 "Connection error."，
-    关键词一个都不出现，类名只存在于 type(e).__name__ 里 —— 而「代理断了」正是
-    靠 APIConnectionError 才认得出来。只看 str(e) 的话，代理一断还要连撞满阈值
-    才肯换供应商，用户得白等好几轮。
-    """
-    return any(k in f"{type(exc).__name__}: {exc}".lower() for k in _HARD_FAIL_MARKS)
 
 
-def _is_fatal_fail(exc):
-    """这类错是不是「等冷却过了也不会好」的那种（地区封禁 / Key 失效）。
-
-    是 `_is_hard_fail` 的子集：hard 说的是「这家整条链路现在不通，直接拉黑」，
-    fatal 说的是「它不是在抖，它是出局了」——所以隔离窗要长得多，见 `config
-    .PROVIDER_FATAL_COOLDOWN_SECONDS`。判定串同样走「类名 + 消息」并小写，
-    跟 `_is_hard_fail` 保持一致。
-    """
-    return any(k in f"{type(exc).__name__}: {exc}".lower() for k in _FATAL_FAIL_MARKS)
 
 
-def _note_provider_fail(name, hard=False, fatal=False):
-    """记一次失败。hard=连接层错误，直接拉黑，不等够阈值。
-
-    fatal=地区封禁/凭证失效这类「等也不会好」的错：不看失败次数，直接关进长隔离窗，
-    并记下 `fatal_until` —— 「冷却剩多久」和「是不是结构性出局」是两件事，
-    `_pick_last_resort` 要靠后者判断该不该让它带伤上阵（见上面 14:53 那次教训）。
-    """
-    st = _provider_state.setdefault(name, {"fails": 0, "cooldown_until": 0.0})
-    now = time.time()
-    label = config.PROVIDER_PRESETS[name]["label"]
-    if fatal:
-        st["fails"] = 0
-        st["cooldown_until"] = now + config.PROVIDER_FATAL_COOLDOWN_SECONDS
-        st["fatal_until"] = st["cooldown_until"]
-        logger.warning("🚫 供应商 [%s] 结构性故障（地区封禁或凭证失效），隔离 %.0f 分钟 "
-                       "—— 这类错不会因为等多久而好转，别每两分钟回来重撞一次",
-                       label, config.PROVIDER_FATAL_COOLDOWN_SECONDS / 60.0)
-        return
-    st["fails"] += config.PROVIDER_FAIL_THRESHOLD if hard else 1
-    if st["fails"] >= config.PROVIDER_FAIL_THRESHOLD:
-        st["fails"] = 0
-        st["cooldown_until"] = time.time() + config.PROVIDER_COOLDOWN_SECONDS
-        logger.warning("🚧 供应商 [%s] 暂时让位（至少 %.0f 秒；群里一直在聊就先留在别家吃缓存，"
-                       "等群静下来再回来重试）",
-                       config.PROVIDER_PRESETS[name]["label"], config.PROVIDER_COOLDOWN_SECONDS)
 
 
-def _note_provider_ok(name):
-    """应答成功 = 这家已经回来，连带把结构性出局的标记一起清掉。
-
-    ⚠️ 不能只清 `cooldown_until`：`fatal_until` 是另一件事留的（「别让它带伤上阵」），
-    漏清会在它明明已经恢复正常后仍然被排除在「最后人选」之外。
-    """
-    st = _provider_state.get(name)
-    if st:
-        st["fails"] = 0
-        st["cooldown_until"] = 0.0
-        st["fatal_until"] = 0.0
 
 
-async def call_model(messages, max_tokens, tier="chat", temperature=None):
-    """供应商 → 模型梯队双层尝试：先在主供应商内换模型/换 Key，全挂了再回落备用供应商。
-
-    tier="chat"   走对话梯队（4.7 优先，要好）；
-    tier="digest" 走压缩梯队（4.5-air 优先，要便宜、要能吞原始聊天）；
-    tier="judge"  走审核梯队（只放最强的，要认得出谐音/拆字/暗指，弱档在这里等于没开）。
-
-    temperature 不给就用 config.AI_TEMPERATURE（对话要的就是那点随机性，0.9 是角色需要）。
-    **判断类任务必须显式传 0** —— 实测同一个词、同一个模型，0.9 下判 OK、0.0 下判 NG，
-    审核这种要的是稳定复现，不是灵气。
-
-    分工切在「任务」而不是「快慢」上，是因为：压缩的 prompt 与聊天不共享任何前缀，
-    换模型零缓存损失；压缩在后台跑不怕慢；压缩不参与人格。
-    而按「插嘴/正经」切会让同一个角色在不同路径上表现不一致，且实测插嘴一天 0 次，不值。
-
-    注意：**缓存是按模型隔离的**，同一个模型反复用才吃得到缓存，换模型要重新 prefill。
-
-    跨供应商降级是给「代理断了」这类整条链路不通的场景兜底的 —— 这时光换模型没用，
-    必须换一家。熔断是为了避免主供应商挂掉后每条消息都白等一个超时周期。
-
-    但「什么时候切回来」不是冷却是多久说了算，而是**缓存**说了算：被让位那家的前缀
-    还热着就先别回去（回去要重新 prefill 一整段），等群静到超过缓存时效再重试。
-    见 _provider_available —— 那条规则同时保证「别家也挂了时自己必须顶上」。
-    """
-    start_time = time.time()
-    chains = _TIER_CHAINS.get(tier) or MODEL_CHAINS
-
-    # ⚠️ 「缓存优先」会自锁：A 看到 B 顶得上就让位，B 看到 A 顶得上也让位 ——
-    # 两家都不出工，整条链全哑。症状极具迷惑性：进程活着、消息收得到、也确实回了，
-    # 只是回的全是「刚才走神了」这类兜底话术，**看起来就像宕机**。
-    # 所以开跑前先问一句「真有人能顶上吗」，没有就关掉让位（只按熔断挑），
-    # 宁可多花一次 prefill 也不能不说话 —— 这正是上面那条例外的本意。
-    allow_yield = any(
-        AI_CLIENTS.get(p) and (chains.get(p)) and _provider_available(p)
-        for p in PROVIDER_CHAIN)
-    if not allow_yield:
-        logger.info("🚨 全员让位（互让死锁），本轮关闭缓存让位，只按熔断挑供应商")
-
-    # 连「只按熔断挑」都没人上 = 全员真熔断。这时谁都不出工，整条链等于哑了，
-    # 让冷却剩余最短的那家带伤上阵（见 _pick_last_resort）。
-    last_resort = None
-    if not any(AI_CLIENTS.get(p) and (chains.get(p))
-               and _provider_available(p, allow_yield=False) for p in PROVIDER_CHAIN):
-        last_resort = _pick_last_resort(chains)
-        if last_resort:
-            logger.warning(
-                "🩹 全员熔断，让 [%s] 带伤上阵 —— 沉默比多等一次更糟",
-                config.PROVIDER_PRESETS[last_resort]["label"])
-
-    for pname in PROVIDER_CHAIN:
-        elapsed = time.time() - start_time
-        if elapsed >= config.AI_TOTAL_TIMEOUT:
-            break
-        clients = AI_CLIENTS.get(pname) or []
-        # 刻意用共享引用而不是拷贝：下面把配额耗尽的模型沉到队尾，这个顺序要跨调用保留，
-        # 否则每条消息都会先去撞一次已知 429 的模型，白等一轮。
-        models = chains.get(pname) or []
-        if not clients or not models:
-            continue
-        if pname != last_resort and not _provider_available(pname, allow_yield=allow_yield):
-            logger.info("⏭️ 供应商 [%s] 让位中（%s），先用别家",
-                        config.PROVIDER_PRESETS[pname]["label"], _provider_block_reason(pname))
-            continue
-
-        preset = config.PROVIDER_PRESETS[pname]
-        extra_body = preset.get("extra_body") or None
-        for model_name in list(models):
-            elapsed = time.time() - start_time
-            if elapsed >= config.AI_TOTAL_TIMEOUT:
-                break
-            # 熔断可能在上一个模型失败时刚触发，这时没必要再试这家剩下的模型。
-            # 这里只看熔断不看缓存：同一家内部换模型不涉及「切回去要重新 prefill」。
-            # 带伤上阵的那家例外 —— 它本来就是越过熔断挑的。
-            if pname != last_resort and not _provider_available(pname, allow_yield=False):
-                break
-            # 刚超时过的那一档先靠边站（见 _penalize_slow_model）。⚠️ 前提是这家至少还有一档
-            # 没被罚 —— 全罚了还硬躲就是自己把自己饿死，那时候只能照常试。
-            if _model_slow(pname, model_name) and not all(
-                    _model_slow(pname, m) for m in models):
-                logger.info("⏭️ 跳过 [%s] %s（%.0fs 内它刚超时过，先用快的那档）",
-                            preset["label"], model_name,
-                            (_slow_until[(pname, model_name)] - time.time()))
-                continue
-            timeout_for_this = min(config.AI_TOTAL_TIMEOUT - elapsed,
-                                   preset.get("timeout") or config.AI_TIMEOUT_SECONDS)
-            idx = _key_idx.get(pname, 0)
-            current_client = clients[idx % len(clients)]
-            try:
-                response = await asyncio.wait_for(
-                    current_client.chat.completions.create(
-                        model=model_name,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        # 显式用 is None 判断，不能写 `temperature or ...` —— 0.0 是合法取值却被当成缺省
-                        temperature=config.AI_TEMPERATURE if temperature is None else temperature,
-                        extra_body=extra_body,
-                    ),
-                    timeout=timeout_for_this,
-                )
-                if response and response.choices:
-                    msg = response.choices[0].message
-                    # 推理模型偶尔把内容全塞进 reasoning_content 而 content 为空，这里兜一层
-                    candidate = (getattr(msg, "content", None) or getattr(msg, "reasoning_content", None) or "").strip()
-                    if candidate:
-                        _note_provider_ok(pname)
-                        if pname != config.AI_PROVIDER:
-                            logger.info("↩️ 本次由备用供应商 [%s] 应答", preset["label"])
-                        else:
-                            # 主供应商应答也要留痕：2026-09-17 统计「今天谁在回话」时
-                            # 发现只能靠「总数 - 备用数 - 兜底数」倒推，非常别扭。
-                            logger.info("✅ [%s] %s 应答（%s）",
-                                        preset["label"], model_name, tier)
-                        return candidate
-            except asyncio.TimeoutError:
-                logger.warning("⏰ [%s] %s 超过 %.1fs，尝试下一个...",
-                               preset["label"], model_name, timeout_for_this)
-                # ⚠️ 超时是**这一档自己的事**：4.7 卡住不代表 4.5-air 也答不上来。
-                # 但光「去找下一档」是不够的 —— 下一轮它又排在队首，于是每一轮都先白等 20s，
-                # 而整轮预算只有 AI_TOTAL_TIMEOUT（30s），剩下的时间常常连第二档都跑不完
-                # ⇒ 用户看到的就是连续几句「刚才走神了」。
-                # 实测（2026-09-18 21:38 / 22:27 / 22:28 / 22:29）：glm-4.7 一小时里超时 4 次，
-                # 每次拖垮整轮，还顺手把整家供应商送进 120s 冷却，把后面几句一起赔进去。
-                # 所以给这一档记个「慢」的处罚：这段时间里梯队先跳过它，等它凉够了自己回来。
-                _penalize_slow_model(pname, model_name)
-                # 至于是不是要连坐整家，跟别的失败同一个规矩：有人兜底才狠，没人兜底就轻手。
-                _note_provider_fail(pname, hard=_someone_else_can_serve(pname, chains))
-            except Exception as e:
-                err_msg = str(e)
-                logger.warning("⚠️ [%s] %s 异常: %s，尝试下一个...",
-                               preset["label"], model_name, err_msg[:100])
-                if any(k in err_msg for k in ("429", "RESOURCE_EXHAUSTED")):
-                    # 配额/限流：换 Key 继续，并把耗尽的模型沉到队尾
-                    _key_idx[pname] = idx + 1
-                    if model_name in models:
-                        models.remove(model_name)
-                        models.append(model_name)
-                else:
-                    # fatal 是 hard 的子集：先用宽松的 hard 判「要不要立刻拉黑」，
-                    # 再用严格的 fatal 判「这一觉要多长」。
-                    fatal = _is_fatal_fail(e)
-                    hard = _is_hard_fail(e)
-                    # ⚠️ 单模型超时 ≠ 整家断线：4.7 慢起来不代表 4.5-air 也答不上来。
-                    # 但**有别家兜着**时可以狠一点（一次就把这家摁下去，免得每档都白等一轮）；
-                    # **没人兜着**时必须换轻手 —— 此时把它整家拉黑 = 这一次彻底没话说，
-                    # 而它梯队里剩下的便宜模型很可能一两句就答上来了。
-                    # 实测场景（2026-09-18 16:11）：Gemini 正处结构性隔离，智谱 4.7 一次 20s
-                    # 超时 → 整家立刻降温 120s，4.5-air / 4-flash 连试都没试，用户直接吃掉
-                    # 一句兜底话术。总超时 AI_TOTAL_TIMEOUT 仍在兜着最坏情况。
-                    if hard and not fatal and not _someone_else_can_serve(pname, chains):
-                        _note_provider_fail(pname)  # 降级为普通失败：记一笔，凑够阈值才禁
-                    else:
-                        _note_provider_fail(pname, hard=hard, fatal=fatal)
-        logger.warning("⤵️ 供应商 [%s] 全部模型不可用，回落到下一家", preset["label"])
-    return None
 
 
 CMD_TAG = re.compile(r"<CMD>(.*?)</CMD>", re.S)
@@ -930,7 +425,7 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
             head += prompts.AFFINITY_MODE_HINTS.get(mode) or ""
             head += prompts.CMD_PROTOCOL
 
-        # ── 2) 每日记忆 / 3) 会话历史 由 SESSIONS.build_messages 按稳定度插入 ──
+        # ── 2) 每日记忆 / 3) 会话历史 由 runtime.SESSIONS.build_messages 按稳定度插入 ──
         # ── 4) 本轮动态：随发言人和轮次变化的东西，一律压到最末尾 ──
         bits = []
         if is_owner:
@@ -956,8 +451,8 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
 
         max_tokens = config.AI_MAX_TOKENS_BANTER if is_random_banter else config.AI_MAX_TOKENS
 
-        async with SESSIONS.lock(session_id):
-            messages = SESSIONS.build_messages(
+        async with runtime.SESSIONS.lock(session_id):
+            messages = runtime.SESSIONS.build_messages(
                 session_id, head, user_text,
                 memory_block=group_memory, turn_context=turn_context,
             )
@@ -975,8 +470,8 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
                     delta = relations.clamp_delta(int(payload["aff"]))
                 except (TypeError, ValueError):
                     delta = None
-            SESSIONS.record(session_id, user_text, body)
-            STATE.mark_dirty()
+            runtime.SESSIONS.record(session_id, user_text, body)
+            runtime.STATE.mark_dirty()
             return body, delta
     except Exception as e:
         logger.exception("❌ 生成回复异常: %s", e)
@@ -1075,7 +570,7 @@ class BudgetGate:
 
     @staticmethod
     async def check(message, group_key):
-        ok, wait = GROUP_BUCKET.try_acquire(group_key)
+        ok, wait = runtime.GROUP_BUCKET.try_acquire(group_key)
         if not ok:
             logger.warning("⏳ %s 触发群级限流，%.1fs 后可再次调用", group_key, wait)
             await notify_if_quiet(
@@ -1084,20 +579,20 @@ class BudgetGate:
             )
             return False
 
-        if not BUDGET.try_consume():
-            logger.warning("🛑 今日全局调用额度已用尽（%d/%d）", BUDGET.used, BUDGET.limit)
+        if not runtime.BUDGET.try_consume():
+            logger.warning("🛑 今日全局调用额度已用尽（%d/%d）", runtime.BUDGET.used, runtime.BUDGET.limit)
             await notify_if_quiet(
                 message, "budget",
                 naming.render("（默默关掉显示器）今天的话费额度让我用冒了，{owner}说再聊下去要卖肾了。"
                               "明天再见！", owner=owner_label(getattr(message, "group_openid", None)))
             )
-            STATE.mark_dirty()
+            runtime.STATE.mark_dirty()
             return False
 
-        STATE.mark_dirty()
-        if BUDGET.limit and BUDGET.used >= int(BUDGET.limit * config.BUDGET_WARN_RATIO):
-            logger.warning("⚠️ 今日额度已用 %d/%d（%.0f%%）", BUDGET.used, BUDGET.limit,
-                           BUDGET.used / BUDGET.limit * 100)
+        runtime.STATE.mark_dirty()
+        if runtime.BUDGET.limit and runtime.BUDGET.used >= int(runtime.BUDGET.limit * config.BUDGET_WARN_RATIO):
+            logger.warning("⚠️ 今日额度已用 %d/%d（%.0f%%）", runtime.BUDGET.used, runtime.BUDGET.limit,
+                           runtime.BUDGET.used / runtime.BUDGET.limit * 100)
         return True
 
 
@@ -1198,14 +693,6 @@ MANUAL_DIGEST_TRIGGERS = ["立刻总结", "马上总结", "压缩记忆", "现�
 RE_LOOKUP = re.compile(r"^翻旧账\s*(\S{1,20})\s*$")
 
 
-def hits(text, words):
-    """本地触发词匹配的**唯一入口**：子串匹配、空词安全。
-
-    以前每个判断点都手写一遍 `any(k in text for k in words)`，十一处轮子；
-    收敛到这里之后，匹配规则要改（比如加词边界、做归一化）只改这一处。
-    """
-    t = text or ""
-    return any(w and w in t for w in words)
 
 
 def is_control_command(text):
@@ -1253,232 +740,33 @@ async def reply_duel(message, group_id, sender_openid):
     apply_relation_delta(group_id, sender_openid, 2 if user_val == bot_val else 1, "骰子决斗")
 
 
-def extract_mentions(message, bot_id=""):
-    """取出这条消息里被 @ 的其他群友 openid。
-
-    踩过的坑：QQ 群消息里的 @ 是**明文昵称**（「名字，叫@某人 小满」），不是 <@!openid>
-    占位符，所以从文本里正则根本挖不出人。官方 GROUP_AT 事件体其实带 mentions 数组
-    （文档写明「消息中@的用户列表，不含@机器人自身」），里面就是 member_openid —— 用它。
-    文本正则只作为兜底，纯明文 @昵称 的情况拿不到 ID，只能让群主先让对方说句话。
-    """
-    found = []
-    for u in getattr(message, "mentions", None) or []:
-        oid = (getattr(u, "member_openid", None)
-               or getattr(u, "id", None)
-               or getattr(u, "user_openid", None))
-        if oid and oid != bot_id and oid not in found:
-            found.append(oid)
-    if not found:
-        for m in re.findall(r"<@!?([A-Za-z0-9_]+)>", getattr(message, "content", "") or ""):
-            if m != bot_id and m not in found:
-                found.append(m)
-    return found
 
 
 # 正文里 @ 人时留下的**明文昵称**（QQ 群消息不给昵称字段，只给 openid）。
 # 切到空白或标点为止：昵称可能含空格（「A.A 贵阳老莫（全国可飞）」），
 # 宁可只记第一段，也不猜边界 —— 它只是显示兜底，短一点不会出事。
-# ⚠️ 句点**不在**断点里：「A.A」「L.L」这种是真名号，切了就只剩一个字、
-# 还会被「单字不记」挡掉。代价是「@老王.你好」会连着吃进去，中文群里极少见。
-_RE_PLAIN_MENTION = re.compile(r"@([^\s@，。！？；：、,!?;:（）()【】\[\]]{1,24})")
-_RE_TRAILING_DOTS = re.compile(r"[.．]+\Z")
-# 裸的机器编号（openid 那类），没有尖括号裹着时靠它兜底。没有人的昵称长这样。
-_RE_MACHINE_ID = relations._RE_MACHINE_ID   # 同一条规则只允许有一份（relations 是机器 ID 判定的家）
 
 
-def mention_nicks_from_content(content, bot_names=()):
-    """按正文里出现的顺序，抠出所有 @ 后面的**明文**昵称。
-
-    返回顺序和 `mentions` 一致，所以调用方只要校验**数量对得上**就能逐个配对。
-    机器人自己的叫法要跳过（@它就是喊它，不是某个人）—— 这一步同时把 mentions
-    里机器人那一格对齐剔掉，否则后面的配对会整体错位。
-
-    ⚠️ 必须先剔掉机器形态的 `<@!openid>` / `<@openid>`：它是 openid 不是昵称，
-    但不剔就会被下面的正则当成明文吞进去，还被 24 字上限切成一段残缺编号 ——
-    实测就这么把一串 openid 前缀学成了「某人叫 E5E3793C25CF161D9F3292FE」，
-    还原样发回了群里。
-    """
-    text = qqtext._MENTION.sub("", content or "")
-    nicks = []
-    for m in _RE_PLAIN_MENTION.finditer(text):
-        nick = _RE_TRAILING_DOTS.sub("", m.group(1).strip()).strip()
-        if not nick or nick == qqtext.MENTION_FALLBACK:
-            continue
-        if _RE_MACHINE_ID.match(nick):
-            continue
-        if any(nick == b or nick.startswith(b) for b in (bot_names or ())):
-            continue
-        nicks.append(nick)
-    return nicks
 
 
-def mention_nick_from_content(content, bot_names=()):
-    """正文里第一个明文 @昵称；没有就 None。"""
-    nicks = mention_nicks_from_content(content, bot_names)
-    return nicks[0] if nicks else None
 
 
-def learn_display_names(group_id, openids, content, bot_names=()):
-    """拿一条消息里的明文 @昵称 去喂 `DISPLAY_NAMES`，返回学到了几个。
-
-    `openids` 是**已经剔掉机器人**的被 @ 列表，顺序跟正文里 @ 出现的顺序一致；
-    明文那边也同样剔掉了机器人的叫法，所以两边**数量对得上就能逐个配对**。
-
-    对不上就整条放弃：可能是有人手打了个假 @（明文多），也可能是 @ 被渲染成了
-    占位符（明文少）。猜错名字会当众叫错人，不如不记。
-    """
-    if not openids:
-        return 0
-    nicks = mention_nicks_from_content(content, bot_names)
-    if len(nicks) != len(openids):
-        if nicks:
-            logger.info("🏷️ 跳过群昵称学习：明文 @ %d 个、被 @ %d 个，对不上就不猜",
-                        len(nicks), len(openids))
-        return 0
-    learned = 0
-    for oid, nick in zip(openids, nicks):
-        if DISPLAY_NAMES.learn(group_id, oid, nick):
-            logger.info("🏷️ 记住群昵称 %s = %s", oid[-4:], nick)
-            learned += 1
-    return learned
 
 
-def mention_label_for(group_id, bot_id="", bot_display=""):
-    """把 <@!openid> 翻成「群里怎么叫他」——给 qqtext.normalize 用的解析器。
-
-    为什么需要它：@ 是「谁在跟谁说话」里最关键的信息，以前 normalize 把它整个清掉，
-    于是群友 @ 了人再问「这是谁」，机器人这边只剩一句没头没脑的话，答不上来。
-    现在 @ 会渲染成「@某人」，是谁由这里回答：
-      · 机器人自己 → 它的名字（群里看见的本来就是「@机器人名」）
-      · 群主        → 他的称呼（没认领就是通用词「群主」），「@群主 这是谁」才答得上来
-      · 其他群友    → 档案里认领过的称呼；没认领就退回他群里挂的显示名（QQ 群昵称），
-                      再没有才由 qqtext 退成「@群友」
-    刻意 create=False：被 @ 一下不该给谁凭空建一份档案。
-    """
-    owner = OWNER_OPENID
-
-    def resolve(openid):
-        if bot_id and openid == bot_id:
-            return bot_display or naming.bot_name()
-        if owner and openid == owner:
-            return owner_label(group_id)
-        rec = RELATIONS.get(group_id, openid, create=False) or {}
-        return rec.get("nick") or DISPLAY_NAMES.of(group_id, openid)
-
-    return resolve
 
 
-def _strip_call(text, names=()):
-    """剥掉叫人用的明文称呼，留下真正要说的内容。
-
-    两种写法都要管：`<@!openid>` 在 qqtext.normalize 阶段已经被翻成「@机器人名」，
-    而明文打的「@机器人名」本来就是这个样子。名字全部来自 naming（可配、可多别名），
-    代码里不留具体人名。
-    """
-    for name in (names or naming.bot_names()):
-        if name:
-            text = text.replace(f"@{name}", "")
-    return text.strip()
 
 
-def refresh_names(group_id, text):
-    """把历史文本里出现过的**旧称呼**换成当前称呼。喂给模型之前必过这一道。
-
-    为什么需要：群史记、会话窗口、群聊背景里固化的是「当时那个名字」，而这些文本每轮
-    都会注入 prompt。只改档案不改它们，模型就继续拿旧名叫人 —— 更糟的是它会把旧名和
-    新名当成两个人，开始编「那谁和这谁」的往事。
-    旧名从哪来：RENAMES（改名/撤销时登记的台账）。它自己永远不进上下文。
-
-    current_names 传的是本群**主名**名单：称谓分主副，主名是当事人自己定的那一版，
-    台账只负责把副名（旧叫法）改写成主名，反过来绝不许动主名。
-    """
-    if not text:
-        return text
-    return RENAMES.refresh(
-        group_id, text,
-        label_of=lambda oid: (RELATIONS.get(group_id, oid, create=False) or {}).get("nick"),
-        current_names=RELATIONS.main_names(group_id),
-    )
 
 
-def _sync_rename(group_id, old, new):
-    """改名之后，把所有「还留着旧名字」的地方一并改掉，返回是否动过。
-
-    只改档案是不够的，这是今天踩出来的教训：
-      · 会话历史里那句「以后叫你【阿龙】」还压在窗口里，模型读着它继续叫旧名；
-      · 每日压缩把当时的昵称写进长期记忆，每轮注入 prompt 又把旧名送回模型嘴边；
-      · 「群史记」命令直接把每日 MD 发到群里，里面也是旧名。
-    三处一起改，改名才算真的改掉了；`archive/*.jsonl` 是查证底稿，一个字不动。
-    """
-    if not old or not new or old == new:
-        return False
-    # 旧名如果同时还是别人的**主名**，就按兵不动 —— 否则会把那位一起改掉。
-    # 注意此刻 set_nick 已经先跑过了：本人那一版已经不叫 old 了，所以 old 还留在这份
-    # 名单里，只可能是「别人正用着它」。这个判断因此是精确的，不会误跳。
-    if old in RELATIONS.main_names(group_id):
-        logger.info("⏭️ 跳过改名同步：「%s」同时还是别人的主名", old)
-        return False
-    n1 = SESSIONS.rename_user(group_id, old, new)
-    n2 = DIGESTS.rename_in_memory(group_id, old, new)
-    n3 = ARCHIVE.rename_in_memory_files(group_id, old, new)
-    if n1 or n2 or n3:
-        STATE.mark_dirty()
-        logger.info("🔁 改名同步（%s → %s）：会话 %d 条 / 长期记忆 %d 处 / 每日 MD %d 个",
-                    old, new, n1, n2, n3)
-    return True
 
 
-def _sync_clear(group_id, openid, old):
-    """撤销称呼：把旧名字从历史文本里请出去。
-
-    撤销了却不清理，等于「说过的话还压在窗口里」—— 模型照旧那么叫，当事人看着
-    就像撤销没生效。这里把它统一退成 `relations.UNNAMED_LABEL`，谁都不用再被这么叫。
-
-    同样的例外：这个名字如果同时还是别人的**主名**，一个字都不许动。撤销的是「我
-    不用它了」，不是「这个名字作废了」—— 用这个名字的那位压根没撤销过什么。
-    """
-    old = (old or "").strip()
-    if not old:
-        return False
-    if old in RELATIONS.main_names(group_id):
-        logger.info("⏭️ 跳过撤销同步：「%s」同时还是别人的主名", old)
-        return False
-    label = relations.UNNAMED_LABEL
-    n1 = SESSIONS.rename_user(group_id, old, label)
-    n2 = DIGESTS.rename_in_memory(group_id, old, label)
-    n3 = ARCHIVE.rename_in_memory_files(group_id, old, label)
-    if n1 or n2 or n3:
-        STATE.mark_dirty()
-        logger.info("🧽 撤销称呼同步（%s）：会话 %d 条 / 长期记忆 %d 处 / 每日 MD %d 个",
-                    old, n1, n2, n3)
-    return True
 
 
-def _reserved_nick_names(group_id, subject_openid=""):
-    """**专属**名字：机器人自己的名字 + 群主当前认领的称呼。
-
-    别人再拿它当称呼就是冒名顶替（最典型的是顶着群主的外号在群里招摇）。
-    名字全部按**当前实际叫什么**现取，代码里不写死任何人名 —— 群主改个名、
-    机器人换个名字，这里跟着变。
-
-    subject_openid 是「这一笔写给谁」。群主本人不受自己名字的限制（他给自己改名不该被拦）；
-    机器人的名字则谁都不能占用，包括群主 —— 那个位置只有一个。
-    """
-    names = set(naming.bot_names())
-    if OWNER_OPENID and subject_openid != OWNER_OPENID:
-        names.add(owner_label(group_id))
-    return names
 
 
-def nick_locked(group_id):
-    """这个群的起名锁当前是不是锁着的。状态存在每群自己的槽位里，重启不丢。"""
-    return bool((STATE.data.get("groups") or {}).get(group_id, {}).get("nick_locked"))
 
 
-def set_nick_locked(group_id, locked):
-    """掰起名锁。⚠️ 就地更新槽位 —— 整块替换会把同槽的其他标记冲掉。"""
-    STATE.data.setdefault("groups", {}).setdefault(group_id, {})["nick_locked"] = bool(locked)
-    STATE.mark_dirty()
 
 
 async def handle_nick_lock(message, group_id, action, is_owner):
@@ -1512,17 +800,6 @@ async def handle_nick_lock(message, group_id, action, is_owner):
         "（把抽屉钥匙转开）行，起名重新开放。想改称呼随时说「叫我 XXX」，以最新一次为准。")
 
 
-def _taken_nick_names(group_id, subject_openid=""):
-    """**已被别人占用**的主名 —— 主名不能重叠，这份就是占用名单。
-
-    跟 `_reserved_nick_names` 分开，只为了把话说清楚：「冒名顶替」和「重名」是两种不同的
-    拒绝理由，一个说「不让用」，一个说「已经有人叫这个了」。群主本来就有改名权，
-    他撞上的是后者，提示得对得上他才不会以为功能坏了。
-
-    按 openid 排掉「这一笔写给的那个人」自己那一版 —— 本人随时可以覆盖自己的名字，
-    这条不能挡，否则「改名随时能改」就成了空话。
-    """
-    return RELATIONS.main_names(group_id, exclude_openid=subject_openid)
 
 
 # ══════════════════ 改名节流：一次围攻能试几次，才是真正的防线 ══════════════════
@@ -1537,60 +814,14 @@ def _taken_nick_names(group_id, subject_openid=""):
 #     而「刚记下就马上换下一个」正是试名字的标准动作。
 #   · 群层   —— 窗口内累计拦下这么多次，就说明有人在挠这里，整群进入改名冷静期。
 #     单人间隔摁不住换号/换人来试的情况，群级这一层是兜那个底的。
-#
-# 两条都在本地跑：0 token、不受供应商抖动影响、也不依赖模型当天心情好不好。
-NICK_FLOOD = {
-    "window": 600.0,      # 统计窗口：10 分钟
-    "max_rejects": 3,     # 窗口内被拦下几次就把这个群拖进冷静期
-    "cooldown": 1200.0,   # 冷静期：20 分钟
-    "self_gap": 180.0,    # 同一个名字两次之间的最小间隔
-}
-
-_nick_rejects = {}    # group_id -> [被拦下的时刻, ...]
-_nick_cool = {}       # group_id -> 冷静期截止时刻
-_nick_done = {}       # (group_id, subject) -> 上一次改名的时刻
 
 
-def reset_nick_flood():
-    """清掉全部流水账。只有测试会调 —— 进程一重启这些本来就是空的。"""
-    _nick_rejects.clear()
-    _nick_cool.clear()
-    _nick_done.clear()
 
 
-def _nick_block_reason(group_id, subject, is_owner=False, now=None):
-    """本地闸门：返回给群友看的拒绝理由（人话），None = 放行。"""
-    now = time.time() if now is None else now
-    until = _nick_cool.get(group_id, 0.0)
-    # 群主不受**群级**冷静期限制：他本来就有全群的改名权，不该因为手下的人闹腾而失效。
-    if now < until and not is_owner:
-        return f"这片地方刚有人在名字上连着翻车，我先歇 {max(1, int((until - now) // 60))} 分钟"
-    gap = NICK_FLOOD["self_gap"]
-    last = _nick_done.get((group_id, subject), 0.0)
-    if now - last < gap:
-        return f"名字刚换过一轮，得焐一会儿——再等 {max(1, int(gap - (now - last)))} 秒"
-    return None
 
 
-def _nick_note_reject(group_id, now=None):
-    """拦下一次就记一笔；够数就把整群拖进冷静期。返回是否触发了冷静期。"""
-    now = time.time() if now is None else now
-    window = NICK_FLOOD["window"]
-    hits = [t for t in _nick_rejects.get(group_id, ()) if now - t < window]
-    hits.append(now)
-    _nick_rejects[group_id] = hits
-    if len(hits) >= NICK_FLOOD["max_rejects"]:
-        _nick_cool[group_id] = now + NICK_FLOOD["cooldown"]
-        logger.warning(
-            "🧊 本群 %d 分钟内连续拦下 %d 个称呼，改名进入 %d 分钟冷静期（像是有人在批量试名）",
-            int(window // 60), len(hits), int(NICK_FLOOD["cooldown"] // 60))
-        return True
-    return False
 
 
-def _nick_note_accept(group_id, subject, now=None):
-    """改名落地了就记时间，个人层的间隔从这一刻开始算。"""
-    _nick_done[(group_id, subject)] = time.time() if now is None else now
 
 
 async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, mentioned_others):
@@ -1601,15 +832,15 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
     所以只让它做「第二道」，不让它当第一道。
     """
     if cmd["scope"] == "self-clear":
-        rec = RELATIONS.get(group_id, sender_openid)
+        rec = runtime.RELATIONS.get(group_id, sender_openid)
         old = (rec.get("nick") or "").strip()
         if not old:
             await safe_reply(message, "（翻了翻小本本）你本来就没留过称呼啊，省了我一道工序。")
             return
-        RELATIONS.set_nick(group_id, sender_openid, None, source="claim")
-        RENAMES.note(group_id, old, sender_openid)
+        runtime.RELATIONS.set_nick(group_id, sender_openid, None, source="claim")
+        runtime.RENAMES.note(group_id, old, sender_openid)
         _sync_clear(group_id, sender_openid, old)
-        STATE.mark_dirty()
+        runtime.STATE.mark_dirty()
         await safe_reply(message, "（拿橡皮把小本本上的字擦干净）行，以后就不乱叫了，逮着泛称直接用。")
         return
 
@@ -1673,11 +904,11 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
                 "请一次只 @ 一个人。")
             return
         target = mentioned_others[0]
-        old = RELATIONS.get(group_id, target, create=False)
+        old = runtime.RELATIONS.get(group_id, target, create=False)
         old_nick = (old or {}).get("nick")
-        RELATIONS.set_nick(group_id, target, nick, source="owner")
-        RENAMES.note(group_id, old_nick, target)
-        STATE.mark_dirty()
+        runtime.RELATIONS.set_nick(group_id, target, nick, source="owner")
+        runtime.RENAMES.note(group_id, old_nick, target)
+        runtime.STATE.mark_dirty()
         _sync_rename(group_id, old_nick, nick)
         _nick_note_accept(group_id, target)
         logger.info("✍️ 采纳称呼：%s → 「%s」（%s御赐）", old_nick or "（未留名）", nick,
@@ -1692,16 +923,16 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
             # 以前这里带对方 openid 的后四位，方便核对绑没绑错；代价是群里看到一串
             # 读不懂的编号，模型还会照着复读。现在改用他**群里挂的显示名**来核对 ——
             # 一样能当场看出绑没绑错，而且是人话。
-            who = DISPLAY_NAMES.of(group_id, target) or "这位"
+            who = runtime.DISPLAY_NAMES.of(group_id, target) or "这位"
             await safe_reply(message,
                 f"（工工整整把名字写进点名册）收到！往后【{who}】我就记作【{nick}】"
                 f"——{owner}御赐，旁人动不了；本人想改，随口一句话的事。")
         return
 
-    old = RELATIONS.get(group_id, sender_openid).get("nick")
-    RELATIONS.set_nick(group_id, sender_openid, nick)
-    RENAMES.note(group_id, old, sender_openid)
-    STATE.mark_dirty()
+    old = runtime.RELATIONS.get(group_id, sender_openid).get("nick")
+    runtime.RELATIONS.set_nick(group_id, sender_openid, nick)
+    runtime.RENAMES.note(group_id, old, sender_openid)
+    runtime.STATE.mark_dirty()
     _sync_rename(group_id, old, nick)
     _nick_note_accept(group_id, sender_openid)
     logger.info("✍️ 采纳称呼：%s → 「%s」（本人认领）", old or "（未留名）", nick)
@@ -1729,8 +960,8 @@ def owner_reference_terms(group_id):
     第三种情况是「直接 @ 他」，在 mentions_owner 里和上面两个来源合成一个判断。
     """
     terms = set(OWNER_GENERIC_TERMS)
-    if OWNER_OPENID:
-        rec = RELATIONS.get(group_id, OWNER_OPENID, create=False) or {}
+    if runtime.OWNER_OPENID:
+        rec = runtime.RELATIONS.get(group_id, runtime.OWNER_OPENID, create=False) or {}
         nick = rec.get("nick")
         if nick:
             terms.add(nick)
@@ -1739,7 +970,7 @@ def owner_reference_terms(group_id):
 
 def mentions_owner(text, group_id, mentioned_ids=()):
     """这条消息是不是在说群主：直接 @ 了他，或者提到了他的称呼 / 「群主」二字。"""
-    if OWNER_OPENID and OWNER_OPENID in tuple(mentioned_ids or ()):
+    if runtime.OWNER_OPENID and runtime.OWNER_OPENID in tuple(mentioned_ids or ()):
         return True
     return any(t and t in (text or "") for t in owner_reference_terms(group_id))
 
@@ -1767,7 +998,7 @@ def mode_switch_allowed(group_id, openid, is_owner=False):
     """
     if is_owner or not config.AFFINITY_ENABLED:
         return True
-    rec = RELATIONS.get(group_id, openid, create=False)
+    rec = runtime.RELATIONS.get(group_id, openid, create=False)
     if not rec or not rec.get("interactions"):
         return True
     return rec.get("score", 0) >= config.MODE_SWITCH_MIN_AFFINITY
@@ -1788,18 +1019,11 @@ def _reset_style(group_id, old_mode, new_mode):
     但窗口里还压着上一个状态的回复，模型会照着最近几轮自己的语气走。
     清掉历史，新状态的风格第一句就是纯的（关系档案与长期记忆不受影响，那是另一条线）。
     """
-    dropped = SESSIONS.clear_group(group_id)
-    STATE.mark_dirty()
+    dropped = runtime.SESSIONS.clear_group(group_id)
+    runtime.STATE.mark_dirty()
     logger.info("🎭 模式 %s → %s，已清空该群 %d 个会话历史", old_mode, new_mode, dropped)
 
 
-def _all_named(group_id):
-    """本群所有留过称呼的人 [(openid, rec)]，最近的排前面。"""
-    prefix = f"{group_id}|"
-    rows = [(k[len(prefix):], r) for k, r in RELATIONS.records.items()
-            if k.startswith(prefix) and r.get("nick")]
-    rows.sort(key=lambda kv: kv[1].get("last_seen", 0.0), reverse=True)
-    return rows
 
 
 def _other_names(group_id, exclude_openid, limit=8):
@@ -1822,11 +1046,11 @@ def _resolve_name(group_id):
     它只是显示兜底、不参与判断，但拿来当压缩的署名比「一位群友」强得多。
     """
     def _fn(member_openid):
-        rec = RELATIONS.get(group_id, member_openid, create=False)
+        rec = runtime.RELATIONS.get(group_id, member_openid, create=False)
         nick = (rec or {}).get("nick")
         if nick:
             return nick
-        return DISPLAY_NAMES.of(group_id, member_openid)
+        return runtime.DISPLAY_NAMES.of(group_id, member_openid)
 
     return _fn
 
@@ -1837,13 +1061,13 @@ def render_digest_reply(group_id, mode="normal"):
     发出去之前过一遍 refresh_names：「群史记」是长期记忆的原文，里面固化的还是当年的
     称呼，直接发到群里等于当众用旧名叫人。
     """
-    md = ARCHIVE.read_memory(group_id)
+    md = runtime.ARCHIVE.read_memory(group_id)
     if md:
         body = md.strip()
         if len(body) > 900:
             body = body[:900] + "\n……（太长截了，完整版在 memory/ 目录里，原文在 archive/）"
         return refresh_names(group_id, body)
-    return refresh_names(group_id, digest_mod.render_summary(DIGESTS.get(group_id), mode=mode))
+    return refresh_names(group_id, digest_mod.render_summary(runtime.DIGESTS.get(group_id), mode=mode))
 
 
 async def judge_nick(nick):
@@ -1909,23 +1133,6 @@ async def ask_digest(system, user):
     return wordfilter.scrub(out)
 
 
-def _affinity_ledger(group_id):
-    """给压缩结算看的「关系底账」：每个人现在站在哪个交情档位。
-
-    玩笑和敌意的分界跟着交情走 —— 熟人损它十句是日常，生人损十句是敌意。
-    压缩要判「关系走势」，得先知道每段关系现在站在哪，否则两把尺子量所有人。
-    这块只进压缩 prompt（内部结算用），不进群聊回复，档位名可以直接写。
-    """
-    if not config.AFFINITY_ENABLED:
-        return None
-    rows = []
-    for _oid, rec in _all_named(group_id):
-        key = relations.level_key(rec.get("score", 0))
-        rows.append(f"{rec.get('nick')}={relations.level_label(key)}")
-    if not rows:
-        return None
-    return ("【当前关系底账】以下是他和各人现在的交情档位，"
-            "判断玩笑还是敌意之前先看这个：\n" + "、".join(rows))
 
 
 async def run_digest(group_id, reason=""):
@@ -1934,11 +1141,11 @@ async def run_digest(group_id, reason=""):
     同一群串行，避免定时任务和手动触发撞车。
     关键：**只有压缩成功才推进 last_run**，失败时消息仍留在归档里，下一轮会重读。
     """
-    lock = _digest_locks.setdefault(group_id, asyncio.Lock())
+    lock = runtime._digest_locks.setdefault(group_id, asyncio.Lock())
     if lock.locked():
         return
     async with lock:
-        entries = ARCHIVE.since(group_id, DIGESTS.last_run(group_id),
+        entries = runtime.ARCHIVE.since(group_id, runtime.DIGESTS.last_run(group_id),
                                 limit=config.DIGEST_MAX_PENDING)
         if not entries:
             return
@@ -1947,9 +1154,9 @@ async def run_digest(group_id, reason=""):
         started = time.time()
         try:
             result = await digest_mod.compress_group(
-                DIGESTS, group_id, entries, ask_digest,
+                runtime.DIGESTS, group_id, entries, ask_digest,
                 resolver=_resolve_name(group_id),
-                budget=BUDGET.try_consume,
+                budget=runtime.BUDGET.try_consume,
                 log=logger.info,
                 refresh=lambda t: refresh_names(group_id, t),
                 ledger=_affinity_ledger(group_id),
@@ -1961,17 +1168,17 @@ async def run_digest(group_id, reason=""):
             logger.warning("⚠️ 群 %s 记忆未产出结果，原文保留在归档里，下轮再试", group_id[-6:])
             return
 
-        DIGESTS.mark_compressed(group_id)
-        STATE.mark_dirty()
+        runtime.DIGESTS.mark_compressed(group_id)
+        runtime.STATE.mark_dirty()
         logger.info("📜 群 %s 记忆已更新（%.1fs / %d 条）：%s",
                     group_id[-6:], time.time() - started, len(entries),
                     (result.get("brief") or "")[:70])
 
         # 承诺账本跟着摘要对齐：新出现的记上，摘要里消失的自动撤下
         if config.PROMISE_ENABLED:
-            added, dropped = PROMISES.sync(group_id, (result.get("data") or {}).get("promises"))
+            added, dropped = runtime.PROMISES.sync(group_id, (result.get("data") or {}).get("promises"))
             if added or dropped:
-                STATE.mark_dirty()
+                runtime.STATE.mark_dirty()
                 logger.info("🧾 承诺账本已同步：新增 %d 条，撤下 %d 条", added, dropped)
 
         # 好感度结算：这一整段时间里谁更亲近、谁在抬杠，一次性落库
@@ -1987,7 +1194,7 @@ async def run_digest(group_id, reason=""):
         # 当天的人话版 MD，平时看这个就够，出错再回 archive/ 查原文
         if config.DIGEST_WRITE_MD:
             try:
-                path = ARCHIVE.write_memory(
+                path = runtime.ARCHIVE.write_memory(
                     group_id, result.get("brief") or "", result.get("data") or {},
                     meta={"本次压缩消息数": len(entries), "耗时": f"{time.time() - started:.1f}s"},
                 )
@@ -2003,13 +1210,13 @@ async def digest_loop():
         if not config.DIGEST_ENABLED:
             continue
         try:
-            for gid in list(DIGESTS.groups.keys()):
-                pending = len(ARCHIVE.since(gid, DIGESTS.last_run(gid)))
-                if not DIGESTS.needs_compress(
+            for gid in list(runtime.DIGESTS.groups.keys()):
+                pending = len(runtime.ARCHIVE.since(gid, runtime.DIGESTS.last_run(gid)))
+                if not runtime.DIGESTS.needs_compress(
                         gid, config.DIGEST_INTERVAL_HOURS, config.DIGEST_MIN_PENDING,
                         pending, count_trigger=config.DIGEST_COUNT_TRIGGER):
                     continue
-                await run_digest(gid, reason=DIGESTS.compress_reason(
+                await run_digest(gid, reason=runtime.DIGESTS.compress_reason(
                     gid, config.DIGEST_INTERVAL_HOURS, pending,
                     count_trigger=config.DIGEST_COUNT_TRIGGER))
         except Exception as e:
@@ -2038,16 +1245,16 @@ async def post_to_group(group_id, text):
 
 async def dun_promises(group_id):
     """挑一条最该催的承诺，让它开口要账。一天最多一次，催满上限就撤下。"""
-    dunnable = PROMISES.dunnable(group_id)
+    dunnable = runtime.PROMISES.dunnable(group_id)
     if not dunnable:
         return
     row = dunnable[0]
-    if not BUDGET.try_consume():
-        logger.warning("🛑 今日额度已用尽，本次催债跳过（%d/%d）", BUDGET.used, BUDGET.limit)
+    if not runtime.BUDGET.try_consume():
+        logger.warning("🛑 今日额度已用尽，本次催债跳过（%d/%d）", runtime.BUDGET.used, runtime.BUDGET.limit)
         return
-    STATE.mark_dirty()
+    runtime.STATE.mark_dirty()
     lines = []
-    for r in PROMISES.list(group_id):
+    for r in runtime.PROMISES.list(group_id):
         due = r.get("due_text") or "没说时间"
         lines.append(f"- {r.get('who','有人')}：{r.get('what','')}（说的时间：{due}）")
     # 和长期记忆一样，账本里存的是**当时**那个称呼。不刷新的话，人改了名，
@@ -2063,8 +1270,8 @@ async def dun_promises(group_id):
     text = text.strip().strip('"')
     if not await post_to_group(group_id, text):
         return
-    nag = PROMISES.mark_nagged(group_id, row["id"])
-    STATE.mark_dirty()
+    nag = runtime.PROMISES.mark_nagged(group_id, row["id"])
+    runtime.STATE.mark_dirty()
     logger.info("🧾 已催债（第 %d 次）：%s —— %s", nag, row.get("who"), row.get("what"))
 
 
@@ -2077,9 +1284,9 @@ async def promise_loop():
         try:
             if quiet_hour():
                 continue
-            for gid in list(PROMISES.items.keys()):
+            for gid in list(runtime.PROMISES.items.keys()):
                 # 群里今天都没人说话，就没必要自顾自地开口
-                seen = (STATE.data.get("groups") or {}).get(gid, {}).get("last_seen", 0)
+                seen = (runtime.STATE.data.get("groups") or {}).get(gid, {}).get("last_seen", 0)
                 if time.time() - seen > 86400:
                     continue
                 await dun_promises(gid)
@@ -2087,133 +1294,14 @@ async def promise_loop():
             logger.error("⚠️ 催债调度异常: %s", str(e)[:200])
 
 
-def apply_relation_delta(group_id, member_openid, delta, reason=""):
-    """把一次互动的情感分值写进档案。
-
-    默认情况下这里是**本地关键词兜底**在打分（见下方调用点）—— 让模型每轮自评那套已经撤了，
-    好感度的模型判断挪到每日压缩里做（apply_digest_affinity）。若哪天把
-    config.CMD_PROTOCOL_ENABLED 打开回退，这里又会优先用模型给的分值。
-    """
-    if not config.AFFINITY_ENABLED:
-        return None
-    score, old_lv, new_lv = RELATIONS.apply(group_id, member_openid, delta)
-    STATE.mark_dirty()
-    logger.info("💗 [%s/%s] %+d → %d 档位=%s%s %s",
-                group_id[-6:], member_openid[-6:], delta, score, new_lv,
-                f"（原{old_lv}）" if old_lv != new_lv else "", reason)
-    return score
 
 
-def _affinity_daily_key(group_id, member_openid):
-    return f"{group_id}|{member_openid}"
 
 
-def affinity_budget(group_id, member_openid, now=None):
-    """今天这个人还剩多少加减分额度。跨天自动重置（只留今天和昨天，别让存档无限长）。"""
-    now = time.time() if now is None else now
-    day = time.strftime("%Y-%m-%d", time.localtime(now))
-    yesterday = time.strftime("%Y-%m-%d", time.localtime(now - 86400))
-    table = STATE.data.setdefault("affinity_daily", {})
-    for k in [k for k, v in table.items()
-              if isinstance(v, dict) and v.get("day") not in (day, yesterday)]:
-        table.pop(k, None)
-    rec = table.get(_affinity_daily_key(group_id, member_openid)) or {}
-    if rec.get("day") != day:
-        rec = {"day": day, "gain": 0, "loss": 0}
-        table[_affinity_daily_key(group_id, member_openid)] = rec
-    return rec
 
 
-def apply_affinity_delta_capped(group_id, member_openid, delta, reason="", span=None,
-                                now=None, count=True):
-    """带**每日封顶**的好感度写入。返回真正落库的分数（None = 被封顶吃掉了）。
-
-    为什么非要封顶：好感度是长期账本，而打分有两个会出错的来源 ——
-    模型的判断会漂、本地词表会有冤案。没有封顶的话，一次误判就能把「铁哥们」
-    直接扣成「生疏」，而涨回来要很多天。封顶把单次事故的伤害压到可恢复的范围内。
-    封顶是**不对称**的：加分放宽（关系本来就该越聊越近），扣分收紧（误判更伤人）。
-    """
-    if not config.AFFINITY_ENABLED or not delta:
-        return None
-    budget = affinity_budget(group_id, member_openid, now)
-    # ⚠️ 这里**不**做幅度 clamp：压缩结算一次能到 ±6，削成 ±3 就把它的语义废了。
-    # 幅度的收窄交给 RELATIONS.apply（它知道 span 是一次互动还是一整天）。
-    # 这里只管**封顶截断**，让单日额度真的成为硬上限。
-    delta = int(delta)
-    # ⚠️ 关键：不只是「超了没」，还得把这一笔**截断到剩余额度** ——
-    #    压缩结算一次能到 ±6，只判断不截断的话，一次就能把一天的额度穿个洞（实测 -6 > cap 5）。
-    if delta > 0:
-        room = config.AFFINITY_DAILY_GAIN_CAP - budget["gain"]
-        if room <= 0:
-            logger.info("💗 [%s/%s] %+d 被日封顶吃掉（今天已加 %d/%d）",
-                        group_id[-6:], member_openid[-6:], delta,
-                        budget["gain"], config.AFFINITY_DAILY_GAIN_CAP)
-            return None
-        delta = min(delta, room)
-    elif delta < 0:
-        room = config.AFFINITY_DAILY_LOSS_CAP - budget["loss"]
-        if room <= 0:
-            logger.info("💗 [%s/%s] %d 被日封顶吃掉（今天已扣 %d/%d）",
-                        group_id[-6:], member_openid[-6:], abs(delta),
-                        budget["loss"], config.AFFINITY_DAILY_LOSS_CAP)
-            return None
-        delta = -min(-delta, room)
-    if not delta:
-        return None
-    budget["gain"] += max(0, delta)
-    budget["loss"] += max(0, -delta)
-    STATE.mark_dirty()
-    if span is None and count:
-        return apply_relation_delta(group_id, member_openid, delta, reason)
-    return RELATIONS.apply(group_id, member_openid, delta, span=span, count=count)
 
 
-def apply_digest_affinity(group_id, rows):
-    """把每日压缩结算出来的「对某人的印象变化」写进关系档案。
-
-    为什么从每轮挪到这儿：压缩看得到一整天完整的对话，判得比让模型每轮顺手自评准；
-    而且不用再逼它每轮多吐一行 JSON，注意力能全留给角色扮演。
-    返回 (落库人数, 明细文本)。
-    """
-    if not config.AFFINITY_ENABLED or not rows:
-        return 0, ""
-    # 摘要里写的是人话（「阿强」），落库要的是 openid，这里反查。
-    # ⚠️ 反查是**单向**的：模型给的名字只用来找 openid，永远不回写 rec["nick"]。
-    # 主名只能由本人或群主授权来定（见 relations.MAIN_NAME_SOURCES）——摘要写的名字
-    # 即便看着更像样，也只能落到「印象变化」上，动不了称呼本身。
-    by_nick = {}
-    for oid, rec in _all_named(group_id):
-        nick = (rec.get("nick") or "").strip()
-        if nick:
-            by_nick.setdefault(nick, oid)
-    applied, notes = 0, []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        who = str(row.get("who") or "").strip()
-        target = by_nick.get(who)
-        if not target:
-            # 名字对不上（改过名，或摘要写了个没人认领过的称呼）：宁可不记，也不能记错人
-            continue
-        try:
-            delta = int(row.get("delta"))
-        except (TypeError, ValueError):
-            continue
-        if not delta:
-            continue
-        # 压缩结算也走同一道每日封顶 —— 它一次能到 ±6，不封的话一天就能把分数洗一遍
-        got = apply_affinity_delta_capped(
-            group_id, target, delta, reason="压缩结算",
-            span=config.AFFINITY_DIGEST_SPAN, count=False)
-        if got is None:
-            notes.append(f"{who}{delta:+d}→封顶")
-            continue
-        score, old_lv, new_lv = got
-        applied += 1
-        notes.append(f"{who}{delta:+d}→{score}")
-    if applied:
-        STATE.mark_dirty()
-    return applied, "、".join(notes)
 
 
 # ══════════════════════ 7. 机器人主体 ══════════════════════
@@ -2237,8 +1325,8 @@ class GroupBot(botpy.Client):
                 "群里喊别的名字它是不会应的。在 .env 里设 BOT_NAMES（可多个别名），"
                 "或直接在 QQ 那边给它改个昵称",
                 naming.DEFAULT_BOT_NAME)
-        if OWNER_OPENID:
-            logger.info("👑 群主 OpenID 已锁定: %s（好感度锁定顶格；称呼认领后自动生效）", OWNER_OPENID)
+        if runtime.OWNER_OPENID:
+            logger.info("👑 群主 OpenID 已锁定: %s（好感度锁定顶格；称呼认领后自动生效）", runtime.OWNER_OPENID)
         elif config.OWNER_CLAIM_PHRASE:
             # 只在用的是**默认**暗号时才把它打出来 —— 自定义暗号一律不落日志。
             which = (f"现在用的是默认暗号「{config.OWNER_CLAIM_PHRASE}」，"
@@ -2254,21 +1342,21 @@ class GroupBot(botpy.Client):
                            "私聊认主通道已关闭，只能把 OpenID 手动写进 %s", config.OWNER_FILE)
         logger.info("📡 全量群消息监听与智能上下文缓存池已就绪！")
         logger.info("🤖 供应商=%s 主模型=%s | 今日额度已用 %d/%d",
-                    config.PROVIDER["label"], CANDIDATE_MODELS[0], BUDGET.used, BUDGET.limit)
+                    config.PROVIDER["label"], CANDIDATE_MODELS[0], runtime.BUDGET.used, runtime.BUDGET.limit)
         logger.info("💾 状态=%s | 会话 %s | 关系档案 %s",
-                    config.STATE_FILE, SESSIONS.stats(), RELATIONS.counts())
-        arch = ARCHIVE.stats()
+                    config.STATE_FILE, runtime.SESSIONS.stats(), runtime.RELATIONS.counts())
+        arch = runtime.ARCHIVE.stats()
         logger.info("🗄️  原文归档=%s/ （%d 天 / %d 条）| 摘要 MD=%s/",
                     config.ARCHIVE_DIR, arch["days"], arch["lines"], config.MEMORY_DIR)
         if config.DIGEST_ENABLED:
-            pending = {g: len(ARCHIVE.since(g, DIGESTS.last_run(g))) for g in DIGESTS.groups}
+            pending = {g: len(runtime.ARCHIVE.since(g, runtime.DIGESTS.last_run(g))) for g in runtime.DIGESTS.groups}
             logger.info("🧠 群聊长期记忆已启用 | 攒够 %d 条或每 %.0f 小时压缩一次 | 待压缩 %s",
                         config.DIGEST_COUNT_TRIGGER, config.DIGEST_INTERVAL_HOURS,
                         "、".join(f"群{k[-6:]}:{v}条" for k, v in pending.items()) or "无")
         else:
             logger.info("🧠 群聊长期记忆已关闭（DIGEST_ENABLED=false）")
         if config.PROMISE_ENABLED:
-            total = sum(len(v) for v in PROMISES.items.values())
+            total = sum(len(v) for v in runtime.PROMISES.items.values())
             logger.info("🧾 承诺催债已启用 | 在账 %d 条 | 宽限 %.0f 小时，最多催 %d 次",
                         total, config.PROMISE_GRACE_HOURS, config.PROMISE_MAX_NAG)
         logger.info("=" * 50)
@@ -2281,7 +1369,7 @@ class GroupBot(botpy.Client):
         await self.handle_group_msg(message, is_at=True)
 
     async def handle_group_msg(self, message: GroupMessage, is_at: bool = False):
-        global OWNER_OPENID
+        
 
         # 1. 去重：同一条消息可能被多个事件重复投递
         if message.id in processed_msg_ids:
@@ -2307,7 +1395,7 @@ class GroupBot(botpy.Client):
             # 显示他」的地方 —— 日常互相 @ 是大头，别只认群主命名那一种。
             if learn_display_names(
                     group_id, mentioned_others, raw_content, naming.bot_names()):
-                STATE.mark_dirty()
+                runtime.STATE.mark_dirty()
 
         # 规范化时把 @ 翻成人话（@ 了谁由档案回答）—— @ 不再被清掉，见 qqtext 的说明
         user_input = qqtext.normalize(
@@ -2330,14 +1418,14 @@ class GroupBot(botpy.Client):
         # ⚠️ 本地控制指令（「猫娘模式」这类）照样落盘留痕，但打上 cmd 标记 ——
         #    压缩长期记忆时会跳过它们。它们是操作不是聊天，进了压缩就变成
         #    「这人想变猫娘」这种人物事实（2026-09-21 实测事故）。
-        ARCHIVE.append(group_id, sender_openid, user_input, at=is_at,
+        runtime.ARCHIVE.append(group_id, sender_openid, user_input, at=is_at,
                        cmd=is_control_command(user_input))
         if config.DIGEST_ENABLED:
-            DIGESTS.touch(group_id)
+            runtime.DIGESTS.touch(group_id)
         # 记一下这个群最近有人说话：主动催债前要确认群里还活着。
         # 就地更新而不是整块替换 —— 这个槽位还存着别的每群标记（比如群主认领提示有没有说过）。
-        STATE.data.setdefault("groups", {}).setdefault(group_id, {})["last_seen"] = time.time()
-        STATE.mark_dirty()
+        runtime.STATE.data.setdefault("groups", {}).setdefault(group_id, {})["last_seen"] = time.time()
+        runtime.STATE.mark_dirty()
 
         # 3.5 写入群聊滑动窗口背景缓存。
         #     只挡「同一个人连着刷一模一样的内容」（复读机、表情三连），别让它把窗口占满；
@@ -2346,19 +1434,19 @@ class GroupBot(botpy.Client):
         buf = group_buffers[group_id]
         if not buf or buf[-1]["sender"] != sender_openid or buf[-1]["text"] != user_input:
             buf.append({"sender": sender_openid, "text": user_input, "time": time.time()})
-            STATE.data["buffers"][group_id] = list(buf)
+            runtime.STATE.data["buffers"][group_id] = list(buf)
 
         # 4. 群主认领 —— **群里永远不授权**，这里只负责把人指到私聊去。
         #    以前这段真的会在群里认主（谁先喊谁得），等于把身份挂在大喇叭上招领；
         #    现在群里说破天也只是收到一句「去私聊办」，权限一个字都不给。
         if looks_like_claim_attempt(user_input):
             owner = owner_label(group_id)
-            if OWNER_OPENID is None:
+            if runtime.OWNER_OPENID is None:
                 # 每个群只正面回一次，免得有人反复喊就反复刷屏
                 if claim_redirect_pending(group_id):
                     await safe_reply(message, OWNER_CLAIM_HINT)
                 return
-            if OWNER_OPENID == sender_openid:
+            if runtime.OWNER_OPENID == sender_openid:
                 await safe_reply(message, f"{owner}，您早就认领过了 —— 您的 OpenID 已经焊死在我的"
                                           "系统核心里，有什么吩咐直接说就行。")
                 return
@@ -2368,12 +1456,12 @@ class GroupBot(botpy.Client):
                 f"信不信我现在就向{owner}打小报告，给你安排个禁言大礼包？")
             return
 
-        is_owner = OWNER_OPENID is not None and sender_openid == OWNER_OPENID
+        is_owner = runtime.OWNER_OPENID is not None and sender_openid == runtime.OWNER_OPENID
 
         # 群模式（顺便把旧的 cadre 存档迁移成 discipline）
-        current_mode = resolve_mode(STATE.get_mode(group_id))
-        if current_mode != STATE.get_mode(group_id):
-            STATE.set_mode(group_id, current_mode)
+        current_mode = resolve_mode(runtime.STATE.get_mode(group_id))
+        if current_mode != runtime.STATE.get_mode(group_id):
+            runtime.STATE.set_mode(group_id, current_mode)
 
         # 5.4 起名开关：群主一句话锁上/解开整个群的起名。0 token，纯本地。
         #     排在昵称指令解析之前 —— 「锁起名」本身不含「叫我/叫X」，不会撞，
@@ -2422,7 +1510,7 @@ class GroupBot(botpy.Client):
         # 7. 模式切换（免@生效，纯本地文案，不消耗 AI）
         if hits(user_input, exit_triggers()):
             if current_mode != "normal":
-                STATE.set_mode(group_id, "normal")
+                runtime.STATE.set_mode(group_id, "normal")
                 _reset_style(group_id, current_mode, "normal")
                 line = MODE_EXIT_LINES.get(current_mode, "收到！已恢复普通{bot}模式！")
                 await safe_reply(message, naming.render(line, owner=owner_label(group_id)))
@@ -2436,7 +1524,7 @@ class GroupBot(botpy.Client):
                                 mode_name, sender_openid[-4:])
                     await safe_reply(message, mode_denied_line(group_id))
                     return
-                STATE.set_mode(group_id, mode_name)
+                runtime.STATE.set_mode(group_id, mode_name)
                 _reset_style(group_id, current_mode, mode_name)
                 await safe_reply(message, naming.render(entry_line, owner=owner_label(group_id)))
                 return
@@ -2448,19 +1536,19 @@ class GroupBot(botpy.Client):
                 if now - group_last_random_reply.get(group_id, 0) >= config.MEME_COOLDOWN_SECONDS:
                     if random.random() < config.MEME_PROBABILITY:
                         group_last_random_reply[group_id] = now
-                        STATE.data["cooldowns"][group_id] = now
-                        STATE.mark_dirty()
+                        runtime.STATE.data["cooldowns"][group_id] = now
+                        runtime.STATE.mark_dirty()
                         await safe_reply(message, meme_value)
                         return
 
         # 8.5 关系档案本地查询（直接读档，0 token，不打扰模型）
         if matches_relation_query(user_input):
-            rec = RELATIONS.get(group_id, sender_openid)
+            rec = runtime.RELATIONS.get(group_id, sender_openid)
             await safe_reply(message, relations.render_status(rec, sender_openid, mode=current_mode))
             return
 
         if hits(user_input, RELATION_BOARD_TRIGGERS):
-            rows = RELATIONS.rank(group_id, topn=config.AFFINITY_BOARD_SIZE)
+            rows = runtime.RELATIONS.rank(group_id, topn=config.AFFINITY_BOARD_SIZE)
             await safe_reply(message, relations.render_rank(rows, mode=current_mode))
             return
 
@@ -2477,11 +1565,11 @@ class GroupBot(botpy.Client):
         # 8.7 承诺台账：查账是本地读取，结清按昵称匹配撤下
         if config.PROMISE_ENABLED:
             if hits(user_input, PROMISE_CLEAR_TRIGGERS):
-                rec = RELATIONS.get(group_id, sender_openid)
+                rec = runtime.RELATIONS.get(group_id, sender_openid)
                 nick = (rec or {}).get("nick") or ""
-                removed = PROMISES.resolve(group_id, keyword=nick or sender_openid[-4:])
+                removed = runtime.PROMISES.resolve(group_id, keyword=nick or sender_openid[-4:])
                 if removed:
-                    STATE.mark_dirty()
+                    runtime.STATE.mark_dirty()
                     await safe_reply(message,
                         f"（在小本本上重重划掉 {removed} 行）行，算你说话算话，这笔账销了。")
                 else:
@@ -2490,13 +1578,13 @@ class GroupBot(botpy.Client):
 
             if hits(user_input, PROMISE_TRIGGERS):
                 # 同上：发到群里之前先刷新，别拿旧名当众叫人
-                await safe_reply(message, refresh_names(group_id, PROMISES.render(group_id)))
+                await safe_reply(message, refresh_names(group_id, runtime.PROMISES.render(group_id)))
                 return
 
         # 8.8 回原文查证：摘要出错时用它翻底稿
         m_lookup = RE_LOOKUP.match(user_input)
         if m_lookup:
-            found = ARCHIVE.search(group_id, m_lookup.group(1), limit=8)
+            found = runtime.ARCHIVE.search(group_id, m_lookup.group(1), limit=8)
             if not found:
                 await safe_reply(message, f"（翻遍归档）没找着含「{m_lookup.group(1)}」的发言，"
                                           "要么你记错了，要么这事只在你脑子里发生过。")
@@ -2506,7 +1594,7 @@ class GroupBot(botpy.Client):
                     when = time.strftime("%m-%d %H:%M", time.localtime(h["ts"]))
                     # 翻旧账是**发出去给人看的**：称呼 > 显示名 > 泛称，不吐 openid
                     who = (_resolve_name(group_id)(h["sender"])
-                           or DISPLAY_NAMES.of(group_id, h["sender"])
+                           or runtime.DISPLAY_NAMES.of(group_id, h["sender"])
                            or "某位群友")
                     lines.append(f"[{when}] {who}：{h['text'][:60]}")
                 await safe_reply(message,
@@ -2541,7 +1629,7 @@ class GroupBot(botpy.Client):
                     chance = config.BANTER_PROBABILITY
                 # 亲密度权重：越熟的人说话越容易被接（2026-09-21 群主提的机制）。
                 # 权重不是概率 —— 基数不动，熟人 1.6×、生人 0.7×，整体话量不变。
-                rec = RELATIONS.get(group_id, sender_openid, create=False)
+                rec = runtime.RELATIONS.get(group_id, sender_openid, create=False)
                 chance = banter_chance(chance, rec)
                 if random.random() < chance:
                     should_reply = True
@@ -2549,8 +1637,8 @@ class GroupBot(botpy.Client):
                     logger.info("🎲 插嘴命中（亲密度权重 %.2f → 概率 %.3f，%s）",
                                 relations.banter_weight(rec), chance, sender_openid[-4:])
                     group_last_random_reply[group_id] = now
-                    STATE.data["cooldowns"][group_id] = now
-                    STATE.mark_dirty()
+                    runtime.STATE.data["cooldowns"][group_id] = now
+                    runtime.STATE.mark_dirty()
 
         if not should_reply:
             return
@@ -2581,9 +1669,9 @@ class GroupBot(botpy.Client):
                 def _who(oid):
                     # 认领过的称呼 > 群里挂的显示名 > 泛称。以前这里拼 openid 后四位，
                     # 结果模型把它当成名字复读进了回复 —— 群里没人看得懂。
-                    r = RELATIONS.get(group_id, oid, create=False)
+                    r = runtime.RELATIONS.get(group_id, oid, create=False)
                     return ((r or {}).get("nick")
-                            or DISPLAY_NAMES.of(group_id, oid)
+                            or runtime.DISPLAY_NAMES.of(group_id, oid)
                             or "一位群友")
 
                 context_hint = refresh_names(
@@ -2607,7 +1695,7 @@ class GroupBot(botpy.Client):
         relation_note = ""
         target_record = None
         if config.AFFINITY_ENABLED:
-            target_record = RELATIONS.get(group_id, sender_openid)
+            target_record = runtime.RELATIONS.get(group_id, sender_openid)
             relation_note = relations.build_relation_note(
                 target_record, sender_openid, mode=active_mode,
                 other_names=_other_names(group_id, sender_openid),
@@ -2617,12 +1705,12 @@ class GroupBot(botpy.Client):
                 # 免得放宽日上限之后它把同一句播成每日常态（见 relations.apply 里的说明）。
                 target_record["pending_milestone"] = None
                 target_record["told_day"] = time.strftime("%Y-%m-%d")
-                STATE.mark_dirty()
+                runtime.STATE.mark_dirty()
 
         # 群聊长期记忆：有就注入，让它可以说「上周撺掇打牌那事儿我可还记着」
         group_memory = ""
         if config.DIGEST_ENABLED:
-            summary = DIGESTS.get(group_id)
+            summary = runtime.DIGESTS.get(group_id)
             if summary and (summary.get("brief") or (summary.get("data") or {}).get("topics")):
                 # 名字统一刷新成当前称呼再注入：模型永远拿不到旧名，也就编不出
                 # 「那谁和这谁」这种把同一个人拆成两个人的往事。
@@ -2638,12 +1726,12 @@ class GroupBot(botpy.Client):
                 view = summary
                 promises = (summary.get("data") or {}).get("promises")
                 if promises:
-                    visible = PROMISES.take_for_prompt(group_id, promises)
+                    visible = runtime.PROMISES.take_for_prompt(group_id, promises)
                     if len(visible) != len(promises):
                         data = dict(summary.get("data") or {})
                         data["promises"] = visible
                         view = dict(summary, data=data)
-                        STATE.mark_dirty()
+                        runtime.STATE.mark_dirty()
                 group_memory = refresh_names(
                     group_id,
                     digest_mod.render_summary(view, mode=active_mode)
@@ -2679,7 +1767,7 @@ class GroupBot(botpy.Client):
 
     async def on_c2c_message_create(self, message: Message):
         """私聊。以前这里连去重都没有，重复投递会重复扣额度。"""
-        global OWNER_OPENID
+        
         if message.id in processed_msg_ids:
             return
         processed_msg_ids.append(message.id)
@@ -2693,19 +1781,19 @@ class GroupBot(botpy.Client):
         # 认主：**只在私聊，且必须说对暗号**。第一个说对的 openid 被永久写进 owner.txt。
         # 认领之后就失效了（不做转移）—— 所以口令将来就算泄了，也抢不走这个位置。
         if matches_claim_phrase(user_input):
-            if OWNER_OPENID is None:
-                OWNER_OPENID = sender_openid
-                save_owner(OWNER_OPENID)
-                RELATIONS.pin(OWNER_OPENID)   # 好感度钉在顶格：亲近靠档案，不靠谄媚台词
-                STATE.mark_dirty()
+            if runtime.OWNER_OPENID is None:
+                runtime.OWNER_OPENID = sender_openid
+                save_owner(runtime.OWNER_OPENID)
+                runtime.RELATIONS.pin(runtime.OWNER_OPENID)   # 好感度钉在顶格：亲近靠档案，不靠谄媚台词
+                runtime.STATE.mark_dirty()
                 logger.info("👑 【认主成功】已永久锁定唯一群主 OpenID: %s（好感度锁定顶格）",
-                            OWNER_OPENID)
+                            runtime.OWNER_OPENID)
                 await safe_reply(message,
                     "（当场立正敬礼，掏出纯金VIP打卡机录入指纹）\n滴！认主成功！"
                     f"从今往后{naming.bot_name()}唯您马首是瞻 ——"
                     "给别人起名、特权指令这些，往后只有您说了算。")
                 return
-            if OWNER_OPENID == sender_openid:
+            if runtime.OWNER_OPENID == sender_openid:
                 await safe_reply(message,
                     "您早就认领过了 —— 您的 OpenID 已经焊死在我的系统核心里，不用再对一次。")
                 return
@@ -2715,7 +1803,7 @@ class GroupBot(botpy.Client):
 
         # 说了句「像是要认领」的话但没对上暗号。**静默失效正是这个功能最大的坑**，所以明说，
         # 而且这句是本地固定话术：0 token，也不占每日额度。
-        if OWNER_OPENID is None and looks_like_claim_attempt(user_input):
+        if runtime.OWNER_OPENID is None and looks_like_claim_attempt(user_input):
             if config.OWNER_CLAIM_PHRASE:
                 await safe_reply(message,
                     "这是想认领我？那得说对暗号才行 —— 暗号是部署的时候在 `OWNER_CLAIM_PHRASE` "
@@ -2726,7 +1814,7 @@ class GroupBot(botpy.Client):
                     "`OWNER_CLAIM_PHRASE`。")
             return
 
-        is_owner = OWNER_OPENID is not None and sender_openid == OWNER_OPENID
+        is_owner = runtime.OWNER_OPENID is not None and sender_openid == runtime.OWNER_OPENID
 
         # 私聊不办改名：称呼是按群存的（`群号|openid`），这条消息里没有群号 ——
         # 改了也不知道该改在哪儿。必须**明说**：以前这句话直接喂给模型，被当成闲聊
@@ -2745,12 +1833,12 @@ class GroupBot(botpy.Client):
             await safe_reply(message, NICK_PRIVATE_CHAT_HINT)
             return
 
-        if not BUDGET.try_consume():
-            logger.warning("🛑 今日额度已用尽，私聊也一并拒绝（%d/%d）", BUDGET.used, BUDGET.limit)
-            STATE.mark_dirty()
+        if not runtime.BUDGET.try_consume():
+            logger.warning("🛑 今日额度已用尽，私聊也一并拒绝（%d/%d）", runtime.BUDGET.used, runtime.BUDGET.limit)
+            runtime.STATE.mark_dirty()
             await safe_reply(message, "（小声）今天额度用冒了，明天再陪你聊啊兄弟。")
             return
-        STATE.mark_dirty()
+        runtime.STATE.mark_dirty()
 
         reply_text, _delta = await get_ai_reply(
             f"user_{sender_openid}", user_input, is_owner=is_owner, mode="normal",
@@ -2769,7 +1857,7 @@ def install_signal_handlers():
         name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
         logger.warning("🛑 收到 %s，正在保存状态后退出...", name)
         try:
-            STATE.save_now(force=True)
+            runtime.STATE.save_now(force=True)
             logger.info("💾 状态已保存至 %s", config.STATE_FILE)
         except Exception as e:
             logger.error("❌ 退出时保存状态失败: %s", e)
@@ -2787,14 +1875,14 @@ async def prune_loop():
     while True:
         await asyncio.sleep(config.SESSION_PRUNE_INTERVAL)
         try:
-            dropped = SESSIONS.prune()
+            dropped = runtime.SESSIONS.prune()
             if dropped:
-                STATE.mark_dirty()
-                logger.info("🧹 已清理 %d 个过期会话，当前 %s", dropped, SESSIONS.stats())
-            stale = RELATIONS.prune()
+                runtime.STATE.mark_dirty()
+                logger.info("🧹 已清理 %d 个过期会话，当前 %s", dropped, runtime.SESSIONS.stats())
+            stale = runtime.RELATIONS.prune()
             if stale:
-                STATE.mark_dirty()
-                logger.info("🧹 已清理 %d 份长期失联的关系档案，当前 %s", stale, RELATIONS.counts())
+                runtime.STATE.mark_dirty()
+                logger.info("🧹 已清理 %d 份长期失联的关系档案，当前 %s", stale, runtime.RELATIONS.counts())
         except Exception as e:
             logger.error("⚠️ 会话清理异常: %s", e)
 
@@ -2809,15 +1897,18 @@ def run_bot():
     install_ws_watchdog()
     load_owner()
 
-    logger.info("🤖 供应商=%s | 主模型=%s | Key 数=%d",
-                config.PROVIDER["label"], CANDIDATE_MODELS[0], len(config.AI_KEYS))
-    if SESSIONS._sessions:
-        logger.info("💾 已恢复 %s 个会话上下文", len(SESSIONS._sessions))
+    _main_models = MODEL_CHAINS.get(config.AI_PROVIDER) or []
+    logger.info("🤖 供应商=%s | 主模型=%s | 梯队=%s",
+                config.PROVIDER["label"],
+                _main_models[0] if _main_models else "（无可用 Key）",
+                " → ".join(config.PROVIDER_PRESETS[n]["label"] for n in PROVIDER_CHAIN))
+    if runtime.SESSIONS._sessions:
+        logger.info("💾 已恢复 %s 个会话上下文", len(runtime.SESSIONS._sessions))
 
     install_signal_handlers()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.create_task(STATE.flush_loop())
+    loop.create_task(runtime.STATE.flush_loop())
     loop.create_task(ws_watchdog_loop())
     loop.create_task(prune_loop())
     if config.DIGEST_ENABLED:
@@ -2843,7 +1934,7 @@ def run_bot():
             raise
         finally:
             try:
-                STATE.save_now(force=True)
+                runtime.STATE.save_now(force=True)
             except Exception as e:
                 logger.error("❌ 落盘失败: %s", e)
 
@@ -2864,6 +1955,6 @@ if __name__ == "__main__":
         run_bot()
     finally:
         try:
-            STATE.save_now(force=True)
+            runtime.STATE.save_now(force=True)
         except Exception:
             pass

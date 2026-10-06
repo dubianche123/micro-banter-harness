@@ -21,6 +21,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import runtime
 
 import bot  # noqa: E402
 import digest as digest_mod  # noqa: E402
@@ -28,8 +29,8 @@ import prompts  # noqa: E402
 import relations  # noqa: E402
 
 GID = "TESTGID_DIGEST_NAMES"
-UNKNOWN = "E5E3793C25CF161D9F3292FE6ABA8C84"   # 没有任何称呼的人
-KNOWN = "409365F491D38A25ADA2E37FD4886ABA"
+UNKNOWN = "0123456789ABCDEF0123456789ABCDEF"   # 没有任何称呼的人
+KNOWN = "FEDCBA9876543210FEDCBA9876543210"
 
 
 class TranscriptNamingTest(unittest.TestCase):
@@ -68,28 +69,28 @@ class ResolverChainTest(unittest.TestCase):
     """压缩时一个人叫什么：认领称呼 > 群昵称 > 没有（由压缩侧退成泛称）。"""
 
     def setUp(self):
-        self.rows = dict(bot.RELATIONS.records)
-        self.disp = dict(bot.DISPLAY_NAMES.groups)
-        bot.RELATIONS.records.clear()
-        bot.DISPLAY_NAMES.groups.clear()
+        self.rows = dict(runtime.RELATIONS.records)
+        self.disp = dict(runtime.DISPLAY_NAMES.groups)
+        runtime.RELATIONS.records.clear()
+        runtime.DISPLAY_NAMES.groups.clear()
 
     def tearDown(self):
-        bot.RELATIONS.records.clear()
-        bot.RELATIONS.records.update(self.rows)
-        bot.DISPLAY_NAMES.groups.clear()
-        bot.DISPLAY_NAMES.groups.update(self.disp)
+        runtime.RELATIONS.records.clear()
+        runtime.RELATIONS.records.update(self.rows)
+        runtime.DISPLAY_NAMES.groups.clear()
+        runtime.DISPLAY_NAMES.groups.update(self.disp)
 
     def test_nothing_known_returns_none(self):
         self.assertIsNone(bot._resolve_name(GID)(UNKNOWN),
                           "resolver 不该自己编一个编号出来")
 
     def test_group_display_name_is_used_as_a_fallback(self):
-        bot.DISPLAY_NAMES.learn(GID, UNKNOWN, "贵阳老莫")
+        runtime.DISPLAY_NAMES.learn(GID, UNKNOWN, "贵阳老莫")
         self.assertEqual(bot._resolve_name(GID)(UNKNOWN), "贵阳老莫")
 
     def test_claimed_name_beats_the_group_display_name(self):
-        bot.DISPLAY_NAMES.learn(GID, UNKNOWN, "贵阳老莫")
-        bot.RELATIONS.set_nick(GID, UNKNOWN, "阿强", source="claim")
+        runtime.DISPLAY_NAMES.learn(GID, UNKNOWN, "贵阳老莫")
+        runtime.RELATIONS.set_nick(GID, UNKNOWN, "阿强", source="claim")
         self.assertEqual(bot._resolve_name(GID)(UNKNOWN), "阿强")
 
 
@@ -98,23 +99,23 @@ class ClearLabelTest(unittest.TestCase):
 
     def setUp(self):
         self.sid = f"{GID}_u1"
-        bot.SESSIONS.record(self.sid, "机器人叫我阿龙", "记住了，以后叫你【阿龙】")
-        bot.RELATIONS.set_nick(GID, UNKNOWN, "阿龙", source="claim")
+        runtime.SESSIONS.record(self.sid, "机器人叫我阿龙", "记住了，以后叫你【阿龙】")
+        runtime.RELATIONS.set_nick(GID, UNKNOWN, "阿龙", source="claim")
 
     def tearDown(self):
-        bot.SESSIONS._sessions.pop(self.sid, None)
-        bot.RELATIONS.records.pop(f"{GID}|{UNKNOWN}", None)
-        bot.RENAMES.groups.pop(GID, None)
+        runtime.SESSIONS._sessions.pop(self.sid, None)
+        runtime.RELATIONS.records.pop(f"{GID}|{UNKNOWN}", None)
+        runtime.RENAMES.groups.pop(GID, None)
 
     def _session_text(self):
-        return "\n".join(m["content"] for m in bot.SESSIONS._sessions[self.sid]["messages"])
+        return "\n".join(m["content"] for m in runtime.SESSIONS._sessions[self.sid]["messages"])
 
     def test_placeholder_constant_carries_no_id(self):
         self.assertEqual(relations.UNNAMED_LABEL, "（未留名）")
 
     def test_sync_clear_rewrites_history_without_an_id(self):
         # 真实调用顺序：先把称呼清空，再同步历史文本（否则会撞上「还是别人的主名」那条守卫）
-        bot.RELATIONS.set_nick(GID, UNKNOWN, None, source="claim")
+        runtime.RELATIONS.set_nick(GID, UNKNOWN, None, source="claim")
         self.assertTrue(bot._sync_clear(GID, UNKNOWN, "阿龙"))
         text = self._session_text()
         self.assertNotIn("阿龙", text, "撤销了称呼，历史里还在叫旧名")
@@ -128,7 +129,7 @@ class PromisePayloadTest(unittest.IsolatedAsyncioTestCase):
     OLD = "阿龙"
 
     def setUp(self):
-        bot.PROMISES.items[GID] = [{
+        runtime.PROMISES.items[GID] = [{
             "id": "p1", "who": self.OLD, "what": "请大家喝奶茶",
             "since": 0.0, "due_ts": None, "due_text": "周五", "nag": 0, "last_nag": 0.0,
         }]
@@ -145,15 +146,15 @@ class PromisePayloadTest(unittest.IsolatedAsyncioTestCase):
 
         bot.call_model = fake_call_model
         bot.post_to_group = fake_post
-        bot.RELATIONS.set_nick(GID, UNKNOWN, "阿强", source="claim")
-        bot.RENAMES.note(GID, self.OLD, UNKNOWN)
+        runtime.RELATIONS.set_nick(GID, UNKNOWN, "阿强", source="claim")
+        runtime.RENAMES.note(GID, self.OLD, UNKNOWN)
 
     def tearDown(self):
         bot.call_model = self._call
         bot.post_to_group = self._post
-        bot.PROMISES.items.pop(GID, None)
-        bot.RELATIONS.records.pop(f"{GID}|{UNKNOWN}", None)
-        bot.RENAMES.groups.pop(GID, None)
+        runtime.PROMISES.items.pop(GID, None)
+        runtime.RELATIONS.records.pop(f"{GID}|{UNKNOWN}", None)
+        runtime.RENAMES.groups.pop(GID, None)
 
     async def test_nag_prompt_uses_the_current_name(self):
         await bot.dun_promises(GID)

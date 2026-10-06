@@ -14,6 +14,7 @@ import time
 import unittest
 
 sys.path.insert(0, "..")
+import runtime
 
 import bot
 import config
@@ -47,23 +48,23 @@ class DirectionProtocolTest(unittest.TestCase):
 
 class DailyCapTest(unittest.TestCase):
     def setUp(self):
-        bot.STATE.data.pop("affinity_daily", None)
-        for k in [k for k in bot.RELATIONS.records if k.startswith(GROUP)]:
-            bot.RELATIONS.records.pop(k, None)
+        runtime.STATE.data.pop("affinity_daily", None)
+        for k in [k for k in runtime.RELATIONS.records if k.startswith(GROUP)]:
+            runtime.RELATIONS.records.pop(k, None)
         # 新建档案的 last_seen=0，会被「久未往来」的衰减当成陈年旧账扣分 ——
         # 那是另一条机制，测封顶时先把它排除掉。
-        bot.RELATIONS.get(GROUP, OID)["last_seen"] = time.time()
+        runtime.RELATIONS.get(GROUP, OID)["last_seen"] = time.time()
 
     def test_gains_stop_at_the_cap(self):
         for _ in range(config.AFFINITY_DAILY_GAIN_CAP + 5):
             bot.apply_affinity_delta_capped(GROUP, OID, 1, "test")
-        rec = bot.RELATIONS.get(GROUP, OID, create=False)
+        rec = runtime.RELATIONS.get(GROUP, OID, create=False)
         self.assertLessEqual(rec["score"], config.AFFINITY_DAILY_GAIN_CAP)
 
     def test_losses_stop_at_the_cap(self):
         for _ in range(config.AFFINITY_DAILY_LOSS_CAP + 5):
             bot.apply_affinity_delta_capped(GROUP, OID, -1, "test")
-        rec = bot.RELATIONS.get(GROUP, OID, create=False)
+        rec = runtime.RELATIONS.get(GROUP, OID, create=False)
         self.assertGreaterEqual(rec["score"], -config.AFFINITY_DAILY_LOSS_CAP)
 
     def test_caps_are_asymmetric_on_purpose(self):
@@ -87,19 +88,19 @@ class DailyCapTest(unittest.TestCase):
     def test_zero_mention_gives_nothing(self):
         """没有模型判定时退回词表；「在吗」这种中性消息既不涨分也不建档。"""
         bot.apply_affinity_delta_capped(GROUP, OID, relations.local_sentiment("在吗"), "test")
-        self.assertEqual(bot.RELATIONS.get(GROUP, OID, create=False)["score"], 0)
+        self.assertEqual(runtime.RELATIONS.get(GROUP, OID, create=False)["score"], 0)
 
     def test_insult_still_costs_affinity(self):
         bot.apply_affinity_delta_capped(
             GROUP, OID, relations.local_sentiment("小王我操你妈"), "test")
-        self.assertEqual(bot.RELATIONS.get(GROUP, OID, create=False)["score"], -1)
+        self.assertEqual(runtime.RELATIONS.get(GROUP, OID, create=False)["score"], -1)
 
     def test_digest_settlement_respects_the_cap_too(self):
         """压缩结算一次能到 ±6，它要是绕过封顶，封顶就形同虚设。"""
         for _ in range(3):
             bot.apply_affinity_delta_capped(
                 GROUP, OID, -2, "压缩结算", span=config.AFFINITY_DIGEST_SPAN, count=False)
-        rec = bot.RELATIONS.get(GROUP, OID, create=False)
+        rec = runtime.RELATIONS.get(GROUP, OID, create=False)
         self.assertGreaterEqual(rec["score"], -config.AFFINITY_DAILY_LOSS_CAP)
         self.assertEqual(rec["interactions"], 0, "压缩结算不该虚增搭话次数")
 
@@ -108,16 +109,16 @@ class MilestoneOnceADayTest(unittest.TestCase):
     """日上限 10 = 一天能跨一个台阶 ⇒ 播报必须限流，否则它天天说「我们更熟了」。"""
 
     def setUp(self):
-        for k in [k for k in bot.RELATIONS.records if k.startswith("TEST-MS")]:
-            bot.RELATIONS.records.pop(k, None)
-        bot.RELATIONS.get("TEST-MS", OID)["last_seen"] = time.time()
+        for k in [k for k in runtime.RELATIONS.records if k.startswith("TEST-MS")]:
+            runtime.RELATIONS.records.pop(k, None)
+        runtime.RELATIONS.get("TEST-MS", OID)["last_seen"] = time.time()
 
     # ⚠️ 单次 apply 的幅度默认被 clamp 到 ±3（一次互动不该撬动太多），
     #    所以测试里用 span 放大，才能一次跨过 10 分台阶。
     SPAN = config.AFFINITY_DIGEST_SPAN
 
     def _to_eight(self, now):
-        r = bot.RELATIONS
+        r = runtime.RELATIONS
         r.apply("TEST-MS", OID, 6, now=now, span=self.SPAN)   # 0 → 6
         r.apply("TEST-MS", OID, 2, now=now)                   # 6 → 8
         rec = r.get("TEST-MS", OID, create=False)
@@ -126,28 +127,28 @@ class MilestoneOnceADayTest(unittest.TestCase):
 
     def test_crossing_a_step_does_announce(self):
         rec = self._to_eight(time.time())
-        bot.RELATIONS.apply("TEST-MS", OID, 6, span=self.SPAN)   # 8 → 14，跨过 10
+        runtime.RELATIONS.apply("TEST-MS", OID, 6, span=self.SPAN)   # 8 → 14，跨过 10
         self.assertIsNotNone(rec.get("pending_milestone"))
 
     def test_second_crossing_in_a_day_is_not_announced(self):
         now = time.time()
         rec = self._to_eight(now)
         rec["told_day"] = time.strftime("%Y-%m-%d", time.localtime(now))
-        bot.RELATIONS.apply("TEST-MS", OID, 6, span=self.SPAN)
+        runtime.RELATIONS.apply("TEST-MS", OID, 6, span=self.SPAN)
         self.assertIsNone(rec.get("pending_milestone"), "同一天不该再排一次播报")
 
     def test_next_day_can_announce_again(self):
         now = time.time()
         rec = self._to_eight(now)
         rec["told_day"] = time.strftime("%Y-%m-%d", time.localtime(now - 86400))
-        bot.RELATIONS.apply("TEST-MS", OID, 6, span=self.SPAN, now=now + 86400)
+        runtime.RELATIONS.apply("TEST-MS", OID, 6, span=self.SPAN, now=now + 86400)
         self.assertIsNotNone(rec.get("pending_milestone"))
 
     def test_the_score_still_moves_even_when_not_announced(self):
         """限流的是「说出来」，不是记账 —— 分该涨还得涨。"""
         rec = self._to_eight(time.time())
         rec["told_day"] = time.strftime("%Y-%m-%d")
-        score = bot.RELATIONS.apply("TEST-MS", OID, 6, span=self.SPAN)[0]
+        score = runtime.RELATIONS.apply("TEST-MS", OID, 6, span=self.SPAN)[0]
         self.assertEqual(score, 14)
 
 
@@ -171,15 +172,15 @@ class TwoTierStandardsTest(unittest.TestCase):
         self.assertIn("【当前关系底账】", digest.SYSTEM_REDUCE)
 
     def test_ledger_lists_tiers_by_nick(self):
-        bot.RELATIONS.set_nick(self.GID, "OID-LD-1", "阿强")
-        bot.RELATIONS.get(self.GID, "OID-LD-1")["score"] = 40
+        runtime.RELATIONS.set_nick(self.GID, "OID-LD-1", "阿强")
+        runtime.RELATIONS.get(self.GID, "OID-LD-1")["score"] = 40
         text = bot._affinity_ledger(self.GID)
         self.assertIn("阿强=", text)
         self.assertIn(relations.level_label(relations.level_key(40)), text)
 
     def test_ledger_none_when_nobody_named(self):
-        for k in [k for k in list(bot.RELATIONS.records) if k.startswith(self.GID)]:
-            bot.RELATIONS.records.pop(k, None)
+        for k in [k for k in list(runtime.RELATIONS.records) if k.startswith(self.GID)]:
+            runtime.RELATIONS.records.pop(k, None)
         self.assertIsNone(bot._affinity_ledger(self.GID))
 
     def test_ledger_reaches_the_reduce_payload(self):
@@ -188,8 +189,8 @@ class TwoTierStandardsTest(unittest.TestCase):
 
         import digest
 
-        bot.RELATIONS.set_nick(self.GID, "OID-LD-2", "铁蛋")
-        bot.RELATIONS.get(self.GID, "OID-LD-2")["score"] = -6
+        runtime.RELATIONS.set_nick(self.GID, "OID-LD-2", "铁蛋")
+        runtime.RELATIONS.get(self.GID, "OID-LD-2")["score"] = -6
 
         seen = {}
 
@@ -205,8 +206,8 @@ class TwoTierStandardsTest(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertIn("【当前关系底账】", seen["user"])
         self.assertIn("铁蛋=", seen["user"])
-        for k in [k for k in list(bot.RELATIONS.records) if k.startswith(self.GID)]:
-            bot.RELATIONS.records.pop(k, None)
+        for k in [k for k in list(runtime.RELATIONS.records) if k.startswith(self.GID)]:
+            runtime.RELATIONS.records.pop(k, None)
 
 
 if __name__ == "__main__":

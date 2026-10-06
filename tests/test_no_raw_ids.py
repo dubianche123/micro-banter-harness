@@ -19,6 +19,7 @@ import sys
 import unittest
 
 sys.path.insert(0, "..")
+import runtime
 
 import bot  # noqa: E402
 import prompts  # noqa: E402
@@ -37,11 +38,11 @@ class RelationNoteTest(unittest.TestCase):
     """关系档案是喂给模型的 —— 它复读什么，群里就看见什么。"""
 
     def test_other_names_come_without_tails(self):
-        bot.RELATIONS.set_nick(GROUP, TARGET, "蒋泽明", source="owner")
+        runtime.RELATIONS.set_nick(GROUP, TARGET, "蒋泽明", source="owner")
         try:
             names = bot._other_names(GROUP, exclude_openid=OWNER)
         finally:
-            bot.RELATIONS.records.pop(f"{GROUP}|{TARGET}", None)
+            runtime.RELATIONS.records.pop(f"{GROUP}|{TARGET}", None)
         self.assertEqual(names, ["蒋泽明"], "对照表里只该有称呼，不该夹带编号")
 
     def test_note_lists_names_without_id_fragments(self):
@@ -87,8 +88,8 @@ class RenameReplyTest(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         bot.safe_reply = self._orig_reply
         bot.judge_nick = self._orig_judge
-        bot.RELATIONS.records.pop(f"{GROUP}|{TARGET}", None)
-        bot.STATE.data.get("groups", {}).pop(GROUP, None)
+        runtime.RELATIONS.records.pop(f"{GROUP}|{TARGET}", None)
+        runtime.STATE.data.get("groups", {}).pop(GROUP, None)
 
     async def test_confirmation_never_shows_the_id_tail(self):
         cmd = {"scope": "other", "nick": "蒋泽明"}

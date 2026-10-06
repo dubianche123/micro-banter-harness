@@ -17,6 +17,7 @@ import sys
 import unittest
 
 sys.path.insert(0, "..")
+import runtime
 
 import bot  # noqa: E402
 import relations  # noqa: E402
@@ -61,21 +62,21 @@ class ContentParsingTest(unittest.TestCase):
     def test_machine_mention_is_not_a_nickname(self):
         """`<@openid>` 是 openid 不是昵称 —— 误抽会把一串编号学成名字。
 
-        实测事故：`小王，叫<@E5E3793C25CF161D9F3292FE6ABA8C84> 家豪` 被抽成
-        `E5E3793C25CF161D9F3292FE`（被 24 字上限切断的 openid 前缀），
+        实测事故：`小王，叫<@0123456789ABCDEF0123456789ABCDEF> 家豪` 被抽成
+        `0123456789ABCDEF01234567`（被 24 字上限切断的 openid 前缀），
         学进去之后还被原样发回了群里。
         """
         self.assertIsNone(
             bot.mention_nick_from_content(
-                "小王，叫<@E5E3793C25CF161D9F3292FE6ABA8C84> 家豪"))
+                "小王，叫<@0123456789ABCDEF0123456789ABCDEF> 家豪"))
         self.assertIsNone(
             bot.mention_nick_from_content(
-                "小王，叫<@!E5E3793C25CF161D9F3292FE6ABA8C84> 家豪"))
+                "小王，叫<@!0123456789ABCDEF0123456789ABCDEF> 家豪"))
 
     def test_bare_machine_id_is_not_a_nickname(self):
         """万一哪天没有尖括号裹着，编号也不能当名字。"""
         self.assertIsNone(
-            bot.mention_nick_from_content("@E5E3793C25CF161D9F3292FE6ABA8C84 在吗"))
+            bot.mention_nick_from_content("@0123456789ABCDEF0123456789ABCDEF 在吗"))
 
     def test_real_nick_still_gets_through_after_stripping(self):
         """剔掉机器形态之后，后面的明文该拿还是拿得到。"""
@@ -98,7 +99,7 @@ class LearningTest(unittest.TestCase):
 
     def test_machine_id_is_refused_at_the_write_gate(self):
         """learn 是唯一写入口，调用方漏了它也得拦住 —— 编号不是任何人的名字。"""
-        self.assertFalse(self.dn.learn(GROUP, ALICE, "E5E3793C25CF161D9F3292FE"))
+        self.assertFalse(self.dn.learn(GROUP, ALICE, "0123456789ABCDEF01234567"))
         self.assertIsNone(self.dn.of(GROUP, ALICE))
 
     def test_unchanged_name_does_not_dirty_the_state(self):
@@ -126,19 +127,19 @@ class PairingTest(unittest.TestCase):
     """
 
     def setUp(self):
-        self.saved = bot.DISPLAY_NAMES
-        bot.DISPLAY_NAMES = relations.DisplayNames()
+        self.saved = runtime.DISPLAY_NAMES
+        runtime.DISPLAY_NAMES = relations.DisplayNames()
 
     def tearDown(self):
-        bot.DISPLAY_NAMES = self.saved
+        runtime.DISPLAY_NAMES = self.saved
 
     def test_two_mentions_pair_in_order(self):
         """日常互相 @ 是大头，不能只认单 @。"""
         got = bot.learn_display_names(
             GROUP, [ALICE, BOB], "@奶龙 @老莫 你们俩来一下")
         self.assertEqual(got, 2)
-        self.assertEqual(bot.DISPLAY_NAMES.of(GROUP, ALICE), "奶龙")
-        self.assertEqual(bot.DISPLAY_NAMES.of(GROUP, BOB), "老莫")
+        self.assertEqual(runtime.DISPLAY_NAMES.of(GROUP, ALICE), "奶龙")
+        self.assertEqual(runtime.DISPLAY_NAMES.of(GROUP, BOB), "老莫")
 
     def test_at_the_bot_does_not_shift_the_pairing(self):
         """@机器人会同时出现在 mentions 和正文里 —— 两边都要剔掉，否则整体错位。
@@ -146,27 +147,27 @@ class PairingTest(unittest.TestCase):
         归档实证：`小王，叫@米浴 家豪`，`at:1`（@ 了机器人 + @ 了米浴）。
         """
         bot.learn_display_names(GROUP, [BOB], "小王，叫@米浴 家豪", bot_names=("小王",))
-        self.assertIsNone(bot.DISPLAY_NAMES.of(GROUP, ALICE))
-        self.assertEqual(bot.DISPLAY_NAMES.of(GROUP, BOB), "米浴")
+        self.assertIsNone(runtime.DISPLAY_NAMES.of(GROUP, ALICE))
+        self.assertEqual(runtime.DISPLAY_NAMES.of(GROUP, BOB), "米浴")
 
     def test_hand_typed_fake_mention_is_not_guessed(self):
         """手打了个「@老王」但没真 @ —— 明文比 openid 多，宁可不记。"""
         got = bot.learn_display_names(GROUP, [ALICE], "@奶龙 顺便@路人甲 也来")
         self.assertEqual(got, 0, "数量对不上就别猜，猜错会当众叫错人")
-        self.assertIsNone(bot.DISPLAY_NAMES.of(GROUP, ALICE))
+        self.assertIsNone(runtime.DISPLAY_NAMES.of(GROUP, ALICE))
 
     def test_placeholder_mention_is_not_guessed(self):
         """@ 被渲染成 <@!openid> 占位符时明文会少一个，同样不记。"""
         got = bot.learn_display_names(GROUP, [ALICE, BOB], "<@!%s> @老莫 来一下" % ALICE)
         self.assertEqual(got, 0)
-        self.assertIsNone(bot.DISPLAY_NAMES.of(GROUP, BOB))
+        self.assertIsNone(runtime.DISPLAY_NAMES.of(GROUP, BOB))
 
     def test_it_binds_to_the_mentioned_person_not_the_sender(self):
         """@ 的明文是**被 @ 那个人**的昵称，不是发言人的。"""
         bot.learn_display_names(GROUP, [BOB], "喂，@老莫 在吗")
         # 发言人（ALICE）不该被挂上「老莫」
-        self.assertIsNone(bot.DISPLAY_NAMES.of(GROUP, ALICE))
-        self.assertEqual(bot.DISPLAY_NAMES.of(GROUP, BOB), "老莫")
+        self.assertIsNone(runtime.DISPLAY_NAMES.of(GROUP, ALICE))
+        self.assertEqual(runtime.DISPLAY_NAMES.of(GROUP, BOB), "老莫")
 
     def test_nobody_mentioned_learns_nothing(self):
         self.assertEqual(bot.learn_display_names(GROUP, [], "@奶龙 在吗"), 0)
@@ -189,19 +190,19 @@ class DisplayFallbackTest(unittest.TestCase):
     """显示优先级：认领过的称呼 > 群里挂的显示名 > 泛称。"""
 
     def setUp(self):
-        self.saved = bot.DISPLAY_NAMES
-        bot.DISPLAY_NAMES = relations.DisplayNames()
-        bot.DISPLAY_NAMES.learn(GROUP, BOB, "贵阳老莫")
+        self.saved = runtime.DISPLAY_NAMES
+        runtime.DISPLAY_NAMES = relations.DisplayNames()
+        runtime.DISPLAY_NAMES.learn(GROUP, BOB, "贵阳老莫")
 
     def tearDown(self):
-        bot.DISPLAY_NAMES = self.saved
+        runtime.DISPLAY_NAMES = self.saved
 
     def test_claimed_name_wins_over_display_name(self):
-        bot.RELATIONS.set_nick(GROUP, BOB, "罗老板", source="owner")
+        runtime.RELATIONS.set_nick(GROUP, BOB, "罗老板", source="owner")
         try:
             label = bot.mention_label_for(GROUP)(BOB)
         finally:
-            bot.RELATIONS.records.pop(f"{GROUP}|{BOB}", None)
+            runtime.RELATIONS.records.pop(f"{GROUP}|{BOB}", None)
         self.assertEqual(label, "罗老板", "认领过的称呼必须优先")
 
     def test_falls_back_to_the_display_name(self):

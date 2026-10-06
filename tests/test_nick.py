@@ -8,6 +8,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import runtime
 
 from relations import parse_nick_command  # noqa: E402
 
@@ -160,15 +161,15 @@ class ReservedNameTest(unittest.TestCase):
     def setUpClass(cls):
         import bot
         cls.bot = bot
-        cls.saved_owner = bot.OWNER_OPENID
+        cls.saved_owner = runtime.OWNER_OPENID
 
     def setUp(self):
-        self.bot.OWNER_OPENID = self.OWNER
-        self.bot.RELATIONS.get(self.GROUP, self.OWNER)["nick"] = "老张"
+        runtime.OWNER_OPENID = self.OWNER
+        runtime.RELATIONS.get(self.GROUP, self.OWNER)["nick"] = "老张"
 
     def tearDown(self):
-        self.bot.OWNER_OPENID = self.saved_owner
-        self.bot.RELATIONS.records.pop(f"{self.GROUP}|{self.OWNER}", None)
+        runtime.OWNER_OPENID = self.saved_owner
+        runtime.RELATIONS.records.pop(f"{self.GROUP}|{self.OWNER}", None)
 
     def _bad(self, nick, claimant):
         return relations.bad_nick(
@@ -194,7 +195,7 @@ class ReservedNameTest(unittest.TestCase):
 
     def test_owner_nick_stops_being_reserved_after_rename(self):
         """群主改了称呼，旧名字立刻就不再是「有主」的 —— 不留历史包袱。"""
-        self.bot.RELATIONS.get(self.GROUP, self.OWNER)["nick"] = "老李"
+        runtime.RELATIONS.get(self.GROUP, self.OWNER)["nick"] = "老李"
         self.assertIsNone(self._bad("老张", self.MEMBER))
         self.assertIsNotNone(self._bad("老李", self.MEMBER))
 
@@ -216,18 +217,18 @@ class NameCollisionTest(unittest.TestCase):
     def setUpClass(cls):
         import bot
         cls.bot = bot
-        cls.saved_owner = bot.OWNER_OPENID
+        cls.saved_owner = runtime.OWNER_OPENID
 
     def setUp(self):
-        self.bot.OWNER_OPENID = self.OWNER
-        R = self.bot.RELATIONS
+        runtime.OWNER_OPENID = self.OWNER
+        R = runtime.RELATIONS
         R.set_nick(self.GROUP, self.A, "阿强", source="claim")
         R.set_nick(self.GROUP, self.B, "阿远", source="claim")
 
     def tearDown(self):
-        self.bot.OWNER_OPENID = self.saved_owner
+        runtime.OWNER_OPENID = self.saved_owner
         for oid in (self.A, self.B):
-            self.bot.RELATIONS.records.pop(f"{self.GROUP}|{oid}", None)
+            runtime.RELATIONS.records.pop(f"{self.GROUP}|{oid}", None)
 
     def _bad(self, nick, subject):
         b = self.bot
@@ -257,7 +258,7 @@ class NameCollisionTest(unittest.TestCase):
 
     def test_renaming_frees_the_old_name_for_others(self):
         """本人一改名，旧名字立刻空出来，别人就能用了 —— 不留历史包袱。"""
-        self.bot.RELATIONS.set_nick(self.GROUP, self.A, "小满", source="claim")
+        runtime.RELATIONS.set_nick(self.GROUP, self.A, "小满", source="claim")
         self.assertIsNone(self._bad("阿强", self.B))
 
     def test_collision_message_differs_from_impersonation(self):

@@ -16,6 +16,7 @@ import sys
 import unittest
 
 sys.path.insert(0, "..")
+import runtime
 
 import bot  # noqa: E402
 import relations  # noqa: E402
@@ -49,7 +50,7 @@ class LockWiringTest(unittest.IsolatedAsyncioTestCase):
         self.judged = []
         self._reply = bot.safe_reply
         self._judge = bot.judge_nick
-        self._owner = bot.OWNER_OPENID
+        self._owner = runtime.OWNER_OPENID
 
         async def fake_reply(message, text, **_kw):
             self.sent.append(text)
@@ -60,16 +61,16 @@ class LockWiringTest(unittest.IsolatedAsyncioTestCase):
 
         bot.safe_reply = fake_reply
         bot.judge_nick = fake_judge
-        bot.OWNER_OPENID = OWNER
-        bot.STATE.data.setdefault("groups", {}).pop(GID, None)
+        runtime.OWNER_OPENID = OWNER
+        runtime.STATE.data.setdefault("groups", {}).pop(GID, None)
 
     def tearDown(self):
         bot.safe_reply = self._reply
         bot.judge_nick = self._judge
-        bot.OWNER_OPENID = self._owner
-        bot.STATE.data.setdefault("groups", {}).pop(GID, None)
-        bot.RELATIONS.records.pop(f"{GID}|{A}", None)
-        bot.RENAMES.groups.pop(GID, None)
+        runtime.OWNER_OPENID = self._owner
+        runtime.STATE.data.setdefault("groups", {}).pop(GID, None)
+        runtime.RELATIONS.records.pop(f"{GID}|{A}", None)
+        runtime.RENAMES.groups.pop(GID, None)
         bot.reset_nick_flood()
 
     def _last(self):
@@ -89,7 +90,7 @@ class LockWiringTest(unittest.IsolatedAsyncioTestCase):
         await bot.handle_nick_lock(None, GID, "lock", is_owner=True)
         self.assertTrue(bot.nick_locked(GID))
         self.assertTrue(
-            bot.STATE.data["groups"][GID]["nick_locked"],
+            runtime.STATE.data["groups"][GID]["nick_locked"],
             "锁必须落在每群自己的槽位里，重启才不丢")
         self.assertIn("锁", self._last())
 
@@ -103,7 +104,7 @@ class LockWiringTest(unittest.IsolatedAsyncioTestCase):
         await self._rename()
         self.assertEqual(len(self.judged), 0, "锁着呢还去调审核 —— 白花钱")
         self.assertEqual(
-            (bot.RELATIONS.get(GID, A, create=False) or {}).get("nick"), None,
+            (runtime.RELATIONS.get(GID, A, create=False) or {}).get("nick"), None,
             "被锁挡住了，档案却动了")
         self.assertTrue(self.sent, "挡住了却不回话，用户只会以为机器人死机了")
         self.assertIn("锁", self._last())
@@ -113,17 +114,17 @@ class LockWiringTest(unittest.IsolatedAsyncioTestCase):
     async def test_owner_can_still_rename_while_locked(self):
         bot.set_nick_locked(GID, True)
         await self._rename(sender=OWNER, nick="老王", is_owner=True)
-        self.assertEqual((bot.RELATIONS.get(GID, OWNER, create=False) or {}).get("nick"), "老王")
+        self.assertEqual((runtime.RELATIONS.get(GID, OWNER, create=False) or {}).get("nick"), "老王")
         await self._rename(sender=OWNER, nick="小满", is_owner=True, mentioned=[A])
-        self.assertEqual((bot.RELATIONS.get(GID, A, create=False) or {}).get("nick"), "小满",
+        self.assertEqual((runtime.RELATIONS.get(GID, A, create=False) or {}).get("nick"), "小满",
                          "群主给人落名的权不该被锁捆住")
 
     async def test_member_can_still_clear_his_name_while_locked(self):
         bot.set_nick_locked(GID, True)
-        bot.RELATIONS.set_nick(GID, A, "阿强", source="claim")
+        runtime.RELATIONS.set_nick(GID, A, "阿强", source="claim")
         await bot.handle_nick_command(
             None, {"scope": "self-clear"}, GID, A, False, [])
-        self.assertIsNone((bot.RELATIONS.get(GID, A, create=False) or {}).get("nick"),
+        self.assertIsNone((runtime.RELATIONS.get(GID, A, create=False) or {}).get("nick"),
                           "撤销称呼也被锁挡住 —— 后悔都不让人后悔")
 
     async def test_unlock_restores_renames(self):
@@ -131,7 +132,7 @@ class LockWiringTest(unittest.IsolatedAsyncioTestCase):
         await bot.handle_nick_lock(None, GID, "unlock", is_owner=True)
         self.assertFalse(bot.nick_locked(GID))
         await self._rename()
-        self.assertEqual((bot.RELATIONS.get(GID, A, create=False) or {}).get("nick"), "阿强")
+        self.assertEqual((runtime.RELATIONS.get(GID, A, create=False) or {}).get("nick"), "阿强")
 
     async def test_unlock_when_not_locked_is_told_out_loud(self):
         await bot.handle_nick_lock(None, GID, "unlock", is_owner=True)

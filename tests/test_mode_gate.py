@@ -11,6 +11,7 @@ import sys
 import unittest
 
 sys.path.insert(0, "..")
+import runtime
 
 import bot
 import config
@@ -21,7 +22,7 @@ SOMEONE = "OID-SOMEONE-0001"
 
 def _seed(score, interactions=20):
     """把某人摆到指定好感度上；interactions=0 表示还没打过交道。"""
-    rec = bot.RELATIONS.get(GROUP, SOMEONE)
+    rec = runtime.RELATIONS.get(GROUP, SOMEONE)
     rec["score"] = score
     rec["interactions"] = interactions
     return rec
@@ -29,13 +30,13 @@ def _seed(score, interactions=20):
 
 class GateTest(unittest.TestCase):
     def setUp(self):
-        for k in [k for k in bot.RELATIONS.records if k.startswith(GROUP)]:
-            bot.RELATIONS.records.pop(k, None)
+        for k in [k for k in runtime.RELATIONS.records if k.startswith(GROUP)]:
+            runtime.RELATIONS.records.pop(k, None)
 
     def test_stranger_is_welcomed(self):
         """没档案的人不该被门槛挡在门外。"""
-        for k in [k for k in bot.RELATIONS.records if k.startswith(GROUP)]:
-            bot.RELATIONS.records.pop(k, None)
+        for k in [k for k in runtime.RELATIONS.records if k.startswith(GROUP)]:
+            runtime.RELATIONS.records.pop(k, None)
         self.assertTrue(bot.mode_switch_allowed(GROUP, SOMEONE))
 
     def test_never_interacted_is_welcomed(self):
