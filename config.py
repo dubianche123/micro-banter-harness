@@ -239,7 +239,8 @@ CONTEXT_TTL_SECONDS = _env_float("CONTEXT_TTL_SECONDS", 1800.0)  # 静默 30 分
 
 # ══════════════════ 群聊背景缓存 ══════════════════
 GROUP_BUFFER_SIZE = _env_int("GROUP_BUFFER_SIZE", 10)
-GROUP_BUFFER_TTL = _env_float("GROUP_BUFFER_TTL", 1800.0)
+# 背景条目的保鲜期（秒）。⚠️ 只此一份：GROUP_BUFFER_TTL_SECONDS（342 行）是唯一在用的名字，
+# 插嘴提示词「由头只从最近的话里挑」的口径就建立在它之上 —— 改这里会同时改变插嘴的眼界。
 
 # ══════════════════ 限流（群级 + 全局，刻意不做 per-user 配额）══════════════════
 # 令牌桶：每个群初始 N 个令牌，每 R 秒回补 1 个。既能扛住正常聊天的突发，
@@ -274,15 +275,16 @@ AI_TEMPERATURE = _env_float("AI_TEMPERATURE", 0.9)
 # 刻意不设文字长度门槛：群里一句「？」「太蠢了」就是真实的接话信号，拿字数当尺子
 # 只会把能接的挡在外面（实测今天 257 条消息里，10 字门槛只放过 19 条，其中还有
 # 三分之一是表情串）。频率交给概率 + 冷却控制。
-# 实测（113 条候选 / 10.8 小时）8% ≈ 7 次/天，约每 1.5 小时一次；嫌多往下调即可。
+# 实测（113 条候选 / 10.8 小时）8% ≈ 7 次/天，约每 1.5 小时一次。
+# 2026-10-06 群主要求活跃气氛提到 12%（≈ 10~11 次/天，冷却 120s 仍然兜底）。
 BANTER_COOLDOWN_SECONDS = _env_float("BANTER_COOLDOWN_SECONDS", 120.0)
-BANTER_PROBABILITY = _env_float("BANTER_PROBABILITY", 0.08)
+BANTER_PROBABILITY = _env_float("BANTER_PROBABILITY", 0.12)
 
 # 群里提到 / @ 群主时的插话概率。比普通插嘴高：群主是群里最现成的梗源，
 # 群友拿他开涮的时候，机器人接一句最像真人（也最容易被人记住）。
 # 「群主」的指代不写死具体人名 —— 通用词 + 群主自己认领的称呼 + 直接 @ 他，
 # 三个来源在 bot.owner_reference_terms 里合起来判断，换个群、群主改个名都不用动代码。
-OWNER_MENTION_PROBABILITY = _env_float("OWNER_MENTION_PROBABILITY", 0.25)
+OWNER_MENTION_PROBABILITY = _env_float("OWNER_MENTION_PROBABILITY", 0.30)
 
 # 插嘴概率乘上「亲密度权重」之后的上限（relations.BANTER_WEIGHTS，熟 1.6× / 生 0.7×）。
 # 权重只调「更愿意接谁」，不该把谁变成刷屏 —— 万一哪天把基数调大，天花板在这儿兜着。

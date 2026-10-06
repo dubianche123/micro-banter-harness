@@ -42,6 +42,18 @@ class BanterNoteTest(unittest.TestCase):
         self.assertIn("【群聊最近背景】里列的任何一句", prompts.PROMPT_BANTER_NOTE)
         self.assertIn("不管是谁说的", prompts.PROMPT_BANTER_NOTE)
 
+    def test_targets_are_limited_to_recent_lines(self):
+        """2026-10-06 群主指出：可见消息里可能有很久之前的，那种不一定适合接。
+
+        由头限定两个来源（眼前这句 / 最近背景），更上文的会话记录与记忆里的
+        旧事明令禁止 —— 背景块本身有 30 分钟 TTL（GROUP_BUFFER_TTL_SECONDS），
+        提示词与代码两层说的是同一件事。
+        """
+        note = prompts.PROMPT_BANTER_NOTE
+        self.assertIn("由头只有这两个来源", note)
+        self.assertIn("眼前这句", note)
+        self.assertIn("不许翻", note)
+
     def test_whole_scene_counts_too(self):
         self.assertIn("场面", prompts.PROMPT_BANTER_NOTE)
         self.assertIn("气氛", prompts.PROMPT_BANTER_NOTE)
