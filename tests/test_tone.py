@@ -51,5 +51,23 @@ class BanterNoteTest(unittest.TestCase):
         self.assertEqual(prompts.BANTER_MARK, "【当前动作")
 
 
+class QuoteOnceKeepItShortTest(unittest.TestCase):
+    """2026-10-06 实测：龙少随口一句在 23 秒内被原样引用两遍、「硬菜」连吃三轮
+    回合、对全场的审判框架一天用了四次 —— 旧规则管「点」，管不住「引用」。"""
+
+    def test_quoting_others_is_capped_once(self):
+        self.assertIn("别人的原话，一晚上最多引用一次", prompts.PROMPT_SHARED_RULES)
+        self.assertIn("第二次出现在你嘴里就是复读", prompts.PROMPT_SHARED_RULES)
+
+    def test_length_is_a_number_not_a_vibe(self):
+        """「短」这种抽象要求实测会被无视，得给数字。"""
+        self.assertIn("顶多三句", prompts.PROMPT_NORMAL)
+        self.assertIn("不分段", prompts.PROMPT_NORMAL)
+
+    def test_no_group_wide_verdict(self):
+        self.assertIn("别上升到对全场的审判", prompts.PROMPT_NORMAL)
+        self.assertIn("一天最多一次", prompts.PROMPT_NORMAL)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
