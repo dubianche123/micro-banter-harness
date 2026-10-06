@@ -160,9 +160,10 @@ It is a **resident**, not a script you run by hand. Two lines hold uptime:
 | Line | Owner | What it covers |
 |:--|:--|:--|
 | Come back if the process dies | `com.qqbot.xiaowang` (launchd, `KeepAlive`, 10s throttle) | crashes, stray kills, dead process after wake |
-| Never let the machine sleep | `com.qqbot.keepawake` (every 5 min, re-arms `caffeinate`) | macOS idles into sleep after 1 minute, and it goes offline |
+| Never let the machine sleep | `sudo pmset -a disablesleep 1` (system-wide) + `com.qqbot.keepawake` (5-min patrol) | macOS idles into sleep after 1 minute, and it goes offline |
 
 ```bash
+sudo pmset -a disablesleep 1          # one-time hard line: survives a closed lid too
 bash tools/launchd/install.sh          # install and start both agents
 bash tools/launchd/install.sh status   # check
 bash tools/launchd/install.sh stop     # unload (taking the Mac away, or want sleep back)
@@ -176,8 +177,9 @@ bash tools/launchd/install.sh stop     # unload (taking the Mac away, or want sl
   but the primary route is dead).
 - LaunchAgents belong to the **login session**: after a reboot with nobody logged in,
   nothing loads. Turn on automatic login for unattended runs.
-- `caffeinate` blocks **idle** sleep only — not a closed lid, a dead battery,
-  or the power button. Those three need a human or a UPS.
+- `disablesleep` needs admin rights, so the script can only **check** it, never
+  fix it; if it goes missing, the patrol writes a warning line. What it still
+  cannot beat is a power cut — for long unattended stretches, use a UPS.
 
 ---
 

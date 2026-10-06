@@ -160,19 +160,20 @@ NO_PROXY=bigmodel.cn,open.bigmodel.cn ./.venv/bin/python -u bot.py
 | 底线 | 谁负责 | 兜的是什么 |
 |:--|:--|:--|
 | 进程没了要自己爬回来 | `com.qqbot.xiaowang`（launchd，`KeepAlive`，10 秒节流） | 崩溃、被误杀、机器唤醒时进程已经没了 |
-| 机器不许睡 | `com.qqbot.keepawake`（每 5 分钟巡一次，补挂 `caffeinate`） | macOS 空闲 1 分钟就睡，一睡它就掉线 |
+| 机器不许睡 | `sudo pmset -a disablesleep 1`（系统级）+ `com.qqbot.keepawake`（每 5 分钟巡检） | macOS 空闲 1 分钟就睡，一睡它就掉线 |
 
 ```bash
-bash tools/launchd/install.sh          # 装并启动两只守护
-bash tools/launchd/install.sh status   # 看状态
-bash tools/launchd/install.sh stop     # 卸载（要带机器走、或想恢复正常休眠）
+sudo pmset -a disablesleep 1        # 一次性硬防线：连合盖、电源键都拦得住
+bash tools/launchd/install.sh        # 装并启动两只守护
+bash tools/launchd/install.sh status # 看状态（含硬防线体检）
+bash tools/launchd/install.sh stop   # 卸载（要带机器走、或想恢复正常休眠）
 ```
 
 ⚠️ 三条能力边界（都是踩过的）：
 
 - **launchd 起的进程不继承任何 shell 环境** —— 代理必须写死在 plist 的 `EnvironmentVariables` 里，否则那条走出口的路直接连不出去（备用供应商经 `NO_PROXY` 直连不受影响、照样能说话，但主力那条等于废了）。
 - LaunchAgent 挂在**登录会话**上：机器重启后没人登录就不会加载。长期无人值守记得开「自动登录」。
-- `caffeinate` 只挡**空闲休眠**，挡不住合盖、断电、按电源键 —— 这三样得靠人或 UPS。
+- `disablesleep` 要管理员权限，脚本只能**体检不能修**；真掉了会往日志里写一行警告。它挡不住的只剩断电 —— 长时间无人值守建议上 UPS。
 
 ---
 

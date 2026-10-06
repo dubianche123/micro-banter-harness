@@ -33,6 +33,11 @@ status() {
     else
         echo "⚠️ caffeinate 没在跑"
     fi
+    if pmset -g 2>/dev/null | grep -q "SleepDisabled[[:space:]]*1"; then
+        echo "硬防线：在位（SleepDisabled=1，合盖也不睡）"
+    else
+        echo "⚠️ 硬防线缺失 —— 建议 sudo pmset -a disablesleep 1"
+    fi
     pmset -g 2>/dev/null | grep -E "^ sleep" | sed 's/^/电源策略 /'
     echo "── 进程 ──"
     pgrep -fl "QQbot/.venv/bin/python -u bot.py" || echo "(bot 没在跑)"
