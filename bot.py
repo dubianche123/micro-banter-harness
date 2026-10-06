@@ -1707,38 +1707,23 @@ class GroupBot(botpy.Client):
                 target_record["told_day"] = time.strftime("%Y-%m-%d")
                 runtime.STATE.mark_dirty()
 
-        # 群聊长期记忆：有就注入，让它可以说「上周撺掇打牌那事儿我可还记着」
+        # 群聊长期记忆注入（2026-10-06 对照实验后收敛）：**只喂人物名册**。
+        # 名册是防张冠李戴的事实底账（谁叫什么、当前什么状态），一行一人、全是稳定状态。
+        # 实验数据（全量记忆 / 台账+名册 / 只名册 / 无记忆 各 6 发，全 Gemini 应答）：
+        # 「正文+转折词+旧事回顾」尾巴率 1/4、2/4、1/4、0/4，均字数 120/128/102/39 ——
+        # 旧事素材（八卦简报/话题/梗/台账）只要在眼前就会长出回忆尾巴，瘦身（去掉简报留台账）无效；
+        # 唯一把尾巴压下去的同时还能保住事实底账的形态，就是只喂名册。
+        # 简报/台账的独立出口都还在：群史记查询（render_digest_reply）、催债定时任务、
+        # 查账触发词 —— 需要时查得到，不需要时不陪跑。
         group_memory = ""
         if config.DIGEST_ENABLED:
             summary = runtime.DIGESTS.get(group_id)
-            if summary and (summary.get("brief") or (summary.get("data") or {}).get("topics")):
-                # 名字统一刷新成当前称呼再注入：模型永远拿不到旧名，也就编不出
-                # 「那谁和这谁」这种把同一个人拆成两个人的往事。
-                # ⚠️ 人物名册（render_people）必须跟着一起注入：2026-09-20 实测，光给
-                # 【群史记】的连动长句，模型读的时候会把主语拧错（把「家豪解封」说成
-                # 「老王解封」）；「谁：什么事」一行一人的名册才是它能对准的事实底账。
-                people_block = digest_mod.render_people(summary)
+            if summary:
+                people_block = digest_mod.render_people(summary).strip()
                 if people_block:
-                    people_block = "\n" + people_block
-                # 承诺台账一天只在上下文里露一次（PromiseBook.take_for_prompt）：
-                # 「没兑现的某某事」每轮都在眼前，就会被当成万能收尾句用。
-                # 这里只改喂给模型的那份视图，state 里的摘要原文不动。
-                view = summary
-                promises = (summary.get("data") or {}).get("promises")
-                if promises:
-                    visible = runtime.PROMISES.take_for_prompt(group_id, promises)
-                    if len(visible) != len(promises):
-                        data = dict(summary.get("data") or {})
-                        data["promises"] = visible
-                        view = dict(summary, data=data)
-                        runtime.STATE.mark_dirty()
-                group_memory = refresh_names(
-                    group_id,
-                    digest_mod.render_summary(view, mode=active_mode)
-                    + people_block)
-                # 引导语见 prompts.PROMPT_MEMORY_HEADER：除了说清「是真的」，
-                # 还得说清「是旧事、别当万能梗」—— 否则它会逮着一件事反复说。
-                group_memory = prompts.PROMPT_MEMORY_HEADER + "\n" + group_memory
+                    group_memory = refresh_names(
+                        group_id,
+                        prompts.PROMPT_MEMORY_HEADER + "\n" + people_block)
 
         reply_text, delta = await get_ai_reply(
             session_id, user_input,

@@ -23,11 +23,15 @@ import prompts
 class MemoryHeaderTest(unittest.TestCase):
     """喂记忆的那一句引导语，不能只说「可以拿来接梗」。"""
 
-    def test_header_marks_it_as_old_news(self):
+    def test_header_is_a_roster_not_a_story(self):
+        """2026-10-06 对照实验后记忆块收敛为只喂名册：旧事叙事整块退场，
+        只剩防张冠李戴的事实底账。"""
         h = prompts.PROMPT_MEMORY_HEADER
         self.assertIn(prompts.MEMORY_MARK, h)
-        self.assertIn("旧事", h)
-        self.assertIn("翻篇", h)
+        self.assertIn("名册", h)
+        self.assertIn("防错账本", h)
+        self.assertNotIn("旧事", h)
+        self.assertNotIn("翻篇", h)
 
     def test_header_no_longer_invites_reuse(self):
         """2026-10-06 发现 09-24 的修复只加了警告段、没删第一行的

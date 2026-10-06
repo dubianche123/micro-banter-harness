@@ -50,13 +50,20 @@ class PromiseShownOnceADayTest(unittest.TestCase):
         self.book.take_for_prompt("g1", self.rows)
         self.assertEqual(len(self.book.list("g1")), 1)
 
-    def test_injection_wiring_filters_the_ledger(self):
-        """闸装在库里却不接线，等于没做 —— 注入处必须真去调它。"""
+    def test_ledger_never_rides_the_per_turn_injection(self):
+        """2026-10-06 对照实验后台账彻底退出常规注入（实验里它是回忆尾巴的最大引力源）：
+        bot.py 不再渲染摘要正文，只喂名册；「take_for_prompt 过滤后陪跑」的旧接线随之拆除。
+
+        台账的出口只剩两个独立入口：催债定时任务、查账触发词 —— 需要时查得到，
+        不需要时不进上下文。这条测试反向钉住：注入相关代码里不许再把台账喂回去。"""
         import inspect
 
         import bot
-        self.assertIn("take_for_prompt", inspect.getsource(bot),
-                      "bot.py 注入长期记忆时没过滤承诺台账")
+        src = inspect.getsource(bot)
+        self.assertNotIn("take_for_prompt", src,
+                         "台账又回到常规注入里了")
+        self.assertIn("render_people", src,
+                      "名册注入（防张冠李戴）必须还在")
 
 
 if __name__ == "__main__":

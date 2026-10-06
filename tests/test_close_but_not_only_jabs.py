@@ -54,7 +54,10 @@ class NoRunningGagEndingTest(unittest.TestCase):
         self.assertIn("吐槽点也算道具", prompts.PROMPT_SHARED_RULES)
 
     def test_promises_are_not_a_sign_off(self):
-        self.assertIn("固定结尾", prompts.PROMPT_MEMORY_HEADER)
+        """2026-10-06 对照实验后台账彻底退出常规注入（实验里它是最大引力源）：
+        头部不再有「还没兑现」行 —— 连被人拿来当固定结尾的机会都没有了。"""
+        self.assertNotIn("还没兑现", prompts.PROMPT_MEMORY_HEADER)
+        self.assertNotIn("固定结尾", prompts.PROMPT_MEMORY_HEADER)
 
 
 if __name__ == "__main__":
