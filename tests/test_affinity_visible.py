@@ -71,9 +71,18 @@ class MilestoneIsAnnouncedTest(unittest.TestCase):
         self.assertIn("更熟了", note)
         self.assertIn("刚刚的变化", note)
 
-    def test_going_down_reads_as_drifted_apart(self):
+    def test_going_down_is_never_announced(self):
+        """降档**不当面说破**：「咱俩生分了」说给本人听是指责，变冷用语气表达。
+
+        （2026-10-06 实测：模型把「别摆老相识」的语气指令演成了台词，
+        主动凑上去跟人说「快成陌生人了」—— 所以降档改成不说破。）
+        """
         rec = dict(self.REC, pending_milestone={"from": 12, "to": 2, "ts": 0})
-        self.assertIn("更生分了", relations.build_relation_note(rec, "some-openid"))
+        note = relations.build_relation_note(rec, "some-openid")
+        line = [l for l in note.splitlines() if "刚刚的变化" in l][0]
+        self.assertIn("不必说出口", line)
+        self.assertIn("不许", line)
+        self.assertNotIn("要当场说出来", line)
 
     def test_no_numbers_leak_into_the_note(self):
         """播报里一个数字都不许有 —— 分数是内部账本，群里只该听见「更熟了」。
@@ -94,9 +103,18 @@ class MilestoneIsAnnouncedTest(unittest.TestCase):
         note = relations.build_relation_note(self.REC, "some-openid")
         self.assertIn("翻篇", note)
 
-    def test_no_milestone_means_no_such_line(self):
-        rec = dict(self.REC, pending_milestone=None)
-        self.assertNotIn("刚刚的变化", relations.build_relation_note(rec, "some-openid"))
+
+class InnerMonologueNotDialogueTest(unittest.TestCase):
+    """关系档案是内心戏不是台词（2026-10-06：模型把「别摆老相识」的语气指令
+    说成了「快成陌生人了」，没人问它还主动插嘴说）。"""
+
+    REC = {"score": 8, "nick": "阿强", "interactions": 20,
+           "last_seen": 0, "first_seen": 0}
+
+    def test_note_forbids_narrating_the_relationship(self):
+        note = relations.build_relation_note(self.REC, "some-openid")
+        self.assertIn("内心戏", note)
+        self.assertIn("不许向 TA 复述你们的关系状态", note)
 
 
 class ToneTierOverridesPersonaTest(unittest.TestCase):
