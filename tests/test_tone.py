@@ -21,7 +21,7 @@ class NormalModeToneTest(unittest.TestCase):
     def test_roast_has_restraint(self):
         self.assertIn("损一句就收", prompts.PROMPT_NORMAL)
         self.assertIn("给对方留台阶", prompts.PROMPT_NORMAL)
-        self.assertIn("同一个点绝不追着打第二轮", prompts.PROMPT_NORMAL)
+        self.assertIn("绝不追着打第二轮", prompts.PROMPT_NORMAL)
 
     def test_backpedal_when_the_other_side_disengages(self):
         self.assertIn("立刻收", prompts.PROMPT_NORMAL)
@@ -56,7 +56,7 @@ class QuoteOnceKeepItShortTest(unittest.TestCase):
     回合、对全场的审判框架一天用了四次 —— 旧规则管「点」，管不住「引用」。"""
 
     def test_quoting_others_is_capped_once(self):
-        self.assertIn("别人的原话，一晚上最多引用一次", prompts.PROMPT_SHARED_RULES)
+        self.assertIn("别人的原话：一晚上最多引用一次", prompts.PROMPT_SHARED_RULES)
         self.assertIn("第二次出现在你嘴里就是复读", prompts.PROMPT_SHARED_RULES)
 
     def test_length_is_a_number_not_a_vibe(self):
@@ -65,8 +65,10 @@ class QuoteOnceKeepItShortTest(unittest.TestCase):
         self.assertIn("不分段", prompts.PROMPT_NORMAL)
 
     def test_no_group_wide_verdict(self):
-        self.assertIn("别上升到对全场的审判", prompts.PROMPT_NORMAL)
-        self.assertIn("一天最多一次", prompts.PROMPT_NORMAL)
+        # 合并后归入共享块【一个料只用一次】—— 所有「料」同一条总原则
+        self.assertIn("全场审判", prompts.PROMPT_SHARED_RULES)
+        self.assertIn("一天最多一次", prompts.PROMPT_SHARED_RULES)
+        self.assertIn("接住那一个人就行", prompts.PROMPT_SHARED_RULES)
 
 
 if __name__ == "__main__":

@@ -29,10 +29,14 @@ class MemoryHeaderTest(unittest.TestCase):
         self.assertIn("旧事", h)
         self.assertIn("翻篇", h)
 
-    def test_header_calls_out_the_catchphrase_risk(self):
+    def test_header_no_longer_invites_reuse(self):
+        """2026-10-06 发现 09-24 的修复只加了警告段、没删第一行的
+        「可以拿来接梗、催债、点名」—— 同一块里先怂恿后禁止，模型不迷路才怪。"""
         h = prompts.PROMPT_MEMORY_HEADER
-        self.assertIn("万能梗", h)
-        self.assertIn("揭短", h)
+        self.assertNotIn("接梗", h)
+        self.assertNotIn("催债", h)
+        # 禁止复用糗事的规则归共享块，头部不再重复
+        self.assertNotIn("万能梗", h)
 
     def test_header_is_wired_into_injection(self):
         src = inspect.getsource(bot)
