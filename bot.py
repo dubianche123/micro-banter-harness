@@ -1912,6 +1912,25 @@ async def ask_digest(system, user):
     return wordfilter.scrub(out)
 
 
+def _affinity_ledger(group_id):
+    """给压缩结算看的「关系底账」：每个人现在站在哪个交情档位。
+
+    玩笑和敌意的分界跟着交情走 —— 熟人损它十句是日常，生人损十句是敌意。
+    压缩要判「关系走势」，得先知道每段关系现在站在哪，否则两把尺子量所有人。
+    这块只进压缩 prompt（内部结算用），不进群聊回复，档位名可以直接写。
+    """
+    if not config.AFFINITY_ENABLED:
+        return None
+    rows = []
+    for _oid, rec in _all_named(group_id):
+        key = relations.level_key(rec.get("score", 0))
+        rows.append(f"{rec.get('nick')}={relations.level_label(key)}")
+    if not rows:
+        return None
+    return ("【当前关系底账】以下是他和各人现在的交情档位，"
+            "判断玩笑还是敌意之前先看这个：\n" + "、".join(rows))
+
+
 async def run_digest(group_id, reason=""):
     """压缩一个群的长期记忆，产出摘要 + 当天 MD + 更新承诺账本。
 
@@ -1936,6 +1955,7 @@ async def run_digest(group_id, reason=""):
                 budget=BUDGET.try_consume,
                 log=logger.info,
                 refresh=lambda t: refresh_names(group_id, t),
+                ledger=_affinity_ledger(group_id),
             )
         except Exception as e:
             logger.error("❌ 群记忆压缩异常: %s", str(e)[:200])

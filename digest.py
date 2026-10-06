@@ -72,10 +72,17 @@ SYSTEM_REDUCE = """你在为 QQ 群「{bot}」整理长期记忆。你会拿到�
   要留的是那种「大家一起玩得起来」的梗，不涉及谁倒霉、也不涉及{bot}自己。
 - promises：没有兑现的承诺或待办，这是为了以后「催债」用的，玩笑也算。最多 5 条。
 - people：对具体某个人的新认知（在玩什么、什么处境）。最多 6 条。
-- affinity：**这一段时间里，每个人跟「{bot}」相处给你的整体印象变化**。delta 取 -3~3 的整数：
+- affinity：**这一段时间里，每个人跟「{bot}」这段关系的净走向**。delta 取 -3~3 的整数：
   正 = 更熟络/更客气/愿意接梗/主动搭话；负 = 抬杠、冒犯、阴阳怪气、反复钓鱼。
   这是唯一会决定「{bot}日后对某人什么态度」的字段，所以只依据记录里真实发生过的互动来判，
   不许凭印象编。这段时间没露过面、或态度没明显变化的人，不要写进来（宁缺勿滥）。
+  ⚠️ **你判的是关系走势，不是逐句流水账**：另有只看单句的方向判定在当场记账，
+  那套会把熟人间的玩笑、互喷也记成敌意。你看到的是一整段时间，以你的判断为准、该对冲就对冲：
+  整天互相损但气氛融洽的，净值给 0 或正，别被单句的火药味带偏；反过来单句客气、
+  整体却在疏远试探的，也照实给负。你的结算就是对单句误判的最终修正。
+  ⚠️ **玩笑和敌意的分界跟着交情走**：先看【当前关系底账】里这个人站在哪个档位 ——
+  交情深的损它是日常，不算冒犯；交情浅、还在生疏档的突然辱骂或越界，权重要放大；
+  底账里没有名字的，按刚认识的生人对待。
   ⚠️ 别一律给 +1：全都 +1 的话档位永远跨不过去，好感度就成了个摆设。
   态度明确（热络捧场、或反复抬杠冒犯）就给 ±2~3；只是露过面、平平无奇的宁可不写。
   ⚠️ **互动多 ≠ 亲近**：骂它（脏话、人格侮辱）、性骚扰、反复抬杠钓鱼，都算冒犯，要给负分 ——
@@ -412,13 +419,17 @@ class GroupDigest:
 
 
 async def compress_group(store, group_id, entries, ask, resolver=None, budget=None, log=None,
-                         refresh=None):
+                         refresh=None, ledger=None):
     """把一批新消息合并进长期摘要。
 
     entries: 待压缩的原始消息（来自 archive.since），元素形如 {"sender","text","ts"}
     ask(system, user) -> str | None   发起一次模型调用
     budget() -> bool                  可选，返回 False 表示今天的额度用完了
     refresh(text) -> str              可选，把回喂文本里的旧称呼换成当前称呼
+    ledger: str | None                可选，【当前关系底账】（各人现在的交情档位）——
+                                      affinity 判「玩笑还是敌意」得先知道交情深浅，
+                                      这块必须随 payload 进 reduce，不能写死在 SYSTEM_REDUCE
+                                      （那是全群共享的稳定提示词）
     块数 <= 1 时直接压；否则先分块提取要点（map），再合并（reduce）。
     返回新的 summary，压缩失败返回 None —— 此时调用方不该推进 last_run，
     这样消息会留在待压缩区，下一轮再读一遍，不会丢。
@@ -449,6 +460,8 @@ async def compress_group(store, group_id, entries, ask, resolver=None, budget=No
 
     old = store.old_summary_text(slot, resolver, refresh=refresh)
     payload = f"{old}\n\n[这段时间的新内容]\n{new_text}" if old else f"[这段时间的新内容]\n{new_text}"
+    if ledger:
+        payload = f"{ledger}\n\n{payload}"
 
     if budget and not budget():
         if log:

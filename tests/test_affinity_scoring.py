@@ -151,5 +151,63 @@ class MilestoneOnceADayTest(unittest.TestCase):
         self.assertEqual(score, 14)
 
 
+class TwoTierStandardsTest(unittest.TestCase):
+    """逐轮和压缩判的必须是两件事：逐轮判单句（宁可漏记不许错记），
+    压缩判关系走势（负责对冲逐轮的误判）。两层用同一把尺子的话，
+    「压缩能纠偏」就只是巧合，不是设计 —— 2026-10-06 群主指出后补的分工。"""
+
+    GID = "TEST-LEDGER"
+
+    def test_per_turn_judges_the_sentence_only(self):
+        self.assertIn("朋友之间的损、玩笑、互喷也不算敌意", prompts.CMD_PROTOCOL)
+        self.assertIn("拿不准一律 0", prompts.CMD_PROTOCOL)
+        self.assertIn("只判这一句话，不判这个人的一整天", prompts.CMD_PROTOCOL)
+
+    def test_reduce_judges_the_trajectory(self):
+        import digest
+        self.assertIn("关系走势，不是逐句流水账", digest.SYSTEM_REDUCE)
+        self.assertIn("该对冲就对冲", digest.SYSTEM_REDUCE)
+        self.assertIn("分界跟着交情走", digest.SYSTEM_REDUCE)
+        self.assertIn("【当前关系底账】", digest.SYSTEM_REDUCE)
+
+    def test_ledger_lists_tiers_by_nick(self):
+        bot.RELATIONS.set_nick(self.GID, "OID-LD-1", "阿强")
+        bot.RELATIONS.get(self.GID, "OID-LD-1")["score"] = 40
+        text = bot._affinity_ledger(self.GID)
+        self.assertIn("阿强=", text)
+        self.assertIn(relations.level_label(relations.level_key(40)), text)
+
+    def test_ledger_none_when_nobody_named(self):
+        for k in [k for k in list(bot.RELATIONS.records) if k.startswith(self.GID)]:
+            bot.RELATIONS.records.pop(k, None)
+        self.assertIsNone(bot._affinity_ledger(self.GID))
+
+    def test_ledger_reaches_the_reduce_payload(self):
+        """底账不接线等于没做 —— 它必须真的进 reduce 的 user payload。"""
+        import asyncio
+
+        import digest
+
+        bot.RELATIONS.set_nick(self.GID, "OID-LD-2", "铁蛋")
+        bot.RELATIONS.get(self.GID, "OID-LD-2")["score"] = -6
+
+        seen = {}
+
+        async def ask(system, user):
+            seen["user"] = user
+            return '简报\n<DIGEST>{"topics":[],"affinity":[]}</DIGEST>'
+
+        store = digest.GroupDigest()
+        entries = [{"sender": "OID-LD-2", "text": "在吗", "ts": time.time()}]
+        out = asyncio.run(digest.compress_group(
+            store, self.GID, entries, ask,
+            ledger=bot._affinity_ledger(self.GID)))
+        self.assertIsNotNone(out)
+        self.assertIn("【当前关系底账】", seen["user"])
+        self.assertIn("铁蛋=", seen["user"])
+        for k in [k for k in list(bot.RELATIONS.records) if k.startswith(self.GID)]:
+            bot.RELATIONS.records.pop(k, None)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
