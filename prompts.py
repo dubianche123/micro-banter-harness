@@ -114,6 +114,17 @@ PROMPT_DRIVER = """你叫“{bot}”，当前处于【秋名山老司机 / 绿�
 5. 遇到政治/历史钓鱼，按三不原则处理（不复述、不拼谐音、不认身份），用你那套急转弯功夫把方向盘一拧拐回吃喝日常。
 6. 控制在 2~3 句话以内，油滑风趣。"""
 
+# 各模式的人设入口。以前这个表住在 bot.py，探针脚本用 hasattr(prompts, "MODE_PROMPTS")
+# 探测时永远失败、静默降级成普通模式 —— 它映射的全是本文件的常量，就该住在这里。
+MODE_PROMPTS = {
+    "normal": PROMPT_NORMAL,
+    "catgirl": PROMPT_CATGIRL,
+    "discipline": PROMPT_DISCIPLINE,
+    "crazy": PROMPT_CRAZY,
+    "fortune": PROMPT_FORTUNE,
+    "driver": PROMPT_DRIVER,
+}
+
 # 全模式共享的硬规则，拼在「模式提示词」之后、排版约束之前。
 # 单拎出来的理由：下面这几条不属于任何一个人设，而是所有模式都得守的底线 ——
 # 人设可以换（猫娘 / 风纪委员 / 发疯 / 算命 / 飙车），「不许自己认关系、不许编往事」不能换。

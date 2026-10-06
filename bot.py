@@ -339,14 +339,7 @@ _bot_ref = {"client": None}
 # 免得群里某一档模式卡在被删除的枚举值上。
 LEGACY_MODE_ALIAS = {"cadre": "discipline"}
 
-MODE_PROMPTS = {
-    "normal": prompts.PROMPT_NORMAL,
-    "catgirl": prompts.PROMPT_CATGIRL,
-    "discipline": prompts.PROMPT_DISCIPLINE,
-    "crazy": prompts.PROMPT_CRAZY,
-    "fortune": prompts.PROMPT_FORTUNE,
-    "driver": prompts.PROMPT_DRIVER,
-}
+MODE_PROMPTS = prompts.MODE_PROMPTS   # 表本体在 prompts.py（人设常量的家）
 
 FALLBACK_REPLIES = [
     "（战术后仰揉了揉眼睛）刚才走神在看隔壁单挑Boss呢，你刚才这波信息量太大，再说一遍我听着！",
@@ -1290,7 +1283,7 @@ def extract_mentions(message, bot_id=""):
 _RE_PLAIN_MENTION = re.compile(r"@([^\s@，。！？；：、,!?;:（）()【】\[\]]{1,24})")
 _RE_TRAILING_DOTS = re.compile(r"[.．]+\Z")
 # 裸的机器编号（openid 那类），没有尖括号裹着时靠它兜底。没有人的昵称长这样。
-_RE_MACHINE_ID = re.compile(r"^[0-9A-Fa-f]{16,}$")
+_RE_MACHINE_ID = relations._RE_MACHINE_ID   # 同一条规则只允许有一份（relations 是机器 ID 判定的家）
 
 
 def mention_nicks_from_content(content, bot_names=()):
@@ -2517,7 +2510,7 @@ class GroupBot(botpy.Client):
                            or "某位群友")
                     lines.append(f"[{when}] {who}：{h['text'][:60]}")
                 await safe_reply(message,
-                    f"🔍 【翻旧账·{m_lookup.group(1)}】共 {len(hits)} 条，最近这些：\n" + "\n".join(lines))
+                    f"🔍 【翻旧账·{m_lookup.group(1)}】共 {len(found)} 条，最近这些：\n" + "\n".join(lines))
             return
 
         # 8.9 手动压一次：不用等定时器，方便立刻验证效果
