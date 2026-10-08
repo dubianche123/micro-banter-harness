@@ -120,6 +120,12 @@ class PromptWordingTest(unittest.TestCase):
         self.assertIn("时效词", digest.SYSTEM_REDUCE)
         self.assertIn("过期", digest.SYSTEM_REDUCE)
 
+    def test_people_notes_are_not_a_grudge_book(self):
+        """2026-10-08 两次复发：note 被模型写成「这人组织大家拿小王寻开心」式控诉 ——
+        名册每轮注入，模型照着这个身份对待人家，围攻框架就从这里复活。"""
+        self.assertIn("性格速写", digest.SYSTEM_REDUCE)
+        self.assertIn("控诉书", digest.SYSTEM_REDUCE)
+
     def test_prompt_text_never_names_a_real_incident(self):
         """⚠️ 提示词里**不许出现真实发生过的那件事**。
 
