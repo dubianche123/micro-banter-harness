@@ -552,7 +552,7 @@ async def safe_reply(message, reply_text):
 
     if sent:
         mid = sent.get("id", "?") if isinstance(sent, dict) else getattr(sent, "id", "?")
-        logger.info("📤 [已回复] id=%s: %s", str(mid)[:24], reply_text.replace("\n", " ")[:200])
+        logger.info("📤 [已回复] id=%s: %s", str(mid)[:48], reply_text.replace("\n", " ")[:200])
         return
 
     # ⚠️ 走到这里 = botpy 的 http 层把 TimeoutError **吞掉**了（只打一行警告，
@@ -570,7 +570,7 @@ async def safe_reply(message, reply_text):
     if sent:
         mid = sent.get("id", "?") if isinstance(sent, dict) else getattr(sent, "id", "?")
         logger.info("📤 [已回复·重试成功] id=%s: %s",
-                    str(mid)[:24], reply_text.replace("\n", " ")[:200])
+                    str(mid)[:48], reply_text.replace("\n", " ")[:200])
     else:
         logger.error("❌ 两次发送都超时 —— 这条回复大概率没进群")
 
