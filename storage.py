@@ -63,6 +63,7 @@ class StateStore:
             "relations": {},    # "group|member" -> 关系档案，见 relations.py
             "digests": {},      # group_id -> 群聊长期记忆，见 digest.py
             "promises": {},     # group_id -> 承诺账本，见 digest.PromiseBook
+            "promises_finished": {},  # group_id -> 催满上限的承诺墓碑（防压缩把它当新账复活）
             "groups": {},       # group_id -> {"last_seen": ts}，用来知道该往哪些群主动发言
             "usage": {"day": "", "used": 0},
         }
@@ -85,6 +86,14 @@ class StateStore:
             return
         for key in self.data:
             if key in raw:
+                self.data[key] = raw[key]
+        # ⚠️ 骨架之外的键同样要保留：collector 们写进 data 的数据（display_names /
+        # renames / affinity_daily / promises_finished）全靠它们跨重启存活。
+        # 之前这里只认骨架，**每次重启都把这些键静默清空** —— 显示名、改名册、
+        # 好感度日额度、催债墓碑全灭，2026-10-08 罗老板因此又被 @ 了一次蹄髈。
+        # 根修：不认识的键原样收进来，而不是每加一个键就回来改一次骨架。
+        for key in raw:
+            if key not in self.data:
                 self.data[key] = raw[key]
 
     def mark_dirty(self):
