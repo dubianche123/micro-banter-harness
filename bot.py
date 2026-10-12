@@ -515,14 +515,84 @@ def message_age_seconds(message):
     return (datetime.now(timezone.utc) - sent).total_seconds()
 
 
+def _is_connection_error(err_str):
+    """发送期的「网络根本不通」类错误。只有这类值得补投——对方明确拒收的不算。"""
+    e = (err_str or "").lower()
+    return ("cannot connect" in e or "connectorerror" in e
+            or "serverdisconnected" in e or "connectionreset" in e)
+
+
+# 断网补投队列：发送期网络不通时暂存。进程内存即可——断网期间进程还活着，只是网断了；
+# 一旦重启进程，腾讯也不会再收这条被动回复（时效早过了），持久化没有意义。
+_FAILED_SENDS = collections.deque(maxlen=20)
+
+
+def _queue_failed_send(message, reply_text, why):
+    _FAILED_SENDS.append((message, reply_text, time.time()))
+    logger.warning("🔗 %s —— 回复已入补投队列（%d 条待发，网络恢复后自动补）",
+                   why, len(_FAILED_SENDS))
+
+
+async def _drain_once():
+    """补投一轮：网络回来后把没过被动时效的滞留回复发出去。resend_queue_loop 每 10s 调一次。"""
+    if not _FAILED_SENDS:
+        return
+    now = time.time()
+    remaining = collections.deque()
+    net_down = False
+    while _FAILED_SENDS and not net_down:
+        message, reply_text, ts = _FAILED_SENDS.popleft()
+        window = passive_reply_window(message)
+        if now - ts > window - 15:
+            logger.warning("⏳ 补投放弃（滞留 %d 秒，被动时效余量不足）: %s",
+                           int(now - ts), reply_text[:60])
+            continue
+        try:
+            sent = await message.reply(content=reply_text, msg_type=0)
+        except Exception as e:
+            if _is_connection_error(str(e)):
+                net_down = True   # 网还没回来，后面的别撞了，原样留在队里
+                remaining.append((message, reply_text, ts))
+            else:
+                logger.error("❌ 补投失败: %s", str(e)[:160])
+            continue
+        if sent:
+            logger.info("📤 [补投成功] 断网期间滞留 %d 秒: %s",
+                        int(now - ts), reply_text.replace("\n", " ")[:120])
+        else:
+            remaining.append((message, reply_text, ts))   # 又是吞超时，下轮再说
+    if remaining:
+        _FAILED_SENDS.extendleft(reversed(remaining))
+
+
+async def resend_queue_loop():
+    """每 10 秒补投一轮；网络没回来时首条就会撞连接错误提前收手，空转开销可忽略。"""
+    while True:
+        await asyncio.sleep(10)
+        try:
+            await _drain_once()
+        except Exception as e:
+            logger.warning("⚠️ 补投轮异常（下轮继续）: %s", str(e)[:160])
+
+
+def _log_sent(sent, reply_text, tag="已回复"):
+    mid = sent.get("id", "?") if isinstance(sent, dict) else getattr(sent, "id", "?")
+    logger.info("📤 [%s] id=%s: %s", tag, str(mid)[:48], reply_text.replace("\n", " ")[:200])
+
+
 async def safe_reply(message, reply_text):
-    """安全回复，命中腾讯内容风控时自动降级。
+    """安全回复：命中腾讯内容风控时自动降级；网络不通时进补投队列。
 
     发之前还有一道**过期闸**：被动回复有时效（群聊 5 分钟 / 单聊 60 分钟），
     而机器人掉线期间积压的消息会在重连时补推过来 —— 那时再回，腾讯直接拒：
     `40034005 回复消息msg_id已过期`。模型跑了、答案也有了，就是发不出去，
     群里一片安静，看起来跟宕机一模一样（2026-09-17 实测踩到过）。
     所以太老的消息干脆不回，只留一条日志，省掉那次注定失败的请求。
+
+    2026-10-12 实测第三种丢法：本机断网约 5 分钟（两家 LLM 同时超时 + QQ API
+    连不上），兜底回复在重连前 47 秒发出，ConnectionError 记了 ❌ 就没了 ——
+    而重连发生在被动时效内，其实来得及补。所以连接类失败现在**入补投队列**，
+    resend_queue_loop 每 10 秒试一轮，过了时效余量才放弃。
     """
     age = message_age_seconds(message)
     window = passive_reply_window(message)
@@ -536,7 +606,7 @@ async def safe_reply(message, reply_text):
         sent = await message.reply(content=reply_text, msg_type=0)
     except Exception as e:
         err_str = str(e)
-        logger.error("❌ 消息发送失败: %s", err_str[:200])
+        logger.error("❌ 消息发送失败（拟回复：%s）: %s", reply_text[:60], err_str[:160])
         if "40034006" in err_str or "违规" in err_str:
             try:
                 await message.reply(
@@ -548,11 +618,13 @@ async def safe_reply(message, reply_text):
                 )
             except Exception:
                 pass
+            return
+        if _is_connection_error(err_str):
+            _queue_failed_send(message, reply_text, "疑似本机断网")
         return
 
     if sent:
-        mid = sent.get("id", "?") if isinstance(sent, dict) else getattr(sent, "id", "?")
-        logger.info("📤 [已回复] id=%s: %s", str(mid)[:48], reply_text.replace("\n", " ")[:200])
+        _log_sent(sent, reply_text)
         return
 
     # ⚠️ 走到这里 = botpy 的 http 层把 TimeoutError **吞掉**了（只打一行警告，
@@ -564,15 +636,17 @@ async def safe_reply(message, reply_text):
     try:
         sent = await message.reply(content=reply_text, msg_type=0)
     except Exception as e:
+        err_str = str(e)
+        if _is_connection_error(err_str):
+            _queue_failed_send(message, reply_text, "重试仍连不上")
+            return
         logger.warning("⚠️ 重试被拒（多半是首条其实已送达，被 msg_seq 去重挡下）: %s",
-                       str(e)[:160])
+                       err_str[:160])
         return
     if sent:
-        mid = sent.get("id", "?") if isinstance(sent, dict) else getattr(sent, "id", "?")
-        logger.info("📤 [已回复·重试成功] id=%s: %s",
-                    str(mid)[:48], reply_text.replace("\n", " ")[:200])
-    else:
-        logger.error("❌ 两次发送都超时 —— 这条回复大概率没进群")
+        _log_sent(sent, reply_text, tag="已回复·重试成功")
+        return
+    _queue_failed_send(message, reply_text, "两次发送都超时")
 
 
 def _throttled_notice_key(group_id, kind):
@@ -1924,6 +1998,7 @@ def run_bot():
         loop.create_task(digest_loop())
     if config.PROMISE_ENABLED:
         loop.create_task(promise_loop())
+    loop.create_task(resend_queue_loop())
 
     attempt = 0
     while True:
