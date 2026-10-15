@@ -380,6 +380,14 @@ def split_cmd(raw):
         return "", None
     match = CMD_TAG.search(raw)
     if not match:
+        # ⚠️ 容错第二层（2026-10-15 实测）：模型偶尔把标签**打坏**——群里出现过
+        # 「想卖&*%"#$#想<CMD!卖了…」，`<CMD!` 不匹配正规标签就整个漏进了群里。
+        # 协议规定标签永远在最末尾，所以正文里残留任何 <CMD 片段，从那里砍到结尾，
+        # 并把原文记进日志——一次是模型抽风，两次以上就是新失败模式。
+        idx = raw.find("<CMD")
+        if idx != -1:
+            logger.warning("🧯 模型输出含打坏的协议标签，已截断。原文: %s", raw[:160])
+            return raw[:idx].strip(), None
         return raw.strip(), None
     body = CMD_TAG.sub("", raw).strip()
     try:

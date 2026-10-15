@@ -122,9 +122,13 @@ class PromptWordingTest(unittest.TestCase):
 
     def test_people_notes_are_not_a_grudge_book(self):
         """2026-10-08 两次复发：note 被模型写成「这人组织大家拿小王寻开心」式控诉 ——
-        名册每轮注入，模型照着这个身份对待人家，围攻框架就从这里复活。"""
+        名册每轮注入，模型照着这个身份对待人家，围攻框架就从这里复活。
+        2026-10-15 第三次变体：把「敏感话题」写成爱好（往每轮上下文里放政治雷）、
+        把「威胁」写成性格（事件被记成身份）。"""
         self.assertIn("性格速写", digest.SYSTEM_REDUCE)
         self.assertIn("控诉书", digest.SYSTEM_REDUCE)
+        self.assertIn("敏感话题", digest.SYSTEM_REDUCE)
+        self.assertIn("威胁", digest.SYSTEM_REDUCE)
 
     def test_prompt_text_never_names_a_real_incident(self):
         """⚠️ 提示词里**不许出现真实发生过的那件事**。
