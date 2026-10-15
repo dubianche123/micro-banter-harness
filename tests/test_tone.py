@@ -26,6 +26,12 @@ class NormalModeToneTest(unittest.TestCase):
     def test_backpedal_when_the_other_side_disengages(self):
         self.assertIn("立刻收", prompts.PROMPT_NORMAL)
 
+    def test_feigning_blindness_is_banned(self):
+        """2026-10-15 被架住时的逃生招：连用两次「没看清/再说一遍」——
+        每条 @ 都在它眼前，装瞎等于当众承认自己坏了。禁令进说话方式块。"""
+        self.assertIn("不许装没看见", prompts.PROMPT_NORMAL)
+        self.assertIn("再说一遍", prompts.PROMPT_NORMAL)
+
     def test_blanket_roast_license_is_gone(self):
         """旧版把「损人」和吐槽抬杠并列成无差别许可 —— 那是攻击性过强的源头。"""
         self.assertNotIn("可以吐槽、抬杠、损人，但不下流", prompts.PROMPT_NORMAL)
