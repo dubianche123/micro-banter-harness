@@ -26,8 +26,11 @@ state.json 也不必再塞几千条聊天记录。
 
 import difflib
 import json
+import logging
 import re
 import time
+
+logger = logging.getLogger("qqbot")   # 与 bot.py 同一个命名 logger，共享 handler
 
 import config
 import naming
@@ -71,7 +74,10 @@ SYSTEM_REDUCE = """你在为 QQ 群「{bot}」整理长期记忆。你会拿到�
   二是**针对{bot}自己的吐槽**（说你掉线、说你宕机、说你死了几天的）。
   前者留着就是标签，说出去是揭短；后者会被当成好素材天天复读，把一次意外变成永久梗。
   要留的是那种「大家一起玩得起来」的梗，不涉及谁倒霉、也不涉及{bot}自己。
-- promises：没有兑现的承诺或待办，这是为了以后「催债」用的，玩笑也算。最多 5 条。
+- promises：**明确的承诺**才进——某人说出「我答应 / 我欠 / 我请 / 回头给你」这类话，
+  且能分清谁欠谁、欠的是什么。最多 5 条。
+  ⚠️ 邀约（「来玩 / 来吃 / 走啊」）、请求（「你来干嘛」）、起哄和荤梗**都不是承诺**：
+  实测把一句「来给我吃鸡吧」记成了对方欠的账，催债等于把荤梗公开复读。拿不准就不进（宁缺勿滥）。
 - people：对具体某个人的新认知（在玩什么、什么处境）。最多 6 条。
   ⚠️ note 描述的是**这个人平时什么样**，不是他跟{bot}的关系账：不许写成
   「组织大家来拿{bot}寻开心」「拿{bot}当玩具练手」这类把人写成麻烦制造者的措辞 ——
@@ -521,6 +527,20 @@ def stamp_memes(old_data, new_data, now=None):
         m["ts"] = now if q not in old else old[q]
 
 
+# 名册 note 的**写入闸**（2026-10-16，借鉴 Mem0 的写入前裁决：模型提案、代码裁决）。
+# 提示词禁了三轮，漂移还是换了三种框架回来（控诉书 / 玩具化 / 爱好化 / 威胁化）——
+# 合同挡不住的事就换成代码闸。命中框架黑名单的改写一律按 NOOP 处理：
+# 老人沿用旧 note 和旧 ts（继续变老），新人整条丢弃。每个词都有事故回执。
+NOTE_BANNED_FRAMINGS = (
+    "敏感话题", "政治", "威胁", "骚扰", "测试", "调教", "欺负",
+    "围攻", "寻开心", "玩具", "口嗨", "整活", "撩", "发情",
+)
+
+
+def _note_is_clean(note):
+    return not any(w in note for w in NOTE_BANNED_FRAMINGS)
+
+
 def stamp_people(old_data, new_data, now=None):
     """给名册条目记「这条认知是什么时候更新的」，返回更新过的条数。
 
@@ -537,6 +557,7 @@ def stamp_people(old_data, new_data, now=None):
             if who and note:
                 old[who] = (note, float(p.get("ts") or 0))
     stamped = 0
+    drop_ids = set()
     for p in ((new_data or {}).get("people") or []):
         if not isinstance(p, dict):
             continue
@@ -548,9 +569,23 @@ def stamp_people(old_data, new_data, now=None):
         if prev_note == note:
             # 原样抄回来的：沿用旧时间戳（旧数据没有 ts 就仍然没有 ⇒ 会被当成过期的）
             p["ts"] = prev_ts
+        elif not _note_is_clean(note):
+            # 写入闸：改写撞框架黑名单 → 按 NOOP 处理（Mem0 式写入前裁决）。
+            # 老人沿用旧版（继续变老，模型下轮看到旧版大概率照抄）；新人整条丢弃。
+            if prev_note:
+                p["note"] = prev_note
+                p["ts"] = prev_ts
+                logger.warning("🧯 名册改写命中框架黑名单，沿用旧版: %s 的「%s」", who, note[:60])
+            else:
+                logger.warning("🧯 新人 note 命中框架黑名单，整条丢弃: %s 的「%s」", who, note[:60])
+                drop_ids.add(id(p))
         else:
             p["ts"] = now
         stamped += 1
+    if drop_ids:
+        new_data["people"] = [
+            x for x in (new_data.get("people") or []) if id(x) not in drop_ids
+        ]
     return stamped
 
 

@@ -34,27 +34,27 @@ class StampTest(unittest.TestCase):
     """打时间戳的口径：换个说法才算有更新。"""
 
     def test_new_note_gets_fresh_timestamp(self):
-        new = _people([{"who": "家豪", "note": "天天在群里整活"}])
+        new = _people([{"who": "家豪", "note": "天天在群里冒泡"}])
         digest.stamp_people(None, new, now=1000.0)
         self.assertEqual(new["people"][0]["ts"], 1000.0)
 
     def test_unchanged_note_keeps_aging(self):
         """模型把旧条目原样抄回来 = 没有新消息，那它就该继续变老。"""
-        old = _people([{"who": "家豪", "note": "天天整活", "ts": 500.0}])
-        new = _people([{"who": "家豪", "note": "天天整活"}])
+        old = _people([{"who": "家豪", "note": "天天冒泡", "ts": 500.0}])
+        new = _people([{"who": "家豪", "note": "天天冒泡"}])
         digest.stamp_people(old, new, now=1000.0)
         self.assertEqual(new["people"][0]["ts"], 500.0)
 
     def test_reworded_note_counts_as_an_update(self):
-        old = _people([{"who": "家豪", "note": "天天整活", "ts": 500.0}])
-        new = _people([{"who": "家豪", "note": "天天整活，最近迷上钓鱼"}])
+        old = _people([{"who": "家豪", "note": "天天冒泡", "ts": 500.0}])
+        new = _people([{"who": "家豪", "note": "天天冒泡，最近迷上钓鱼"}])
         digest.stamp_people(old, new, now=1000.0)
         self.assertEqual(new["people"][0]["ts"], 1000.0)
 
     def test_capital_keys_are_tolerated(self):
         """压缩产物出现过 "Who"/"Note"（大写），认不出就等于名册空着。"""
-        old = _people([{"Who": "罗老板", "Note": "爱整活", "ts": 500.0}])
-        new = _people([{"Who": "罗老板", "Note": "爱整活"}])
+        old = _people([{"Who": "罗老板", "Note": "爱冒泡", "ts": 500.0}])
+        new = _people([{"Who": "罗老板", "Note": "爱冒泡"}])
         digest.stamp_people(old, new, now=1000.0)
         self.assertEqual(new["people"][0]["ts"], 500.0)
 
@@ -68,7 +68,7 @@ class RenderExpiryTest(unittest.TestCase):
         old_ts = now - (config.PEOPLE_NOTE_MAX_AGE_DAYS + 1) * 86400
         state = _state([
             {"who": "家豪", "note": "号刚解封", "ts": old_ts},
-            {"who": "罗老板", "note": "爱整活", "ts": now - 60},
+            {"who": "罗老板", "note": "爱冒泡", "ts": now - 60},
         ])
         out = digest.render_people(state, now=now)
         self.assertNotIn("家豪", out)
@@ -87,13 +87,13 @@ class RenderExpiryTest(unittest.TestCase):
 
     def test_fresh_note_still_shows(self):
         now = time.time()
-        state = _state([{"who": "家豪", "note": "天天整活", "ts": now - 3600}])
-        self.assertIn("天天整活", digest.render_people(state, now=now))
+        state = _state([{"who": "家豪", "note": "天天冒泡", "ts": now - 3600}])
+        self.assertIn("天天冒泡", digest.render_people(state, now=now))
 
     def test_note_without_timestamp_is_kept(self):
         """老档里没有 ts 的条目别一刀切清空 —— 名册空着比过期更糟（会退回张冠李戴）。"""
-        state = _state([{"who": "家豪", "note": "天天整活"}])
-        self.assertIn("天天整活", digest.render_people(state))
+        state = _state([{"who": "家豪", "note": "天天冒泡"}])
+        self.assertIn("天天冒泡", digest.render_people(state))
 
     def test_only_the_stale_one_drops_out(self):
         """过期的只是那一条，别把整份名册连坐清空。"""
@@ -101,7 +101,7 @@ class RenderExpiryTest(unittest.TestCase):
         stale = now - (config.PEOPLE_NOTE_MAX_AGE_DAYS + 1) * 86400
         state = _state([
             {"who": "家豪", "note": "号刚解封", "ts": stale},
-            {"who": "罗老板", "note": "爱整活", "ts": now - 60},
+            {"who": "罗老板", "note": "爱冒泡", "ts": now - 60},
         ])
         out = digest.render_people(state, now=now)
         self.assertNotIn("家豪", out)
@@ -120,7 +120,7 @@ class PromptWordingTest(unittest.TestCase):
         self.assertIn("时效词", digest.SYSTEM_REDUCE)
         self.assertIn("过期", digest.SYSTEM_REDUCE)
 
-    def test_people_notes_are_not_a_grudge_book(self):
+    def test_notes_are_not_a_grudge_book(self):
         """2026-10-08 两次复发：note 被模型写成「这人组织大家拿小王寻开心」式控诉 ——
         名册每轮注入，模型照着这个身份对待人家，围攻框架就从这里复活。
         2026-10-15 第三次变体：把「敏感话题」写成爱好（往每轮上下文里放政治雷）、
@@ -129,6 +129,28 @@ class PromptWordingTest(unittest.TestCase):
         self.assertIn("控诉书", digest.SYSTEM_REDUCE)
         self.assertIn("敏感话题", digest.SYSTEM_REDUCE)
         self.assertIn("威胁", digest.SYSTEM_REDUCE)
+
+    def test_banned_reframe_keeps_the_old_note(self):
+        """写入闸（Mem0 式）：改写撞框架黑名单 = NOOP，沿用旧版继续变老。"""
+        old = _people([{"who": "家豪", "note": "爱开玩笑，爱搭话", "ts": 500.0}])
+        new = _people([{"who": "家豪", "note": "喜欢威胁和调侃"}])
+        digest.stamp_people(old, new, now=1000.0)
+        self.assertEqual(new["people"][0]["note"], "爱开玩笑，爱搭话")
+        self.assertEqual(new["people"][0]["ts"], 500.0)
+
+    def test_banned_note_on_a_new_person_is_dropped(self):
+        """新人首条 note 就带框架：整条丢弃（NOOP），不进名册。"""
+        new = _people([{"who": "路人", "note": "整天骚扰人", "ts": 0}])
+        digest.stamp_people(None, new, now=1000.0)
+        self.assertEqual(new["people"], [])
+
+    def test_clean_reframe_still_refreshes(self):
+        """干净的改写照常拿新时间戳——闸只拦框架，不拦更新。"""
+        old = _people([{"who": "家豪", "note": "爱开玩笑，爱搭话", "ts": 500.0}])
+        new = _people([{"who": "家豪", "note": "最近迷上钓鱼"}])
+        digest.stamp_people(old, new, now=1000.0)
+        self.assertEqual(new["people"][0]["note"], "最近迷上钓鱼")
+        self.assertEqual(new["people"][0]["ts"], 1000.0)
 
     def test_prompt_text_never_names_a_real_incident(self):
         """⚠️ 提示词里**不许出现真实发生过的那件事**。
