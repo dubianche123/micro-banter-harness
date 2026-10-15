@@ -206,11 +206,25 @@ LEGACY_MODE_ALIAS = {"cadre": "discipline"}
 MODE_PROMPTS = prompts.MODE_PROMPTS   # 表本体在 prompts.py（人设常量的家）
 
 FALLBACK_REPLIES = [
-    "（战术后仰揉了揉眼睛）刚才走神在看隔壁单挑Boss呢，你刚才这波信息量太大，再说一遍我听着！",
-    "（正在专心摸鱼中）刚才屏幕一闪没看清，哪个好兄弟又在群里发功？搞快点，再说一次听听！",
-    "（反手掏出一张无懈可击）这波话题有点东西，我先喝口水冷静一下！有种你再艾特我一次，看我怎么接招！",
-    "（摘下耳机假装正经）刚才走神了！你刚说啥，再艾特我一次，这回我全神贯注！",
+    "（战术后仰揉了揉眼睛）这条信息量有点超纲，容我缓缓",
+    "（正在专心摸鱼中）你这话把我 CPU 干烧了，让我冷静两秒",
+    "（摘下耳机假装正经）等一下，先把手里这条鱼摸完",
+    "（翻小本本）这条有点意思，先记上，回头连本带利一起算",
+    "（卡壳中）你先说着，我脑子马上就位",
 ]
+_last_fallback = None
+
+
+def _pick_fallback():
+    """兜底文案不放回连抽：网络抖动期连着两条「没看清」，群里看着就像坏了。
+
+    另外全池不许出现「再说一遍 / 再艾特我一次」式的许诺——兜底触发时模型根本
+    没有应答，许诺了也兑现不了（2026-10-15 实测连着两条装瞎求复读，群主看穿）。
+    """
+    global _last_fallback
+    pool = [t for t in FALLBACK_REPLIES if t != _last_fallback] or FALLBACK_REPLIES
+    _last_fallback = random.choice(pool)
+    return _last_fallback
 
 _throttle_notice = {}  # group_id -> last notice timestamp
 
@@ -467,11 +481,11 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
             # 对话一律走对话梯队：不为「插嘴」单独换模型，那会让同一个角色在不同路径上表现不一致
             raw = await call_model(messages, max_tokens)
             if not raw:
-                return random.choice(FALLBACK_REPLIES), None
+                return _pick_fallback(), None
             body, payload = split_cmd(raw)
             # 标签解析失败时退化：拿主干文本，不计分
             if not body:
-                return random.choice(FALLBACK_REPLIES), None
+                return _pick_fallback(), None
             delta = None
             if isinstance(payload, dict) and "aff" in payload:
                 try:
