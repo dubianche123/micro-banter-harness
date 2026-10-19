@@ -142,6 +142,8 @@ docker compose logs -f
 
 ### 升级与数据兼容
 
+**从旧版本升级请先读 [0.2 升级清单](docs/UPGRADE_0.2.md)**：包括供应商与视觉默认值、旧路由变量、预算计数、数据路径和旧守护服务的迁移。
+
 新部署默认将运行数据集中在 `data/`。已有根目录 `state.json`、`owner.txt`、`archive/` 或 `memory/` 时，未配置 `DATA_DIR` 会继续使用原位置，doctor 会提示。代码不会自动移动、合并或删除旧档案。
 
 需要整理旧数据时，先停止实例、备份这四类文件和 `.env`，将文件复制到目标目录，再显式设置 `DATA_DIR` 并体检后重启。已设置的 `STATE_FILE` / `OWNER_FILE` / `ARCHIVE_DIR` / `MEMORY_DIR` / `LOG_FILE` 继续优先，仍相对部署目录解析；迁移时同步检查这些覆盖项。

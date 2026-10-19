@@ -171,6 +171,8 @@ exposed.
 
 ### Upgrading and existing data
 
+**Read the [0.2 upgrade checklist](docs/UPGRADE_0.2.md) before upgrading** for provider/vision defaults, retired routing settings, physical-attempt budgets, data paths and old service removal. English migration essentials are included.
+
 New deployments use `data/`. If root-level `state.json`, `owner.txt`, `archive/` or
 `memory/` already exists, leaving `DATA_DIR` unset retains that layout and doctor
 reports it. No automatic move, merge or deletion occurs.

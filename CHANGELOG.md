@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-10-20 (source update)
 
 - Use one bounded provider request policy and explicit OpenAI-compatible endpoints/model chains; keep vendor presets as optional setup shortcuts. New instances default to text chat; vision requires explicit capability setup.
 - Add installable `regular` CLI: offline demo, private configuration initialization,
@@ -25,4 +25,5 @@
   the associated change review and regression tests.
 
 This version is recorded in source; no Git tag, package upload or GitHub Release is
-created by these changes. Review migration notes in README before upgrading.
+created by these changes. Follow the [0.2 upgrade checklist](docs/UPGRADE_0.2.md)
+and [provider migration guide](docs/providers.md) before upgrading.
