@@ -8,7 +8,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-5375B5)](requirements.txt) [![Offline checks](https://github.com/dubianche123/the-regular-qq-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/dubianche123/the-regular-qq-bot/actions/workflows/ci.yml) [![QQ](https://img.shields.io/badge/QQ-Group%20%2B%20C2C-B48543)](bot.py) [![License](https://img.shields.io/badge/License-MIT-3A9F82)](LICENSE)
 
-[中文](README.md) · **English**
+[中文](README.md) · **English** · [Get v0.2.0](https://github.com/dubianche123/the-regular-qq-bot/releases/tag/v0.2.0)
 
 [Run it](#quick-start) · [Message routes](#one-message-three-possible-routes) · [Context design](#the-context-has-an-order) · [Commands](#-cheatsheet-commands--interactions)
 
@@ -18,7 +18,7 @@ The Regular lives in a QQ group as a recurring character: usually quiet, occasio
 
 Under that social surface is a small agent harness: **code holds durable state, an activation policy decides when to speak, and models generate language inside a deliberately ordered context**. Local commands and configured provider fallbacks keep every interaction from depending on one large model call.
 
-**First use:** [Install](#quick-start), run `regular setup` and `regular run`, then send one private message to claim ownership. To try it without credentials, use `regular demo`.
+**First use:** [Install](#quick-start), follow the setup wizard, start the bot, then send one private message to claim ownership. To try it without credentials, use `regular demo`.
 
 ## What you can try
 
@@ -65,9 +65,46 @@ This layout creates opportunities for prefix caching. Actual cache behavior depe
 
 ## Quick start
 
-### 1. Install
+### 1. Install the release
 
-Python 3.10+ is required; Python 3.12 is recommended. No database is needed.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) once, then copy:
+
+```bash
+uv tool install --python 3.12 https://github.com/dubianche123/the-regular-qq-bot/releases/download/v0.2.0/the_regular-0.2.0-py3-none-any.whl
+```
+
+uv prepares Python 3.12, dependencies and an isolated tool environment. No clone
+or manual virtual-environment activation is needed. If `regular` is not found,
+run `uv tool update-shell` and reopen the terminal.
+
+To try it first:
+
+```bash
+uvx --python 3.12 --from https://github.com/dubianche123/the-regular-qq-bot/releases/download/v0.2.0/the_regular-0.2.0-py3-none-any.whl regular demo
+```
+
+The demo needs no account or key and makes no QQ or model requests. Try
+`查好感`, `掷骰子`, or `群史记`; `/help` lists controls. After installation,
+`regular demo` works too.
+
+<details>
+<summary>Install with an existing Python and pip</summary>
+
+Python 3.10+ is required; 3.12 is recommended. Install the same wheel in a venv:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install https://github.com/dubianche123/the-regular-qq-bot/releases/download/v0.2.0/the_regular-0.2.0-py3-none-any.whl
+```
+
+On Windows, use `python` instead of `python3` and activate with `.\.venv\Scripts\Activate.ps1`. Setup and run commands
+below remain the same.
+
+</details>
+
+<details>
+<summary>Develop from source</summary>
 
 ```bash
 git clone https://github.com/dubianche123/the-regular-qq-bot.git
@@ -77,19 +114,19 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-To try it first, run `regular demo`. No account or API key is needed; it uses
-temporary state and a fixed fake model, with no QQ connection or model requests.
-Try `查好感`, `掷骰子`, or `群史记`; `/help` lists demo controls.
+</details>
 
 ### 2. Configure once with the wizard
 
 Have your QQ AppID/AppSecret and model endpoint URL, API key and model ID ready:
 
 ```bash
-regular setup
+regular --directory regular-bot setup
 ```
 
-The wizard hides secret input, creates a private `.env`, and runs local checks.
+`regular-bot` is your local instance directory and is created automatically;
+you can choose an absolute path instead. The wizard hides secret input, creates
+a private `.env`, and runs local checks.
 If `.env` already exists, it fills missing values while keeping existing settings.
 Zhipu/Gemini presets only need their corresponding key. Successful setup gives
 you the launch command. No database, retry policy or separate image configuration
@@ -106,12 +143,12 @@ In QQ, enable C2C and the required group events, and restrict usage scope to the
 intended owner or test members. Then start:
 
 ```bash
-regular run
+regular --directory regular-bot run
 ```
 
 Wait for the logged online confirmation before treating QQ as connected. Rejected
 credentials or permissions stop startup. The first login waits at most
-60 seconds, and repeated connection failures can stop earlier with guidance; fix `.env` and rerun `regular run`.
+60 seconds, and repeated connection failures can stop earlier with guidance; fix the instance's `.env` and rerun the command above.
 
 **The intended owner's first private message automatically claims the bot.**
 No phrase or extra confirmation is needed; that message receives its normal
@@ -124,13 +161,14 @@ After adding the bot to a group, choose **获取群内全部消息** in its mess
 under group settings, then mention it. If still unowned after 10 minutes, its
 next normal reply includes one reminder. Group messages cannot claim ownership.
 
-Use `regular doctor` for local diagnostics and `regular status` in another
-terminal for connection and budget status. For a separate instance, use
-`regular --directory /path/to/instance setup`; its configuration and data live
-there. Stop foreground execution with Ctrl+C. Run one process per instance.
+Use `regular --directory regular-bot doctor` for local diagnostics and
+`regular --directory regular-bot status` in another terminal for connection and
+budget status. Configuration and data stay inside the selected instance. Stop foreground execution with Ctrl+C. Run one process per instance.
 
 <details>
 <summary>Optional: scripted configuration and diagnostics</summary>
+
+Enter the instance directory before using commands below without `--directory`.
 
 For noninteractive installation, `regular init` creates a blank credentials
 template; fill it and run `regular doctor`. `init` never overwrites a file; use
@@ -147,45 +185,54 @@ inference; success does not prove model quota or image support.
 <details>
 <summary>Optional: process supervision and Docker</summary>
 
-The macOS helper generates a plist using your actual paths. It never starts a
-service by default, kills processes, injects a proxy or changes power settings:
+The installed package includes a service generator. It uses the current tool's
+Python and your chosen instance path; it does not install or start a service.
+
+On macOS, generate and inspect the plist, then load it:
 
 ```bash
-bash tools/launchd/install.sh          # Generate data/io.github.the-regular.plist; inspect it
-bash tools/launchd/install.sh install  # Explicitly install; do not start yet
-bash tools/launchd/install.sh start    # Explicitly start; stop the manual instance first
-bash tools/launchd/install.sh status
-# bash tools/launchd/install.sh stop
+regular --directory regular-bot service launchd --output regular-bot/data/io.github.the-regular.plist
+mkdir -p ~/Library/LaunchAgents
+cp regular-bot/data/io.github.the-regular.plist ~/Library/LaunchAgents/
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/io.github.the-regular.plist
 ```
 
-It uses `.venv/bin/python` by default; set `REGULAR_PYTHON=/absolute/venv/bin/python`
-for another environment. Configure any required proxy in your own `.env`; the
-service reads the same deployment configuration.
-
-Linux users can follow the [systemd user-service steps](tools/systemd/README.md).
-The Docker path uses one container; first initialize/fill `.env` on the host:
+On Linux, generate and enable a user service:
 
 ```bash
+regular --directory regular-bot service systemd --output regular-bot/data/the-regular.service
+mkdir -p ~/.config/systemd/user
+cp regular-bot/data/the-regular.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now the-regular
+```
+
+Stop the foreground process before starting a service for the same instance.
+Configure proxies in that instance's `.env` if needed.
+
+Docker and source helpers are included in the
+[source archive](https://github.com/dubianche123/the-regular-qq-bot/releases/tag/v0.2.0).
+Run these commands from its extracted source directory:
+
+```bash
+regular init
+# Fill the current directory's .env
 docker compose build
 docker compose run --rm regular regular doctor
 docker compose up -d
-docker compose exec regular regular status
 docker compose logs -f
 ```
 
-State, logs, archives and memory use the `regular-data` named volume; the container
-runs as a non-root user. Recreating it retains the volume. `docker compose down -v`
-deletes it, so keep your own backups. QQ uses outbound connections; no web port is
-exposed.
+The container reads that `.env` and stores data in the `regular-data` named
+volume. `docker compose down -v` deletes the volume.
 
 ### Runtime data
 
-Runtime state, owner identity, logs, archives and summaries default to the
-deployment's `data/` directory. Set `DATA_DIR` to choose another location;
-relative paths are resolved from the deployment directory. Stop the instance
-before backing up the data directory and `.env`. See [CHANGELOG](CHANGELOG.md)
-for version changes.
-
+Each instance keeps its `.env` at its root and state, owner identity, logs,
+archives and summaries under `data/` by default. `DATA_DIR` chooses another
+location; relative paths resolve from the instance directory. Stop the instance
+before backing up its `.env` and data directory. QQ uses outbound connections;
+no web port needs to be exposed.
 
 </details>
 
@@ -193,21 +240,24 @@ for version changes.
 
 ## 🎮 Cheatsheet: Commands & Interactions
 
+Built-in command phrases below are shown exactly as accepted by the local handlers.
+
 | Feature | How to Say | Token Cost |
 | :--- | :--- | :---: |
-| **Chat** | `@bot` or say its name directly (e.g. `Buddy what's good`) | 1 call |
-| **Random Banter** | Talk normally in the group; it chimes in based on probability | 1 call |
-| **Send an image** | `@bot` with a picture (it reads it once and remembers) | 1 chat + up to 1 vision call (provider pricing applies) |
-| **Cyber Duel** | `roll dice` / `duel` / `掷骰子` / `比大小` | **0** |
-| **Nicknames / Rename** | `call me Alex` / `叫我阿强` / `别叫我了` | 0~1 call |
-| **Switch Mode** | `catgirl mode` / `crazy mode` / `discipline mode` / `fortune mode` | **0** |
-| **Reset Mode** | `return to normal` / `恢复正常` / `冷静点` | **0** |
-| **Check Affinity**| `check affinity` / `查好感` / `我跟你多熟` | **0** |
-| **Leaderboard** | `relationship board` / `关系榜` / `点名册` | **0** |
-| **Chronicles** | `group digest` / `群史记` / `最近聊了啥` | **0** |
-| **Promise Ledger**| `check debts` / `谁请客` ; after fulfilling: `settled` / `结清` | **0** |
-| **Verify Archives**| `lookup <keyword>` / `翻旧账 关键词` (pulls real quotes) | **0** |
-| **Owner Admin** | `@someone call him Bob` / `lock renames` / `unlock renames` | **0** |
+| **Chat** | Mention the bot or use a configured alias | 1 call |
+| **Random Banter** | Ordinary group conversation may trigger an interjection | 1 call |
+| **Send an image** | Mention the bot with a picture | 1 chat + up to 1 vision call |
+| **Dice / Duel** | `掷骰子` / `摇骰子` / `比大小` / `决斗` | **0** |
+| **Nicknames / Rename** | `叫我阿强` / `我是阿强` / `别叫我了` | 0–1 call |
+| **Switch Mode** | `猫娘模式` / `发疯模式` / `风纪委员模式` / `算命模式` / `老司机模式` | **0** |
+| **Reset Mode** | `恢复正常` / `正常点` / `冷静点` / `吃药了` | **0** |
+| **Check Affinity** | `查好感` / `我跟你多熟` / `几档了` | **0** |
+| **Leaderboard** | `关系榜` / `点名册` / `群友榜` | **0** |
+| **Chronicles** | `群史记` / `最近聊了啥` / `周报` | **0** |
+| **Promise Ledger** | `查账` / `谁请客`; after fulfilling: `结清` | **0** |
+| **Verify Archives** | `翻旧账 关键词` | **0** |
+| **Owner Admin** | Mention a member with `叫他阿珍`; `锁起名` / `解锁起名` | **0** |
+
 
 ---
 

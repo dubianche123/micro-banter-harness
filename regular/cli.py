@@ -354,6 +354,9 @@ def main(argv=None):
     stat = sub.add_parser("status", help="read runtime's structured snapshot")
     stat.add_argument("--json", action="store_true")
     sub.add_parser("run", help="validate and connect the QQ runtime")
+    svc = sub.add_parser("service", help="generate a launchd or systemd definition; never install or start it")
+    svc.add_argument("kind", choices=("launchd", "systemd"))
+    svc.add_argument("--output", required=True, help="path for the generated service definition")
     dm = sub.add_parser("demo", help="offline interactive demo through the production message handler")
     dm.add_argument("messages", nargs="*", help="optional messages for a noninteractive demo")
     probe = sub.add_parser("probe", help="run an explicitly authorized paid research probe")
@@ -367,6 +370,9 @@ def main(argv=None):
             return setup(args.directory)
         if args.command == "demo":
             return asyncio.run(demo(args.messages))
+        if args.command == "service":
+            from regular.service import main as generate_service
+            return generate_service([args.kind, "--directory", args.directory, "--output", args.output])
         try:
             config = load_config(args.directory)
         except ImportError as error:

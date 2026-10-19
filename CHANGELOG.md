@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.2.0 — 2026-10-20 (source update)
+## 0.2.0 — 2026-10-20
+
+- Publish installable wheel and source archives in the GitHub Release. End users
+  can install with uv, create a local instance and run without cloning source.
+- Expose the existing launchd/systemd generator as `regular service` for installed
+  packages, preserving the same resolved paths and installed Python environment.
 
 - Rename the GitHub repository to `the-regular-qq-bot` for clearer QQ bot discovery;
   update source links while keeping the `regular` command and `the-regular` package.
@@ -37,6 +42,6 @@
   contributor guidance and issue forms. Runtime correctness fixes are described in
   the associated change review and regression tests.
 
-This version is recorded in source; no Git tag, package upload or GitHub Release is
-created by these changes. See the [provider configuration guide](docs/providers.md)
-for endpoint and image-model setup.
+Install the wheel or download the source archive from the
+[v0.2.0 GitHub Release](https://github.com/dubianche123/the-regular-qq-bot/releases/tag/v0.2.0).
+See the [provider configuration guide](docs/providers.md) for endpoint and image-model setup.

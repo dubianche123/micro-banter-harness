@@ -8,7 +8,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-5375B5)](requirements.txt) [![Offline checks](https://github.com/dubianche123/the-regular-qq-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/dubianche123/the-regular-qq-bot/actions/workflows/ci.yml) [![QQ](https://img.shields.io/badge/QQ-Group%20%2B%20C2C-B48543)](bot.py) [![License](https://img.shields.io/badge/License-MIT-3A9F82)](LICENSE)
 
-**中文** · [English](README_EN.md)
+**中文** · [English](README_EN.md) · [下载 v0.2.0](https://github.com/dubianche123/the-regular-qq-bot/releases/tag/v0.2.0)
 
 [运行](#快速开始) · [消息路径](#一条消息三种去向) · [上下文设计](#上下文为什么要分层) · [玩法](#-群里怎么玩)
 
@@ -18,7 +18,7 @@
 
 社交表面之下，是一个小型 Agent harness：**代码持有长期状态，激活策略决定什么时候开口，模型在有顺序的上下文里生成语言**。本地指令和可配置的供应商回退，让每次互动不必都依赖一次大模型请求。
 
-**第一次使用：** [安装](#快速开始)后运行 `regular setup`、`regular run`，再由主人私聊一句完成自动认主。只想体验可先运行 `regular demo`。
+**第一次使用：** [安装](#快速开始)后跟随配置向导启动，再由主人私聊一句完成自动认主。只想体验可先运行 `regular demo`。
 
 ## 可以玩到什么
 
@@ -65,9 +65,41 @@
 
 ## 快速开始
 
-### 1. 安装
+### 1. 安装发布包
 
-需要 Python 3.10+，推荐 Python 3.12。无需数据库。
+安装一次 [uv](https://docs.astral.sh/uv/getting-started/installation/)，然后复制这一行：
+
+```bash
+uv tool install --python 3.12 https://github.com/dubianche123/the-regular-qq-bot/releases/download/v0.2.0/the_regular-0.2.0-py3-none-any.whl
+```
+
+uv 会准备 Python 3.12、依赖和独立环境。无需克隆仓库或手动激活虚拟环境。若终端找不到 `regular`，运行 `uv tool update-shell` 后重开终端。
+
+想先试用，也可以直接运行：
+
+```bash
+uvx --python 3.12 --from https://github.com/dubianche123/the-regular-qq-bot/releases/download/v0.2.0/the_regular-0.2.0-py3-none-any.whl regular demo
+```
+
+演示无需账号或 Key，不连接 QQ，不调用真实模型。可体验 `查好感`、`掷骰子`、`群史记`，`/help` 查看帮助。已安装后也可直接用 `regular demo`。
+
+<details>
+<summary>已有 Python，使用 pip 安装</summary>
+
+需要 Python 3.10+，推荐 3.12。在虚拟环境中安装同一个 wheel：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install https://github.com/dubianche123/the-regular-qq-bot/releases/download/v0.2.0/the_regular-0.2.0-py3-none-any.whl
+```
+
+Windows 使用 `python` 代替 `python3`，激活命令为 `.\.venv\Scripts\Activate.ps1`。后续配置与运行命令相同。
+
+</details>
+
+<details>
+<summary>开发或修改源码</summary>
 
 ```bash
 git clone https://github.com/dubianche123/the-regular-qq-bot.git
@@ -77,17 +109,17 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-想先试用，运行 `regular demo` 即可：无需账号和 Key，不连接 QQ，也不调用真实模型。可直接体验 `查好感`、`掷骰子`、`群史记`；`/help` 查看演示帮助。
+</details>
 
 ### 2. 跟向导填一次配置
 
 准备 QQ 应用的 AppID、AppSecret，以及模型服务的 URL、API Key 和模型名，然后运行：
 
 ```bash
-regular setup
+regular --directory regular-bot setup
 ```
 
-向导隐藏密钥输入，创建私有 `.env`，并自动做本地检查。已有 `.env` 时只补空缺，保留已填内容；智谱、Gemini 预设只需对应的 Key。配置完整后会直接给出启动命令。无需手工设置数据库、重试策略或识图配置。
+`regular-bot` 是你的本地实例目录，向导会自动创建；也可换成自己的绝对路径。向导隐藏密钥输入，创建私有 `.env`，并自动做本地检查。已有 `.env` 时只补空缺，保留已填内容；智谱、Gemini 预设只需对应的 Key。配置完整后会直接给出启动命令。无需手工设置数据库、重试策略或识图配置。
 
 默认识图跟随主模型；主模型只支持文本时，可另设 `VISION_MODEL`，跨供应商再设 `VISION_PROVIDER`。`BOT_NAMES` 是可选的群内别名，留空仍可用平台昵称或 `@` 触发。[更多模型配置](docs/providers.md) · [全部配置示例](.env.example)
 
@@ -96,19 +128,21 @@ regular setup
 QQ 后台开启 C2C、所需群事件，并将使用范围设为预期主人或测试成员。然后启动：
 
 ```bash
-regular run
+regular --directory regular-bot run
 ```
 
-日志显示机器人“已更新上线”后，QQ 连接才算成功。凭据或权限被拒绝会停止启动；首次上线最多等待 60 秒，连续连接失败也会提前退出，并指明需要核对的配置。修正 `.env` 后重新运行 `regular run`。
+日志显示机器人“已更新上线”后，QQ 连接才算成功。凭据或权限被拒绝会停止启动；首次上线最多等待 60 秒，连续连接失败也会提前退出，并指明需要核对的配置。修正实例目录内的 `.env` 后重新运行上面的命令。
 
 **启动后，主人先私聊机器人说一句话，就自动认主。** 无需口令、没有额外确认，原消息照常回复；主人身份会保存，重启后也保留，其他私聊不会更换主人。QQ 平台支持全量或白名单范围，首次使用前请确认[后台使用范围](https://bot.q.qq.com/wiki/#_10-%E4%BD%BF%E7%94%A8%E8%8C%83%E5%9B%B4%E4%B8%8E%E4%BA%BA%E5%91%98%E9%85%8D%E7%BD%AE)。
 
 拉进群后，在群设置 → 该机器人 → 消息范围中选 **获取群内全部消息**，再 `@它` 试聊。入群 10 分钟仍未认主，会随下一条正常回复提醒一次。群消息本身不会绑定主人。
 
-遇到问题运行 `regular doctor`；另一个终端用 `regular status` 查看连接与预算。两者默认只读本地状态。指定实例目录时用 `regular --directory /path/to/instance setup`，数据和配置都保存在该实例下。前台运行用 Ctrl+C 停止，同一实例只启动一份。
+遇到问题运行 `regular --directory regular-bot doctor`；另一个终端用 `regular --directory regular-bot status` 查看连接与预算。两者默认只读本地状态。数据和配置均保存在所选实例目录下。前台运行用 Ctrl+C 停止，同一实例只启动一份。
 
 <details>
 <summary>可选：脚本部署与诊断</summary>
+
+以下命令省略 `--directory` 时，请先进入实例目录。
 
 无需问答时，`regular init` 生成空凭据模板，填好后执行 `regular doctor`。`init` 永不覆盖已有文件；补配用 `regular setup`。真实环境变量优先于 `.env`，包括显式设为空的变量。
 
@@ -119,33 +153,45 @@ regular run
 <details>
 <summary>可选：后台常驻与 Docker</summary>
 
-macOS 的脚本默认只生成本机路径的 plist，不启动服务、不杀进程、不改变休眠策略，也不注入代理：
+安装包内已包含服务配置生成器；它使用当前工具环境的 Python 和你指定的实例路径，不安装或启动服务。
+
+macOS：先生成并查看 plist，再自行加载：
 
 ```bash
-bash tools/launchd/install.sh          # 生成 data/io.github.the-regular.plist，先检查
-bash tools/launchd/install.sh install  # 明确安装；仍未启动
-bash tools/launchd/install.sh start    # 明确启动，先停止手动运行的实例
-bash tools/launchd/install.sh status
-# bash tools/launchd/install.sh stop
+regular --directory regular-bot service launchd --output regular-bot/data/io.github.the-regular.plist
+mkdir -p ~/Library/LaunchAgents
+cp regular-bot/data/io.github.the-regular.plist ~/Library/LaunchAgents/
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/io.github.the-regular.plist
 ```
 
-脚本默认使用项目 `.venv/bin/python`，其他环境通过 `REGULAR_PYTHON=/absolute/venv/bin/python` 指定。代理如有需要写在自己的 `.env`，服务也从同一目录读取。
-
-Linux 使用 [systemd 用户服务生成步骤](tools/systemd/README.md)。Docker 是单容器部署，先在宿主机生成并填写 `.env`：
+Linux：生成用户服务后加载：
 
 ```bash
+regular --directory regular-bot service systemd --output regular-bot/data/the-regular.service
+mkdir -p ~/.config/systemd/user
+cp regular-bot/data/the-regular.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now the-regular
+```
+
+先停止同一实例的前台进程，再启动后台服务。代理等设置放在实例自己的 `.env` 中。
+
+Docker 和源码辅助脚本随[源码包](https://github.com/dubianche123/the-regular-qq-bot/releases/tag/v0.2.0)提供；Docker 步骤在解压后的源码目录执行：
+
+```bash
+regular init
+# 填写当前目录的 .env
 docker compose build
 docker compose run --rm regular regular doctor
 docker compose up -d
-docker compose exec regular regular status
 docker compose logs -f
 ```
 
-状态、日志、归档与摘要存于 `regular-data` 命名卷，容器以非 root 用户运行；重建容器保留数据。`docker compose down -v` 会删除该卷，请自行备份。QQ 采用出站连接，无需暴露 Web 端口。
+容器的配置来自源码目录 `.env`，数据存于 `regular-data` 命名卷。`docker compose down -v` 会删除该卷。
 
 ### 数据目录
 
-运行数据默认集中在部署目录的 `data/`，包括状态、主人身份、日志、消息底稿和摘要。可用 `DATA_DIR` 指定其他位置；相对路径均从部署目录解析。停止实例后备份数据目录与 `.env` 即可保留配置和运行记录。版本变化见 [CHANGELOG](CHANGELOG.md)。
+每个实例的 `.env` 位于实例根目录，状态、主人身份、日志、消息底稿和摘要默认放在该实例的 `data/` 下。可用 `DATA_DIR` 自定数据位置；相对路径从实例目录解析。停止实例后备份 `.env` 和数据目录即可。QQ 使用出站连接，无需暴露 Web 端口。
 
 </details>
 

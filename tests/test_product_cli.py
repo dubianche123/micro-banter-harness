@@ -342,6 +342,56 @@ class KeyFileTest(unittest.TestCase):
 
 
 class ServiceTest(unittest.TestCase):
+    def test_cli_delegates_service_generation_before_loading_configuration(self):
+        for kind in ("launchd", "systemd"):
+            with self.subTest(kind=kind), patch("regular.cli.load_config") as config, \
+                 patch("regular.service.main", return_value=0) as generate:
+                self.assertEqual(cli.main(["--directory", "/tmp/instance with spaces", "service", kind,
+                                           "--output", "/tmp/generated definition"]), 0)
+                generate.assert_called_once_with([kind, "--directory", "/tmp/instance with spaces",
+                                                   "--output", "/tmp/generated definition"])
+                config.assert_not_called()
+
+    def test_cli_generates_services_with_current_python_without_credentials_or_runtime(self):
+        with tempfile.TemporaryDirectory(prefix="regular service ") as directory:
+            instance = Path(directory) / "instance with spaces"
+            launchd = Path(directory) / "generated services" / "regular.plist"
+            systemd = launchd.with_suffix(".service")
+            code = """import socket, sys
+from regular.cli import main
+
+def forbidden(*args, **kwargs):
+    raise AssertionError('service generation must stay offline')
+socket.socket.connect = forbidden
+socket.socket.connect_ex = forbidden
+for kind, output in OUTPUTS:
+    assert main(['--directory', INSTANCE, 'service', kind, '--output', output]) == 0
+assert not any(name in sys.modules for name in ('config', 'bot', 'runtime', 'providers', 'botpy', 'httpx'))
+""".replace("OUTPUTS", repr([("launchd", str(launchd)), ("systemd", str(systemd))])).replace("INSTANCE", repr(str(instance)))
+            result = subprocess.run([sys.executable, "-c", code], cwd=ROOT,
+                                    env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(ROOT)},
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = plistlib.loads(launchd.read_bytes())
+            self.assertEqual(data["ProgramArguments"], [sys.executable, "-m", "regular", "--directory",
+                                                       str(instance.resolve()), "run"])
+            self.assertEqual(data["WorkingDirectory"], str(instance.resolve()))
+            text = systemd.read_text()
+            self.assertIn(f'ExecStart=:"{sys.executable}" "-m" "regular" "--directory" "{instance.resolve()}" "run"', text)
+            self.assertIn(f'WorkingDirectory="{instance.resolve()}"', text)
+            self.assertEqual(result.stdout.count("not installed or started"), 2)
+            self.assertFalse((instance / ".env").exists())
+
+    def test_cli_service_requires_output_before_configuration_or_generation(self):
+        with patch("regular.cli.load_config") as config, patch("regular.service.main") as generate, \
+             contextlib.redirect_stderr(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as raised:
+                cli.main(["service", "launchd"])
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn("--output", output.getvalue())
+            config.assert_not_called()
+            generate.assert_not_called()
+
     def test_plist_roundtrip_arbitrary_directory_and_venv(self):
         directory = '/tmp/a user/Code & <friends> "好"'
         python = '/tmp/a user/.venv/bin/python'
