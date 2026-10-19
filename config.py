@@ -115,6 +115,11 @@ PROVIDER_PRESETS = {
         # glm-4.5 系列默认先「思考」再作答（答案之外还有个 reasoning_content）。群聊秒回必须关掉，
         # 否则既慢（实测 3.1s vs 0.5s），又容易因思考 token 占满 max_tokens 导致最终答案 content 为空。
         "extra_body": {"thinking": {"type": "disabled"}},
+        # 采样温度（2026-10-19）：全局 0.9（角色需要），但智谱 5 天里三次采样乱码
+        # （<CMD! 残片 / 0A9F%F5 / 贷款Dai款+哥)人），全是 token 噪声——高温是温床。
+        # 单独降到 0.7：角色感的来源主要是提示词和长度闸，不靠这么高的采样野性。
+        # 观察点：🧯 乱码频率。若依旧，下一档是把答题座换回 Gemini。
+        "temperature": 0.7,
     },
     "gemini": {
         "label": "Google Gemini",

@@ -414,7 +414,11 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
                         messages=messages,
                         max_tokens=max_tokens,
                         # 显式用 is None 判断，不能写 `temperature or ...` —— 0.0 是合法取值却被当成缺省
-                        temperature=config.AI_TEMPERATURE if temperature is None else temperature,
+                        # 采样温度（2026-10-19）：preset 可以按家自带（智谱三次采样乱码后
+                        # 降到 0.7——0.9 的野采样是乱码温床）；没配就用全局 AI_TEMPERATURE。
+                        temperature=(preset.get("temperature")
+                                     if preset.get("temperature") is not None
+                                     else config.AI_TEMPERATURE) if temperature is None else temperature,
                         extra_body=extra_body,
                     ),
                     timeout=timeout_for_this,
