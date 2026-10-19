@@ -14,7 +14,7 @@
 
 </div>
 
-The Regular lives in a QQ group as a recurring character: usually quiet, occasionally opinionated, and increasingly familiar with the people around it. It has nicknames, relationship tiers, personality modes, a rolling group chronicle and a promise ledger.
+The Regular lives in a QQ group as a recurring character: usually quiet, occasionally opinionated, and increasingly familiar with the people around it. It has nicknames, relationship tiers, interaction modes, a daily rhythm and mood, a rolling group chronicle and a promise ledger.
 
 Under that social surface is a small agent harness: **code holds durable state, an activation policy decides when to speak, and models generate language inside a deliberately ordered context**. Local commands and configured provider fallbacks keep every interaction from depending on one large model call.
 
@@ -22,8 +22,10 @@ Under that social surface is a small agent harness: **code holds durable state, 
 
 | Interaction | What is implemented |
 | --- | --- |
-| A familiar voice | Eight relationship tiers influence tone and activation; code applies scores, decay and limits. |
-| A character that can stay quiet | Mention/name triggers, probability, cooldown, quiet hours and activation state control replies. |
+| A familiar voice | Eight relationship tiers influence tone and activation; code applies scores, nonlinear growth, decay and limits. |
+| A different way of getting along with each person | The digest proposes an interaction mode (banter/confidant/defender/hype) from real interactions; a hard whitelist validates it into the archive. |
+| A character that can stay quiet | Mention/name triggers, probability, cooldown, quiet hours, mood and affinity control replies. |
+| Understand the images people send | Images go through a free multimodal read once; a one-line caption is cached in the background forever. |
 | Local games and lookups | Dice, relationship queries, rankings and ledger lookup have local handlers. |
 | Rename a group member | Per-group identity, owner permissions, name checks and rename cooldowns. |
 | Change the atmosphere | Shared personality modes; eligibility is resolved from local state. |
@@ -134,6 +136,7 @@ After launching, the owner sends `OWNER_CLAIM_PHRASE` in a **private DM to the b
 | :--- | :--- | :---: |
 | **Chat** | `@bot` or say its name directly (e.g. `Buddy what's good`) | 1 call |
 | **Random Banter** | Talk normally in the group; it chimes in based on probability | 1 call |
+| **Send an image** | `@bot` with a picture (it reads it once and remembers) | 1 call + one free vision call |
 | **Cyber Duel** | `roll dice` / `duel` / `掷骰子` / `比大小` | **0** |
 | **Claim / Rename** | `call me Alex` / `叫我阿强` / `别叫我了` | 0~1 call |
 | **Switch Mode** | `catgirl mode` / `crazy mode` / `discipline mode` / `fortune mode` | **0** |
