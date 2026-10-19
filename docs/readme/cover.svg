@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="430" viewBox="0 0 1280 430" role="img" aria-labelledby="t d">
+<title id="t">The Regular</title><desc id="d">Local state. A familiar voice.</desc>
+<rect width="1280" height="430" rx="22" fill="#30251D"/>
+<path d="M1030 0 1280 250M1155 0l125 125" stroke="#FFFFFF" stroke-opacity=".035" stroke-width="65"/>
+<g font-family="Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+<text x="48" y="48" font-size="13" fill="#E6B66B" font-weight="650" text-anchor="start">A RESIDENT QQ GROUP COMPANION</text>
+<text x="48" y="122" font-size="48" fill="#F5F8FF" font-weight="700" text-anchor="start">The Regular</text>
+<text x="50" y="164" font-size="21" fill="#C1CFDF" font-weight="400" text-anchor="start">Local state. A familiar voice.</text>
+<rect x="48" y="210" width="352" height="122" rx="14" fill="#FFFFFF" fill-opacity=".055" stroke="#FFFFFF" stroke-opacity=".14"/>
+<text x="68" y="244" font-size="13" fill="#E6B66B" font-weight="650" text-anchor="start">01 / LISTEN</text>
+<text x="68" y="291" font-size="17" fill="#EDF3FA" font-weight="500" text-anchor="start">Group events + activation gates</text>
+<path d="M413 271h25m-7-5 7 5-7 5" fill="none" stroke="#9DAFC4" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="456" y="210" width="352" height="122" rx="14" fill="#FFFFFF" fill-opacity=".055" stroke="#FFFFFF" stroke-opacity=".14"/>
+<text x="476" y="244" font-size="13" fill="#E6B66B" font-weight="650" text-anchor="start">02 / REMEMBER</text>
+<text x="476" y="291" font-size="17" fill="#EDF3FA" font-weight="500" text-anchor="start">Affinity, names + local ledger</text>
+<path d="M821 271h25m-7-5 7 5-7 5" fill="none" stroke="#9DAFC4" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="864" y="210" width="352" height="122" rx="14" fill="#FFFFFF" fill-opacity=".055" stroke="#FFFFFF" stroke-opacity=".14"/>
+<text x="884" y="244" font-size="13" fill="#E6B66B" font-weight="650" text-anchor="start">03 / REPLY</text>
+<text x="884" y="291" font-size="17" fill="#EDF3FA" font-weight="500" text-anchor="start">Local commands or model replies</text>
+<path d="M48 369h1184" stroke="#FFFFFF" stroke-opacity=".14"/>
+<text x="50" y="400" font-size="14" fill="#AFC0D4" font-weight="400" text-anchor="start">QQ bot · Code-owned social state · Configurable model providers</text>
+</g></svg>

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="t d"><title id="t">The Regular · How it works</title><desc id="d">Conversation overview. Local commands have their own routing; a model call is not required for every reply.</desc>
+<rect x="1" y="1" width="1198" height="298" rx="18" fill="#FAFCFF" stroke="#DCE5F0"/>
+<g font-family="Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif">
+<text x="36" y="42" font-size="24" fill="#253B55" font-weight="650" text-anchor="start">The Regular · How it works</text>
+<rect x="36" y="97" width="206.4" height="100" rx="12" fill="#ECF3FE" stroke="#95B3DD"/>
+<text x="52.0" y="132" font-size="19" fill="#253B55" font-weight="650" text-anchor="start">QQ events</text>
+<text x="52.0" y="163" font-size="13" fill="#60748C" font-weight="400" text-anchor="start">Group + private chat</text>
+<path d="M242.4 147H266.4m-6-4 6 4-6 4" stroke="#7186A3" stroke-width="1.6" fill="none" stroke-linejoin="round"/>
+<rect x="266.4" y="97" width="206.4" height="100" rx="12" fill="#E9F5F0" stroke="#88B7A3"/>
+<text x="282.4" y="132" font-size="19" fill="#253B55" font-weight="650" text-anchor="start">Local state</text>
+<text x="282.4" y="163" font-size="13" fill="#60748C" font-weight="400" text-anchor="start">Names, affinity, ledger</text>
+<path d="M472.8 147H496.8m-6-4 6 4-6 4" stroke="#7186A3" stroke-width="1.6" fill="none" stroke-linejoin="round"/>
+<rect x="496.8" y="97" width="206.4" height="100" rx="12" fill="#ECF3FE" stroke="#95B3DD"/>
+<text x="512.8" y="132" font-size="19" fill="#253B55" font-weight="650" text-anchor="start">Activation</text>
+<text x="512.8" y="163" font-size="13" fill="#60748C" font-weight="400" text-anchor="start">Reply / remain quiet</text>
+<path d="M703.2 147H727.2m-6-4 6 4-6 4" stroke="#7186A3" stroke-width="1.6" fill="none" stroke-linejoin="round"/>
+<rect x="727.2" y="97" width="206.4" height="100" rx="12" fill="#E9F5F0" stroke="#88B7A3"/>
+<text x="743.2" y="132" font-size="19" fill="#253B55" font-weight="650" text-anchor="start">Response path</text>
+<text x="743.2" y="163" font-size="13" fill="#60748C" font-weight="400" text-anchor="start">Local command / LLM</text>
+<path d="M933.6 147H957.6m-6-4 6 4-6 4" stroke="#7186A3" stroke-width="1.6" fill="none" stroke-linejoin="round"/>
+<rect x="957.6" y="97" width="206.4" height="100" rx="12" fill="#ECF3FE" stroke="#95B3DD"/>
+<text x="973.6" y="132" font-size="19" fill="#253B55" font-weight="650" text-anchor="start">Delivery</text>
+<text x="973.6" y="163" font-size="13" fill="#60748C" font-weight="400" text-anchor="start">Check + send + log</text>
+<text x="36" y="258" font-size="13" fill="#60748C" font-weight="400" text-anchor="start">Conversation overview. Local commands have their own routing; a model call is not required for every reply.</text>
+</g></svg>

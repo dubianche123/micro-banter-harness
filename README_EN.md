@@ -1,6 +1,18 @@
-# The Regular 🍺
+<div align="center">
 
-**English** · [中文](README.md)
+<img src="docs/readme/cover.svg" alt="The Regular project overview" width="100%" />
+
+# The Regular
+
+**Code keeps the social state. The model finds the words.**
+
+[![License](https://img.shields.io/badge/License-MIT-3A9F82)](LICENSE)
+
+[中文](README.md) · **English**
+
+[Quick start](#-quick-start-in-5-minutes) · [Commands](#-cheatsheet-commands--interactions) · [Design notes](docs/DESIGN_NOTES_EN.md)
+
+</div>
 
 > **A resident AI buddy living in your group chat — not a robotic assistant.**
 
@@ -10,6 +22,12 @@ It does not race to answer, does not act like a corporate bot, and certainly nev
 
 ---
 
+## From an event to a reply
+
+![How it works](docs/readme/flow.svg)
+
+QQ events enter local state and message routing. Local commands can complete without a model call; generated replies use the configured provider path. Affinity, names and the ledger are maintained by code, while the model supplies language.
+
 ## ✨ Why It's Fun
 
 ### 🎭 1. Hangs Out Like a Real Group Member
@@ -18,7 +36,7 @@ It does not race to answer, does not act like a corporate bot, and certainly nev
 * **Knows When to Chill**: If someone says "stop roasting me" or "chill out", it immediately dials back. No relentless arguing.
 
 ### 💖 2. 8-Tier Affinity & Bond System
-Affinity is an integer score (-100 to +100) managed entirely by local code. The model never touches the numbers, so it **can never hallucinate past interactions that never happened**:
+Affinity is an integer score (-100 to +100), calculated, classified, and persisted by local code. Generated replies do not directly rewrite these scores:
 * `💀 Blacklist` $\to$ `❄️ Cold` $\to$ `😐 Distant` $\to$ `👀 Familiar`
 * `🙂 Acquaintance` $\to$ `😎 Friend` $\to$ `🍻 Buddy` $\to$ `💖 Soulmate`
 
@@ -33,11 +51,11 @@ A shared group state switchable with a single command (only close friends and th
 * 🏎️ **Night Driver Mode**: Easygoing veteran highway cruiser.
 
 ### 🧾 4. Group Chronicles & Promise Nagging
-* **Rolling Group Memory**: Automatically compresses chat logs daily into a hilarious 《Group Chronicles》 digest. It injects a stable roster of members rather than raw gossip transcripts, completely eliminating stale catchphrase loops.
+* **Rolling Group Memory**: Automatically compresses chat logs daily into a hilarious 《Group Chronicles》 digest. It injects a stable member roster to reduce stale catchphrase loops.
 * **Promise Ledger**: Did someone brag about "treating everyone to drinks tomorrow"? It logs the promise into its ledger and periodically nags them in the group until they say "settled".
 
 ### 🎲 5. 0-Token Instant Local Easter Eggs
-Most casual interactions **never hit the LLM, cost 0 tokens, and respond in 0 milliseconds**:
+Local commands and preset interactions **can respond without a model request**:
 * **Cyber Duel**: Roll dice against each other — winning or losing actually shifts your affinity score!
 * **Local In-Jokes**: Triggers preset memes instantly on keyword matches.
 * **Status Lookups**: Check affinity level, view relationship leaderboard, inspect name aliases, or search raw quote archives.
@@ -46,15 +64,15 @@ Most casual interactions **never hit the LLM, cost 0 tokens, and respond in 0 mi
 
 ## 🛠️ Secret Sauce Under the Hood
 
-Running 24/7 in an active chat group without crashing, getting rate-limited, or getting banned requires serious defensive engineering:
+Persistent operation relies on state management, usage limits, output checks and gateway reconnection. Availability still depends on the runtime and providers:
 
 | Mechanism | Implementation | Benefit |
 | :--- | :--- | :--- |
-| **Code-Held State** | Affinity, nicknames, and promise ledgers live in code/JSON | Models can't hallucinate numbers; renamed old names are purged before prompt injection |
-| **98% Cache Hit Rate** | Physical prompt ordering (Static rules $\to$ Daily memory $\to$ History $\to$ Turn context) | Maximize LLM prefix caching; runs in active groups for pennies a month |
-| **Task-Tier Routing** | Chat uses strong models, compression uses weak models, safety uses strict models | Compression bypasses strict content filters; seamless Gemini/GLM failover based on cache TTL |
+| **Code-Held State** | Affinity, nicknames, and promise ledgers live in code/JSON | Affinity scores and current names are maintained locally; state calculation is separate from language generation |
+| **Layered Prompt Cache** | Physical prompt ordering (Static rules $\to$ Daily memory $\to$ History $\to$ Turn context) | Cache hits and cost depend on the provider; measured probes are recorded in the design notes |
+| **Task-Tier Routing** | Chat uses strong models, compression uses weak models, safety uses strict models | Separate task configurations and Gemini/GLM fallback paths; behavior depends on provider availability |
 | **Anti-Griefing Armor** | Dual-tier word filter + model judge + rename rate-limiter | Resists malicious naming attacks; group owner claimed via private secret phrase |
-| **24/7 Gateway Watchdog** | Monkey-patches WS downlinks to kick stale silent connections | Solves upstream bot SDK silent freezing bugs during network hiccups |
+| **24/7 Gateway Watchdog** | Monkey-patches WS downlinks to kick stale silent connections | Detects stale connections and attempts reconnection after network interruptions |
 
 > 💡 *Interested in the deep architecture, benchmark probes, and 474 offline regression tests? Check out [Architecture & Design Notes](docs/DESIGN_NOTES_EN.md).*
 
