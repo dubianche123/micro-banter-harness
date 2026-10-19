@@ -1622,7 +1622,7 @@ class GroupBot(botpy.Client):
                            "私聊认主通道已关闭，只能把 OpenID 手动写进 %s", config.OWNER_FILE)
         logger.info("📡 全量群消息监听与智能上下文缓存池已就绪！")
         logger.info("🤖 供应商=%s 主模型=%s | 今日额度已用 %d/%d",
-                    config.PROVIDER["label"], CANDIDATE_MODELS[0], runtime.BUDGET.used, runtime.BUDGET.limit)
+                    config.PROVIDER["label"], config.CANDIDATE_MODELS[0], runtime.BUDGET.used, runtime.BUDGET.limit)
         logger.info("💾 状态=%s | 会话 %s | 关系档案 %s",
                     config.STATE_FILE, runtime.SESSIONS.stats(), runtime.RELATIONS.counts())
         arch = runtime.ARCHIVE.stats()

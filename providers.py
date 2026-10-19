@@ -344,12 +344,14 @@ async def describe_image(image_url):
         if u is None:
             # URL 通路失败过一次：本地下载转 base64 再试（QQ 图床本机直连可达）
             try:
-                async with httpx.AsyncClient(timeout=8.0) as hc:
-                    resp = await hc.get(image_url)
+                async with httpx.AsyncClient(timeout=12.0) as hc:
+                    resp = await hc.get(image_url,
+                                        headers={"user-agent": "Mozilla/5.0"})
                 data_url = ("data:image/jpeg;base64,"
                             + base64.b64encode(resp.content).decode())
             except Exception as e:
-                logger.warning("🖼 图片下载失败: %s", str(e)[:100])
+                # str(e) 可能是空串（实测），带上异常类型才诊断得动
+                logger.warning("🖼 图片下载失败: %s", f"{type(e).__name__}: {e}"[:100])
                 return None
         else:
             data_url = u
@@ -363,10 +365,17 @@ async def describe_image(image_url):
                 return text[:80]
             return None
         except Exception as e:
+            msg = str(e)
             if attempt == 0:
-                logger.info("🖼 直连读图失败（转 base64 重试）: %s", str(e)[:100])
+                if "1301" in msg or "contentFilter" in msg:
+                    # 平台级内容审查（2026-10-19 实测：敏感梗图被拒读）。
+                    # 审查针对图片内容本身，转 base64 重提交照样拦，别白下载一次。
+                    logger.warning("🖼 内容审查拦截（智谱拒读敏感图，跳过重试）: %s",
+                                   msg[:120])
+                    return None
+                logger.info("🖼 直连读图失败（转 base64 重试）: %s", msg[:100])
                 continue
-            logger.warning("🖼 读图失败: %s", str(e)[:120])
+            logger.warning("🖼 读图失败: %s", msg[:120])
             return None
     return None
 
