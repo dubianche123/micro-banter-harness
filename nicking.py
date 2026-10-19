@@ -15,7 +15,7 @@ logger = logging.getLogger("qqbot")   # 与 bot.py 同一个命名 logger，共�
 
 import runtime
 
-from runtime import owner_label, hits, _all_named
+from runtime import owner_label
 
 # ⚠️ 句点**不在**断点里：「A.A」「L.L」这种是真名号，切了就只剩一个字、
 # 还会被「单字不记」挡掉。代价是「@老王.你好」会连着吃进去，中文群里极少见。
@@ -174,7 +174,7 @@ def refresh_names(group_id, text):
     )
 
 
-def _sync_rename(group_id, old, new):
+def _sync_rename(group_id, old, new, member_id=None):
     """改名之后，把所有「还留着旧名字」的地方一并改掉，返回是否动过。
 
     只改档案是不够的，这是今天踩出来的教训：
@@ -194,7 +194,8 @@ def _sync_rename(group_id, old, new):
     n1 = runtime.SESSIONS.rename_user(group_id, old, new)
     n2 = runtime.DIGESTS.rename_in_memory(group_id, old, new)
     n3 = runtime.ARCHIVE.rename_in_memory_files(group_id, old, new)
-    if n1 or n2 or n3:
+    n4 = runtime.PROMISES.rename_member(group_id, member_id, new, old=old)
+    if n1 or n2 or n3 or n4:
         runtime.STATE.mark_dirty()
         logger.info("🔁 改名同步（%s → %s）：会话 %d 条 / 长期记忆 %d 处 / 每日 MD %d 个",
                     old, new, n1, n2, n3)
@@ -220,7 +221,8 @@ def _sync_clear(group_id, openid, old):
     n1 = runtime.SESSIONS.rename_user(group_id, old, label)
     n2 = runtime.DIGESTS.rename_in_memory(group_id, old, label)
     n3 = runtime.ARCHIVE.rename_in_memory_files(group_id, old, label)
-    if n1 or n2 or n3:
+    n4 = runtime.PROMISES.rename_member(group_id, openid, label, old=old)
+    if n1 or n2 or n3 or n4:
         runtime.STATE.mark_dirty()
         logger.info("🧽 撤销称呼同步（%s）：会话 %d 条 / 长期记忆 %d 处 / 每日 MD %d 个",
                     old, n1, n2, n3)
@@ -307,3 +309,22 @@ def _nick_note_reject(group_id, now=None):
 def _nick_note_accept(group_id, subject, now=None):
     """改名落地了就记时间，个人层的间隔从这一刻开始算。"""
     _nick_done[(group_id, subject)] = time.time() if now is None else now
+
+
+# Public domain facade; aliases keep one implementation while older callers
+# migrate away from importing this module's private helpers.
+strip_call = _strip_call
+sync_rename = _sync_rename
+sync_clear = _sync_clear
+reserved_nick_names = _reserved_nick_names
+taken_nick_names = _taken_nick_names
+nick_block_reason = _nick_block_reason
+nick_note_reject = _nick_note_reject
+nick_note_accept = _nick_note_accept
+
+
+def nick_flood_status(group_id, subject=None):
+    """A read-only snapshot for diagnostics/tests, not mutable module globals."""
+    return {"rejects": list(_nick_rejects.get(group_id, [])),
+            "cooldown_until": _nick_cool.get(group_id),
+            "last_rename": _nick_done.get((group_id, subject))}

@@ -6,7 +6,7 @@
 
 **把关系和记忆留在代码里，让模型负责接话。**
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-5375B5)](requirements.txt) [![QQ](https://img.shields.io/badge/QQ-Group%20%2B%20C2C-B48543)](bot.py) [![License](https://img.shields.io/badge/License-MIT-3A9F82)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-5375B5)](requirements.txt) [![Offline checks](https://github.com/dubianche123/micro-banter-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/dubianche123/micro-banter-harness/actions/workflows/ci.yml) [![QQ](https://img.shields.io/badge/QQ-Group%20%2B%20C2C-B48543)](bot.py) [![License](https://img.shields.io/badge/License-MIT-3A9F82)](LICENSE)
 
 **中文** · [English](README_EN.md)
 
@@ -25,7 +25,7 @@
 | 越熟越有自己的语气 | 八档关系影响语气和激活；算分、非线性增长、衰减与上限由代码执行。 |
 | 跟不同的人有不同的相处方式 | 压缩按真实互动提议相处模式（损友/知心/护短/捧场），白名单硬校验后写入档案。 |
 | 知道什么时候安静 | 提及/名字触发、概率、冷却、作息、心情与亲密度共同控制回复。 |
-| 看懂群友发的图 | 图片走免费多模态读一次，一句话描述存进背景缓存，永不重读。 |
+| 看懂群友发的图 | 图片由配置的视觉模型描述，按消息标识复用，受预算与独立额度控制。 |
 | 本地小游戏与查档 | 骰子、好感查询、排行榜和账本查询有本地处理器。 |
 | 认领或修改称呼 | 按群隔离身份，结合群主权限、名字检查和修改冷却。 |
 | 切换全群气氛 | 公共人格模式，切换资格由本地状态决定。 |
@@ -63,70 +63,90 @@
 
 ## 快速开始
 
-### 1. 克隆与安装依赖
+### 1. 安装并先玩一下
 
-需要 Python 3.10+。项目极其轻量，**无数据库、无繁杂框架**，仅 5 个必要依赖：
+需要 Python 3.10+，推荐 Python 3.12。无需数据库；采用现有运行时和标准 Python 工具。
 
 ```bash
 git clone https://github.com/dubianche123/micro-banter-harness.git
 cd micro-banter-harness
-
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
+regular demo
+# 或一次体验几个指令：
+regular demo 查好感 掷骰子 群史记
 ```
 
-### 2. 配置 `.env`
+交互演示可用 `/user NAME` 切换群友、`/group ID` 切换群，`/help` 查看帮助。
 
-复制配置模板：
+演示使用正式消息处理入口、隔离的临时档案与固定假模型；不连接 QQ，不调用真实模型，退出即清理。它能体验本地指令和关系处理，不代表模型回复质量或 QQ 权限已经验证。
+
+### 2. 初始化配置并体检
 
 ```bash
-cp .env.example .env
+regular init --interactive
+regular doctor
 ```
 
-打开 `.env` 填入最核心的几项：
+向导对 AppSecret、API Key、认主口令使用隐藏输入，只创建权限为 `0600` 的 `.env`，不会覆盖已有文件。非交互安装可用 `regular init` 生成空凭据配置，再手工编辑；完整选项见 [.env.example](.env.example)。环境变量优先于 `.env`。
 
-```env
-# 1. 腾讯 QQ 开放平台凭证
-QQ_APP_ID=你的AppID
-QQ_APP_SECRET=你的AppSecret
+必填 QQ `QQ_APP_ID` / `QQ_APP_SECRET`。所有入口默认通用 `AI_PROVIDER=openai`，明确填写 `OPENAI_BASE_URL`、`OPENAI_API_KEY`、`OPENAI_MODELS`；智谱和 Gemini 仍可作为便捷预设。`BOT_NAMES` 填群里真正使用的叫法，例如 `BOT_NAMES=小王,阿王`。`FALLBACK_PROVIDER` 留空关闭跨端点回退。
 
-# 2. 它在群里叫什么（触发词，支持多个别名，逗号分隔）
-BOT_NAMES=小王,阿王,@小王
+供应商只使用一套通用有限回退：显式候选、默认最多 3 次尝试、单次 20 秒/总计 30 秒；所有真实尝试计入同一日预算。根据 SDK 异常与 HTTP 状态处理，不根据厂商文案、缓存时长或慢模型特例决定路由。模型任务链、视觉能力与旧配置迁移见[供应商配置](docs/providers.md)。
 
-# 3. 群主私聊认领暗号（部署前改成只有你知道的一句密语）
-OWNER_CLAIM_PHRASE=换成仅你知道的私密口令
+默认关闭私聊认主。若需要群主功能，将 `OWNER_CLAIM_PHRASE` 配为只有你知道的口令，再在 C2C 私聊中发送该口令；不要在群里发送。已有 `owner.txt` 继续生效。TLS 校验默认开启。
 
-# 4. 主 AI 供应商（gemini 或 zhipu）及密钥
-AI_PROVIDER=gemini
-GEMINI_API_KEY=你的GeminiKey
-# ZHIPU_API_KEY=备用的智谱Key（可选）
-```
+`regular doctor` 默认仅检查本地凭据是否存在、依赖、有效路径、状态文件和能力配置，不推理、不联网。`regular doctor --network` 明确允许一次供应商 `/models` 元数据检查；元数据成功不等于所选模型有额度。`--json` 便于附上诊断，输出不包含凭据；分享前仍请检查本机路径和机器人别名。
 
-### 3. QQ 开放平台与群内开关（关键两步）
+### 3. QQ 平台设置并启动
 
-1. **获取全量群消息**：进入你的 QQ 群设置 $\to$ 点击该机器人 $\to$ 将「机器人可获取的群聊消息范围」设为 **「获取群内全部消息」**（这是它能潜水看懂上下文的前提）。
-2. **开启私聊（C2C）权限**：开放平台开启单聊权限，用于安全的群主认领与单聊。
-
-### 4. 启动与常驻
+1. QQ 开放平台配置应用、沙箱成员及 C2C 权限。
+2. 群设置 → 该机器人 →「机器人可获取的群聊消息范围」→ **获取群内全部消息**。
+3. 本地检查无法确认上述开关，需上线后发送实际消息验证。
 
 ```bash
-# 直接前台运行
-python bot.py
-
-# 或后台挂载（走代理环境）：
-HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 \
-NO_PROXY=bigmodel.cn,open.bigmodel.cn nohup python -u bot.py >> bot.log 2>&1 &
+regular run
+# 另一个终端观察结构化状态（网关、预算、供应商和后台任务）：
+regular status
+regular status --json
 ```
 
-> 🍏 **macOS 用户福利**：自带一键安装常驻守护脚本（防休眠 + 挂掉秒起）：
-> ```bash
-> bash tools/launchd/install.sh
-> ```
+指定其他部署目录可用 `regular --directory /path/to/instance doctor`，其 `.env` 与数据均从该目录解析。旧的 `python bot.py` 入口保留。停止前台进程用 Ctrl+C；不要同时运行两个实例。
 
-### 5. 私聊认领群主
+### 4. 选择常驻方式
 
-机器人启动后，**群主私聊给机器人发送你的暗号**（即 `OWNER_CLAIM_PHRASE`），机器人验证通过后，将永久绑定你的 OpenID 并把好感度锁在顶格，落锁授权。
+macOS 的脚本默认只生成本机路径的 plist，不启动服务、不杀进程、不改变休眠策略，也不注入代理：
+
+```bash
+bash tools/launchd/install.sh          # 生成 data/io.github.the-regular.plist，先检查
+bash tools/launchd/install.sh install  # 明确安装；仍未启动
+bash tools/launchd/install.sh start    # 明确启动，先停止手动运行的实例
+bash tools/launchd/install.sh status
+# bash tools/launchd/install.sh stop
+```
+
+脚本默认使用项目 `.venv/bin/python`，其他环境通过 `REGULAR_PYTHON=/absolute/venv/bin/python` 指定。代理如有需要写在自己的 `.env`，服务也从同一目录读取。
+
+Linux 使用 [systemd 用户服务生成步骤](tools/systemd/README.md)。Docker 是单容器部署，先在宿主机生成并填写 `.env`：
+
+```bash
+docker compose build
+docker compose run --rm regular regular doctor
+docker compose up -d
+docker compose exec regular regular status
+docker compose logs -f
+```
+
+状态、日志、归档与摘要存于 `regular-data` 命名卷，容器以非 root 用户运行；重建容器保留数据。`docker compose down -v` 会删除该卷，请自行备份。QQ 采用出站连接，无需暴露 Web 端口。
+
+### 升级与数据兼容
+
+新部署默认将运行数据集中在 `data/`。已有根目录 `state.json`、`owner.txt`、`archive/` 或 `memory/` 时，未配置 `DATA_DIR` 会继续使用原位置，doctor 会提示。代码不会自动移动、合并或删除旧档案。
+
+需要整理旧数据时，先停止实例、备份这四类文件和 `.env`，将文件复制到目标目录，再显式设置 `DATA_DIR` 并体检后重启。已设置的 `STATE_FILE` / `OWNER_FILE` / `ARCHIVE_DIR` / `MEMORY_DIR` / `LOG_FILE` 继续优先，仍相对部署目录解析；迁移时同步检查这些覆盖项。
+
+旧 launchd 的 `com.qqbot.xiaowang` 和 `com.qqbot.keepawake` 不会被新脚本擅自卸载。升级时先手动卸载旧服务，避免重复回复；按自己的需要恢复原有休眠策略。版本变化见 [CHANGELOG](CHANGELOG.md)。
 
 ---
 
@@ -136,7 +156,7 @@ NO_PROXY=bigmodel.cn,open.bigmodel.cn nohup python -u bot.py >> bot.log 2>&1 &
 | :--- | :--- | :---: |
 | **日常聊天** | `@它` 或者直接喊它的名字（如 `小王 今天吃啥`） | 1 次 |
 | **随缘插嘴** | 正常在群里聊天，它会按概率看心情接话 | 1 次 |
-| **发图** | `@它` 带一张图（它读一次就记住） | 1 次 + 1 次免费读图 |
+| **发图** | `@它` 带一张图（它读一次就记住） | 1 次对话 + 最多 1 次读图（按供应商计费） |
 | **赛博决斗** | 发送 `掷骰子` / `摇骰子` / `比大小` / `决斗` | **0** |
 | **认领/改名** | 发送 `叫我阿强` / `我是阿强` / `别叫我了` | 0~1 次 |
 | **切换人格** | 发送 `猫娘模式` / `发疯模式` / `风纪委员模式` / `算命模式` / `老司机模式` | **0** |
@@ -154,10 +174,10 @@ NO_PROXY=bigmodel.cn,open.bigmodel.cn nohup python -u bot.py >> bot.log 2>&1 &
 
 在 `.env` 中可按需调整机器人的脾气与成本闸门：
 
-* `BANTER_PROBABILITY`：潜水插嘴概率（默认 `0.08` 即 8%）
-* `OWNER_MENTION_PROBABILITY`：聊到群主时的插嘴概率（默认 `0.25`）
+* `BANTER_PROBABILITY`：潜水插嘴概率（默认 `0.12` 即 12%）
+* `OWNER_MENTION_PROBABILITY`：聊到群主时的插嘴概率（默认 `0.30`）
 * `BANTER_COOLDOWN_SECONDS`：插嘴冷却时间（默认 `120` 秒）
-* `AI_DAILY_BUDGET`：每天全群 AI 调用上限总预算（默认 `3000` 次，防刷爆钱包）
+* `DAILY_BUDGET`：每天全群 AI 调用上限总预算（默认 `3000` 次，防刷爆钱包）
 * `MODE_SWITCH_MIN_AFFINITY`：模式切换门槛（默认熟人 `familiar` 起步，防路人捣乱）
 
 ---

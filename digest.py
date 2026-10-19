@@ -19,7 +19,7 @@ tokens；更要命的是模型对长文本的「中段遗忘」，一整周的�
 
 「当天新增」从哪来
 ------------------
-不再自己维护待压缩队列，而是直接读 archive.py 里的时间戳大于上次压缩时刻的原文。
+不再自己维护待压缩队列，而是直接读 archive.py 里已提交文件偏移之后的原文。
 单一数据源的好处：压缩失败不会丢消息（下次重读），重启不用管队列持久化，
 state.json 也不必再塞几千条聊天记录。
 """
@@ -29,6 +29,8 @@ import json
 import logging
 import re
 import time
+import uuid
+import unicodedata
 
 logger = logging.getLogger("qqbot")   # 与 bot.py 同一个命名 logger，共享 handler
 
@@ -270,7 +272,7 @@ class GroupDigest:
     """每个群一份「当前摘要 + 上次压缩到哪」。
 
     待压缩的消息不再存在这里 —— 它们住在 archive.py 的 JSONL 里，
-    靠 last_run 这个水位线切分「已压缩 / 待压缩」。
+    cursor 标记已处理的归档前缀；last_run 只用于调度间隔，兼容旧版迁移。
     """
 
     def __init__(self, chunk_chars=DEFAULT_CHUNK_CHARS, max_blocks=DEFAULT_MAX_BLOCKS,
@@ -278,7 +280,7 @@ class GroupDigest:
         self.chunk_chars = chunk_chars
         self.max_blocks = max_blocks
         self.max_entries = max_entries
-        self.groups = {}   # group_id -> {"summary":{...}, "last_run": ts}
+        self.groups = {}   # group_id -> {"summary": {...}, "last_run": ts, "cursor": offsets}
 
     # ── 存取 ──
     def _slot(self, group_id):
@@ -302,12 +304,15 @@ class GroupDigest:
                     "updated": float(summary.get("updated") or 0),
                 }
             slot["last_run"] = float(obj.get("last_run") or 0)
+            if isinstance(obj.get("cursor"), dict):
+                slot["cursor"] = dict(obj["cursor"])
             restored += 1
         return restored
 
     def dump_into(self, data):
         data["digests"] = {
-            gid: {"summary": s["summary"], "last_run": s["last_run"]}
+            gid: {"summary": s["summary"], "last_run": s["last_run"],
+                  "cursor": s.get("cursor")}
             for gid, s in self.groups.items()
         }
 
@@ -318,8 +323,15 @@ class GroupDigest:
     def last_run(self, group_id):
         return self.groups.get(group_id, {}).get("last_run", 0.0)
 
-    def mark_compressed(self, group_id, ts=None):
-        self._slot(group_id)["last_run"] = time.time() if ts is None else ts
+    def cursor(self, group_id):
+        """Archive offsets already committed; None migrates timestamp-only state."""
+        return (self.groups.get(group_id) or {}).get("cursor")
+
+    def mark_compressed(self, group_id, ts=None, cursor=None):
+        slot = self._slot(group_id)
+        slot["last_run"] = time.time() if ts is None else ts
+        if cursor is not None:
+            slot["cursor"] = dict(cursor)
 
     def needs_compress(self, group_id, interval_hours, min_entries, pending_count=None,
                        count_trigger=None):
@@ -402,7 +414,9 @@ class GroupDigest:
         if cur:
             blocks.append(cur)
         if len(blocks) > self.max_blocks:
-            blocks = blocks[-self.max_blocks:]   # 极端活跃时只保最近的，宁可丢旧的也不失控
+            # Work oldest first. The returned source_cursor only commits this
+            # prefix; the rest remains pending in the archive for the next run.
+            blocks = blocks[:self.max_blocks]
         return blocks
 
     def old_summary_text(self, slot, resolver=None, refresh=None):
@@ -456,8 +470,11 @@ async def compress_group(store, group_id, entries, ask, resolver=None, budget=No
         return None
 
     blocks = store.build_blocks({"pending": entries}, resolver)
+    processed = [entry for block in blocks for entry in block]
+    if not processed:
+        return None
     if len(blocks) <= 1:
-        new_text = render_transcript(entries, resolver, max_chars=10 ** 9)
+        new_text = render_transcript(processed, resolver, max_chars=10 ** 9)
     else:
         points = []
         for block in blocks:
@@ -467,8 +484,11 @@ async def compress_group(store, group_id, entries, ask, resolver=None, budget=No
                 return None
             text = render_transcript(block, resolver, max_chars=10 ** 9)
             out = await ask(naming.render(SYSTEM_MAP), text)
-            if out:
-                points.append(out.strip())
+            if not out or not out.strip():
+                if log:
+                    log("⚠️ 分块摘要失败，保留本批原文，下轮重试")
+                return None
+            points.append(out.strip())
         if not points:
             return None
         new_text = "\n".join(points)
@@ -490,14 +510,36 @@ async def compress_group(store, group_id, entries, ask, resolver=None, budget=No
         return None
 
     body, data = split_digest(raw)
-    if not body and not data:
+    # Text alone (including provider refusals) is not a successful state
+    # update. Require at least one known list field, and reject malformed rows
+    # instead of silently normalizing them into an empty memory.
+    fields = {"topics", "memes", "promises", "people", "affinity"}
+    if not isinstance(data, dict) or not fields.intersection(data):
         return None
+    if any(not isinstance(data[key], list)
+           or any(not isinstance(row, dict) for row in data[key])
+           for key in fields.intersection(data)):
+        return None
+
+    required = {"topics": ("topic",), "memes": ("quote",),
+                "promises": ("who", "what"), "people": ("who", "note"),
+                "affinity": ("who",)}
+    for key in fields.intersection(data):
+        for row in data[key]:
+            if any(not isinstance(row.get(name), str) or not row[name].strip()
+                   for name in required[key]):
+                return None
+            if key == "affinity" and (type(row.get("delta")) is not int):
+                return None
 
     summary = {
         "brief": body[:400],
         "data": normalize(data),
         "updated": time.time(),
+        "entry_count": len(processed),
     }
+    if processed[-1].get("_cursor") is not None:
+        summary["source_cursor"] = dict(processed[-1]["_cursor"])
     # 人物名册打时间戳：只有**内容变了**才算刷新，否则沿用旧时间。
     # 不这么比对的话，模型每次把「家豪：号刚解封」原样抄回来，这条标签就永远年轻。
     stamp_people((slot.get("summary") or {}).get("data"), summary["data"],
@@ -603,10 +645,15 @@ SYSTEM_DUN = """你在 QQ 群里扮演「{bot}」，一个爱吐槽、嘴贫但�
 不要解释，不要列清单，就只输出这一句话。"""
 
 
+def _promise_text_key(value):
+    """One Unicode-aware normalization for identity comparisons, not storage IDs."""
+    return "".join(ch for ch in str(value or "").casefold()
+                   if not ch.isspace() and not unicodedata.category(ch).startswith("P"))
+
+
 def _norm_promise_key(who, what):
-    """去重键：去掉空白和标点，避免「请喝奶茶」和「请 喝奶茶」记成两条。"""
-    s = f"{who or ''}|{what or ''}".lower()
-    return re.sub(r"[\s，,。.、!！?？;；:：'\"“”‘’]", "", s)[:80]
+    # Kept as a comparison helper for legacy callers; IDs are immutable UUIDs.
+    return f"{_promise_text_key(who)}|{_promise_text_key(what)}"
 
 
 def parse_due(text, now=None):
@@ -708,9 +755,14 @@ class PromiseBook:
                 if not isinstance(r, dict):
                     continue
                 kept.append({
-                    "id": r.get("id") or _norm_promise_key(r.get("who"), r.get("what")),
+                    "id": r.get("id") or uuid.uuid4().hex,
+                    "member_id": str(r.get("member_id") or ""),
                     "who": r.get("who") or "有人",
                     "what": r.get("what") or "",
+                    # Older versions stored only what[:80]. A format flag
+                    # distinguishes an incomplete old boundary from new text.
+                    "text_complete": bool(r.get("text_complete",
+                                                len(str(r.get("what") or "")) != 80)),
                     "since": float(r.get("since") or time.time()),
                     "due_ts": r.get("due_ts"),
                     "due_text": r.get("due_text") or "",
@@ -733,105 +785,154 @@ class PromiseBook:
                 gid: tombs for gid, tombs in self.finished.items() if tombs
             }
 
-    def _is_finished(self, group_id, who, what):
-        """这事是不是已经催满上限、被撤下过？是的话 sync 不许把它当新承诺复活。"""
-        who_n = str(who or "").strip().lower()
-        what_n = re.sub(r"[\s，,。.、!！?？;；:：'\"“”‘’]", "", str(what or ""))
-        for t in self.finished.get(group_id, []):
-            if str(t.get("who") or "").strip().lower() != who_n:
+    @staticmethod
+    def _same_person(row, who, member_id=""):
+        saved = row.get("member_id") or ""
+        if saved and member_id:
+            return saved == member_id
+        return _promise_text_key(row.get("who")) == _promise_text_key(who)
+
+    def _find(self, rows, who, what, member_id=""):
+        key = _promise_text_key(what)
+        return next((row for row in rows
+                     if self._same_person(row, who, member_id)
+                     and _promise_text_key(row.get("what")) == key), None)
+
+    def _find_legacy_prefix(self, rows, proposals, who, what, member_id=""):
+        """Migrate one uniquely identifiable old what[:80], without fuzzy match.
+
+        Both sides must be unique: several saved candidates or several distinct
+        fresh completions of one prefix are ambiguous and must not share an ID.
+        """
+        if len(what) <= 80:
+            return None
+        candidates = [row for row in rows
+                      if not row.get("text_complete", True)
+                      and len(row.get("what") or "") == 80
+                      and self._same_person(row, who, member_id)
+                      and what.startswith(row["what"])]
+        if len(candidates) != 1:
+            return None
+        candidate = candidates[0]
+        completions = {proposal["what"] for proposal in proposals
+                       if self._same_person(candidate, proposal["who"], proposal["member_id"])
+                       and len(proposal["what"]) > 80
+                       and proposal["what"].startswith(candidate["what"])}
+        return candidate if len(completions) == 1 else None
+
+    def _is_finished(self, group_id, who, what, member_id=""):
+        """A retired promise remains retired after a member changes their name."""
+        what_n = _promise_text_key(what)
+        for tomb in self.finished.get(group_id, []):
+            if not self._same_person(tomb, who, member_id):
                 continue
-            tomb = re.sub(r"[\s，,。.、!！?？;；:：'\"“”‘’]", "", str(t.get("what") or ""))
-            if not tomb or not what_n:
+            text = _promise_text_key(tomb.get("what"))
+            if not text or not what_n:
                 continue
-            if tomb in what_n or what_n in tomb:
+            if text in what_n or what_n in text:
                 return True
-            if difflib.SequenceMatcher(None, tomb, what_n).ratio() >= 0.5:
+            if difflib.SequenceMatcher(None, text, what_n).ratio() >= 0.5:
                 return True
         return False
 
     def list(self, group_id):
         return self.items.get(group_id) or []
 
-    def sync(self, group_id, promises, now=None):
-        """用新摘要里的承诺列表对齐账本。返回 (新增, 撤下)。"""
-        now = time.time() if now is None else now
-        fresh = {}
-        for p in promises or []:
-            if not isinstance(p, dict):
-                continue
-            what = str(p.get("what") or "").strip()
-            if not what:
-                continue
-            who = str(p.get("who") or "有人").strip()[:20]
-            key = _norm_promise_key(who, what)
-            if key in fresh:
-                continue
-            fresh[key] = {
-                "id": key, "who": who, "what": what[:80], "since": now,
-                "due_ts": parse_due(p.get("due"), now),
-                "due_text": str(p.get("due") or ""),
-                "nag": 0, "last_nag": 0.0,
-            }
+    def rename_member(self, group_id, member_id, new, old=None):
+        """Update a display label without replacing IDs or nag/shown counters.
 
-        old = {r["id"]: r for r in self.items.get(group_id, [])}
-        merged = []
-        added = 0
-        for key, row in fresh.items():
-            prev = old.get(key)
-            if prev:
-                merged.append(prev)          # 已存在的保留催债次数，别被重置
-                continue
-            # ⚠️ 催满上限的承诺已被撤下（见 mark_nagged），但压缩模型看到群里还在聊
-            # 这件事，就会把它再写进摘要 —— 不拦的话 sync 会把它当新承诺加回来，
-            # nag 清零，催债上限形同虚设（实测罗老板一天被 @ 三次）。
-            if self._is_finished(group_id, row["who"], row["what"]):
-                continue
-            merged.append(row)
-            added += 1
-        # 摘要里不再出现 = 模型认为过时或已完结，撤下
-        dropped = len(old) - sum(1 for k in old if k in fresh)
+        Legacy name-only rows acquire their member ID on an explicit rename.
+        The caller checks that the old label is not another member's main name.
+        """
+        changed = 0
+        for row in self.list(group_id) + self.finished.get(group_id, []):
+            matches = (member_id and row.get("member_id") == member_id)
+            if not row.get("member_id") and old and row.get("who") == old:
+                matches = True
+            if matches and (row.get("who") != new or row.get("member_id") != member_id):
+                row["who"] = new
+                row["member_id"] = member_id or ""
+                changed += 1
+        return changed
 
-        merged.sort(key=lambda r: r.get("since") or 0)
-        self.items[group_id] = merged[: self.max_items]
-        return added, max(0, dropped)
+    def sync(self, group_id, promises, now=None, member_resolver=None):
+        """Align valid summary rows with the ledger, preserving existing IDs.
 
-    # ── 喂给模型的那一口：一天只露一次 ──
-    def take_for_prompt(self, group_id, rows, now=None):
-        """今天还没在上下文里露过面的承诺，才允许进 prompt。
-
-        ⚠️ 为什么要有这道闸（2026-09-23 实测）：摘要里那行「🧾 还没兑现：罗老板——
-        请全群吃酸菜蹄髈」是**每轮都灌进上下文**的，于是当天十几条回复句句不离这
-        四个字，收尾雷同，群里看着就是揪着一桌菜不放。催债本来就有 dun_promises
-        定时去做（最多 2 次），常态回复不需要天天领这块料。
-
-        所以台账一天最多露一次面；「查账 / 欠我 / 承诺」这类显式查询走 list()，
-        不受这道闸限制 —— 人家开口问了当然要如实报。
+        member_resolver(name) supplies trusted local member IDs. Model-supplied
+        IDs are not used when this resolver is present. Name-only old data keeps
+        working and binds to a stable member on the next successful match.
         """
         now = time.time() if now is None else now
-        today = time.strftime("%Y-%m-%d", time.localtime(now))
-        book = {r["id"]: r for r in self.items.get(group_id, [])}
-        visible, freshly_shown = [], []
-        for p in rows or []:
-            if not isinstance(p, dict):
+        old = self.items.get(group_id, [])
+        merged, reused = [], set()
+        added = 0
+        proposals = []
+        for proposal in promises or []:
+            if not isinstance(proposal, dict):
                 continue
-            what = str(p.get("what") or "").strip()
+            what = str(proposal.get("what") or "").strip()
+            who = str(proposal.get("who") or "有人").strip()[:20]
             if not what:
                 continue
-            who = str(p.get("who") or "有人").strip()[:20]
-            key = _norm_promise_key(who, what)
-            if (book.get(key) or {}).get("last_shown") == today:
+            member_id = str((member_resolver(who) if member_resolver else
+                             proposal.get("member_id")) or "")
+            proposals.append({**proposal, "who": who, "what": what, "member_id": member_id})
+        for proposal in proposals:
+            who, what, member_id = proposal["who"], proposal["what"], proposal["member_id"]
+            if self._find(merged, who, what, member_id):
                 continue
-            visible.append(p)
-            freshly_shown.append((key, who, what))
-        for key, who, what in freshly_shown:
-            row = book.get(key)
+            prev = self._find(old, who, what, member_id)
+            if prev is None:
+                prev = self._find_legacy_prefix(old, proposals, who, what, member_id)
+            if prev:
+                prev["who"] = who
+                if len(what) > len(prev.get("what") or ""):
+                    prev["what"] = what
+                    prev["text_complete"] = True
+                if member_id:
+                    prev["member_id"] = member_id
+                if prev["id"] not in reused:
+                    merged.append(prev)
+                    reused.add(prev["id"])
+                continue
+            if self._is_finished(group_id, who, what, member_id):
+                continue
+            merged.append({
+                "id": uuid.uuid4().hex, "member_id": member_id,
+                "who": who, "what": what, "text_complete": True, "since": now,
+                "due_ts": parse_due(proposal.get("due"), now),
+                "due_text": str(proposal.get("due") or ""),
+                "nag": 0, "last_nag": 0.0, "last_shown": "",
+            })
+            added += 1
+        merged.sort(key=lambda row: row.get("since") or 0)
+        self.items[group_id] = merged[:self.max_items]
+        return added, len(old) - len(reused)
+
+    def take_for_prompt(self, group_id, rows, now=None):
+        """Return each promise at most once per day; explicit list() is unaffected."""
+        now = time.time() if now is None else now
+        today = time.strftime("%Y-%m-%d", time.localtime(now))
+        book = self.items.setdefault(group_id, [])
+        visible = []
+        for proposal in rows or []:
+            if not isinstance(proposal, dict):
+                continue
+            what = str(proposal.get("what") or "").strip()
+            who = str(proposal.get("who") or "有人").strip()[:20]
+            member_id = str(proposal.get("member_id") or "")
+            if not what:
+                continue
+            row = self._find(book, who, what, member_id)
             if row is None:
-                row = {"id": key, "who": who, "what": what[:80], "since": now,
-                       "due_ts": None, "due_text": "", "nag": 0, "last_nag": 0.0,
-                       "last_shown": ""}
-                self.items.setdefault(group_id, []).append(row)
-                book[key] = row
+                row = {"id": uuid.uuid4().hex, "member_id": member_id,
+                       "who": who, "what": what, "text_complete": True, "since": now,
+                       "due_ts": None, "due_text": "", "nag": 0, "last_nag": 0.0}
+                book.append(row)
+            if row.get("last_shown") == today:
+                continue
             row["last_shown"] = today
+            visible.append(proposal)
         return visible
 
     # ── 催债 ──
@@ -863,7 +964,8 @@ class PromiseBook:
                     # 写进摘要，没有墓碑的话 sync 会把它当新承诺加回来（nag 清零），
                     # 催债上限形同虚设 —— 实测罗老板一天被 @ 三次就是这么来的。
                     self.finished.setdefault(group_id, []).append(
-                        {"who": r.get("who") or "有人", "what": r.get("what") or ""})
+                        {"id": r["id"], "member_id": r.get("member_id") or "",
+                         "who": r.get("who") or "有人", "what": r.get("what") or ""})
                     self.items[group_id] = [
                         x for x in self.items[group_id] if x["id"] != promise_id
                     ]
@@ -879,7 +981,7 @@ class PromiseBook:
         keep, removed = [], 0
         for r in rows:
             hit = False
-            if who and who in str(r.get("who") or ""):
+            if who and (who == r.get("member_id") or who in str(r.get("who") or "")):
                 hit = True
             if kw and (kw in str(r.get("what") or "").lower()
                        or kw in str(r.get("who") or "").lower()):

@@ -119,6 +119,7 @@ def owner_label(group_id=None):
 
 def save_owner(openid):
     try:
+        os.makedirs(os.path.dirname(config.OWNER_FILE), exist_ok=True)
         with open(config.OWNER_FILE, "w", encoding="utf-8") as f:
             f.write(openid)
     except Exception as e:
@@ -134,10 +135,20 @@ def hits(text, words):
     return any(w and w in t for w in words)
 
 
-def _all_named(group_id):
+def named_members(group_id):
     """本群所有留过称呼的人 [(openid, rec)]，最近的排前面。"""
     prefix = f"{group_id}|"
     rows = [(k[len(prefix):], r) for k, r in RELATIONS.records.items()
             if k.startswith(prefix) and r.get("nick")]
     rows.sort(key=lambda kv: kv[1].get("last_seen", 0.0), reverse=True)
     return rows
+
+
+# Existing domain modules may still reference this internal helper during migration.
+_all_named = named_members
+
+
+def member_id_for(group_id, name):
+    matches = [member for member, rec in named_members(group_id)
+               if name and rec.get("nick") == name]
+    return matches[0] if len(matches) == 1 else None

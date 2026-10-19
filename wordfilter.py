@@ -30,6 +30,8 @@ import os
 import re
 import threading
 
+import config
+
 # ══════════════════════════ 内置通用词 ══════════════════════════
 
 # 职务/尊号：谐音梗的重灾区，拿它当外号被人截图必然出事
@@ -59,7 +61,7 @@ def external_words():
     带 mtime 检查：改完文件立即生效，不用重启机器人（起名/压缩都是低频路径，
     这点 stat 开销可以忽略）。
     """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), DENY_FILE)
+    path = os.path.join(config.BASE_DIR, DENY_FILE)
     with _lock:
         try:
             mtime = os.path.getmtime(path)

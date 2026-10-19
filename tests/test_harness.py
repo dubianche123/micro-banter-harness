@@ -12,6 +12,7 @@ import time
 import unittest
 
 sys.path.insert(0, "..")
+import nicking
 import providers
 import runtime
 
@@ -166,8 +167,11 @@ class HarnessOrderTest(unittest.IsolatedAsyncioTestCase):
     async def test_envelope_never_stored_in_history(self):
         """信封只贴在发出去的请求上，历史里存的是原话，否则会一轮轮堆成雪球。"""
         sid = "th_hist_1"
-        await self.grab(sid, "第一句", context_hint="- 甲：背景一句话",
-                        relation_note="【记忆】甲")
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        message = SimpleNamespace(id="history-first", reply=AsyncMock(return_value={"id": "ok"}))
+        await self.bot.reply_in_session(message, sid, "第一句", context_hint="- 甲：背景一句话",
+                                        relation_note="【记忆】甲")
         msgs = await self.grab(sid, "第二句", context_hint="- 甲：又一句",
                                relation_note="【记忆】甲")
         body = [m for m in msgs if m["role"] == "user"]
@@ -230,7 +234,8 @@ class ModelTierTest(unittest.TestCase):
             preset = config.PROVIDER_PRESETS[name]
             expected = list(preset.get("models_digest") or preset["models"])
             self.assertEqual(chain, expected, name)
-            self.assertTrue(chain, "%s 的 digest 梯队不能为空" % name)
+            if preset["models"]:
+                self.assertTrue(chain, "%s 的 digest 梯队不能为空" % name)
 
     def test_judge_chain_follows_preset_or_falls_back(self):
         """judge 梯队同理：审核这种活宁可只留一档，也不能静默退到弱档去。"""
@@ -238,7 +243,8 @@ class ModelTierTest(unittest.TestCase):
             preset = config.PROVIDER_PRESETS[name]
             expected = list(preset.get("models_judge") or preset["models"])
             self.assertEqual(chain, expected, name)
-            self.assertTrue(chain, "%s 的 judge 梯队不能为空" % name)
+            if preset["models"]:
+                self.assertTrue(chain, "%s 的 judge 梯队不能为空" % name)
 
 
 class DigestTriggerTest(unittest.TestCase):
@@ -561,13 +567,13 @@ class PrimaryNameTest(unittest.TestCase):
         """
         runtime.RELATIONS.set_nick(self.GID, self.A, "阿远", source="claim")
         runtime.RELATIONS.set_nick(self.GID, self.B, "阿强", source="claim")
-        self.assertFalse(self.bot._sync_rename(self.GID, "阿强", "阿远"))
+        self.assertFalse(nicking.sync_rename(self.GID, "阿强", "阿远"))
 
     def test_sync_clear_spares_a_name_held_by_someone_else(self):
         """A 撤销了自己的称呼，B 还叫这个 —— 撤销的是「我不用了」，不是名字作废。"""
         runtime.RELATIONS.set_nick(self.GID, self.A, "阿强", source="claim")
         runtime.RELATIONS.set_nick(self.GID, self.B, "阿强", source="claim")
-        self.assertFalse(self.bot._sync_clear(self.GID, self.A, "阿强"))
+        self.assertFalse(nicking.sync_clear(self.GID, self.A, "阿强"))
 
     # ── 模型那条路：只读，不回写 ──
 

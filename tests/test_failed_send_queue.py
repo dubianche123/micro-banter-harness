@@ -15,7 +15,11 @@ sys.path.insert(0, "..")
 
 from botpy.message import GroupMessage  # noqa: E402
 
-import bot  # noqa: E402
+import aiohttp
+import delivery as bot
+from delivery import PendingSend, Sender
+
+SENDER = Sender()
 
 GROUP = "TESTGROUP_RESEND"
 USER = "TESTUSER_RESEND"
@@ -44,38 +48,38 @@ class FakeGroupMessage:
 
 
 def _conn_error():
-    return RuntimeError("Cannot connect to host bots.qq.com:443 ssl:default [None]")
+    return aiohttp.ServerDisconnectedError("Server disconnected")
 
 
 class ResendQueueTest(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
-        bot._FAILED_SENDS.clear()
+        SENDER.pending.clear()
 
     def tearDown(self):
-        bot._FAILED_SENDS.clear()
+        SENDER.pending.clear()
 
     async def test_connection_error_enqueues_and_drain_delivers(self):
         """发送撞连接错误 → 入队；网络回来后补投成功、队列清空。"""
         m = FakeGroupMessage([_conn_error(), {"id": "late-1"}])
-        await bot.safe_reply(m, "补投测试")
-        self.assertEqual(len(bot._FAILED_SENDS), 1, "连接失败应当入队")
+        await SENDER.reply(m, "补投测试")
+        self.assertEqual(len(SENDER.pending), 1, "连接失败应当入队")
         self.assertEqual(m.calls[0].get("content"), "补投测试")
 
-        await bot._drain_once()
+        await SENDER.drain()
         self.assertEqual(len(m.calls), 2, "网络恢复后应当补投一次")
-        self.assertEqual(len(bot._FAILED_SENDS), 0, "补投成功后队列清空")
+        self.assertEqual(len(SENDER.pending), 0, "补投成功后队列清空")
 
     async def test_drain_keeps_everything_while_network_is_down(self):
         """网络还没回来：原样留在队里，且保持先来后到的顺序。"""
         m1 = FakeGroupMessage([_conn_error()])
         m2 = FakeGroupMessage([_conn_error()])
         now = time.time()
-        bot._FAILED_SENDS.append((m1, "第一条", now))
-        bot._FAILED_SENDS.append((m2, "第二条", now + 1))
+        SENDER.pending.append(PendingSend(m1, "第一条", now))
+        SENDER.pending.append(PendingSend(m2, "第二条", now + 1))
 
-        await bot._drain_once()
-        self.assertEqual([r for _, r, _ in bot._FAILED_SENDS], ["第一条", "第二条"])
+        await SENDER.drain()
+        self.assertEqual([item.text for item in SENDER.pending], ["第一条", "第二条"])
         self.assertEqual(len(m1.calls), 1)
         self.assertEqual(len(m2.calls), 0, "第一发就撞墙，后面别去撞")
 
@@ -83,31 +87,31 @@ class ResendQueueTest(unittest.IsolatedAsyncioTestCase):
         """滞留到被动时效余量之外：放弃补投（腾讯必拒 40034005），队列清空。"""
         m = FakeGroupMessage([])
         stale = 1000.0 - (bot.GROUP_PASSIVE_WINDOW_SECONDS + 60)
-        bot._FAILED_SENDS.append((m, "过期回复", stale))
-        await bot._drain_once()
+        SENDER.pending.append(PendingSend(m, "过期回复", stale))
+        await SENDER.drain()
         self.assertEqual(m.calls, [], "过期的补投不该真发出去")
-        self.assertEqual(len(bot._FAILED_SENDS), 0)
+        self.assertEqual(len(SENDER.pending), 0)
 
     async def test_seq_conflict_on_drain_drops_the_entry(self):
-        """补投被 msg_seq 去重拒绝 = 首条其实已送达，从队列里撤下即可。"""
+        """补投被去重拒绝：停止重试，但不凭错误推断送达。"""
         m = FakeGroupMessage([RuntimeError("msg_seq 重复")])
-        bot._FAILED_SENDS.append((m, "已送达的", 1000.0))
-        await bot._drain_once()
-        self.assertEqual(len(bot._FAILED_SENDS), 0, "去重拒绝不算失败，撤下不再试")
+        SENDER.pending.append(PendingSend(m, "已送达的", time.time()))
+        await SENDER.drain()
+        self.assertEqual(len(SENDER.pending), 0, "去重拒绝不算失败，撤下不再试")
 
     async def test_double_timeout_also_queues(self):
         """botpy 吞超时返回 None 且立即重试仍是 None：同样要入队（10-08 修的
         None 检测只重试了一次，重试也失败时原来只会记 ❌ 然后丢掉）。"""
         m = FakeGroupMessage([None, None])
-        await bot.safe_reply(m, "两次都没出去")
-        self.assertEqual(len(bot._FAILED_SENDS), 1)
+        await SENDER.reply(m, "两次都没出去")
+        self.assertEqual(len(SENDER.pending), 1)
 
     async def test_queue_is_bounded(self):
         """队列有上限：断网期间狂刷不会把内存吃穿。"""
         m = FakeGroupMessage([_conn_error()] * 25)
         for _ in range(25):
-            await bot.safe_reply(m, "刷屏")
-        self.assertLessEqual(len(bot._FAILED_SENDS), 20)
+            await SENDER.reply(m, "刷屏")
+        self.assertLessEqual(len(SENDER.pending), 20)
 
 
 if __name__ == "__main__":

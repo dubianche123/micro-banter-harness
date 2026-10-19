@@ -21,6 +21,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import nicking
 import runtime
 
 import bot  # noqa: E402
@@ -116,7 +117,7 @@ class ClearLabelTest(unittest.TestCase):
     def test_sync_clear_rewrites_history_without_an_id(self):
         # 真实调用顺序：先把称呼清空，再同步历史文本（否则会撞上「还是别人的主名」那条守卫）
         runtime.RELATIONS.set_nick(GID, UNKNOWN, None, source="claim")
-        self.assertTrue(bot._sync_clear(GID, UNKNOWN, "阿龙"))
+        self.assertTrue(nicking.sync_clear(GID, UNKNOWN, "阿龙"))
         text = self._session_text()
         self.assertNotIn("阿龙", text, "撤销了称呼，历史里还在叫旧名")
         self.assertIn("未留名", text)

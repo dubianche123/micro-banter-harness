@@ -178,8 +178,8 @@ class ReplyWindowTest(unittest.IsolatedAsyncioTestCase):
         await bot.safe_reply(m, "在的")
         self.assertEqual(len(calls), 2, "只重试一次")
 
-    async def test_seq_conflict_on_retry_reads_as_delivered(self):
-        """重试被 seq 去重拒绝 = 首条其实已经在群里了 —— 不算失败，别再补。"""
+    async def test_seq_conflict_on_retry_remains_unconfirmed(self):
+        """重试被 seq 去重拒绝：没有正向回执就不提交送达状态。"""
         calls = []
 
         async def landed_then_rejected(**kwargs):
@@ -190,8 +190,9 @@ class ReplyWindowTest(unittest.IsolatedAsyncioTestCase):
 
         m = FakeGroupMessage(_stamp(1))
         m.reply = landed_then_rejected
-        await bot.safe_reply(m, "在的")
+        result = await bot.safe_reply(m, "在的")
         self.assertEqual(len(calls), 2)
+        self.assertFalse(result.delivered)
 
     async def test_stale_message_never_hits_the_api(self):
         """关键性质：老消息连一次请求都不该打出去（这才是省下那次的全部意义）。"""

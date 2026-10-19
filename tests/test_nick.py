@@ -8,6 +8,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import nicking
 import runtime
 
 from relations import parse_nick_command  # noqa: E402
@@ -174,8 +175,8 @@ class ReservedNameTest(unittest.TestCase):
     def _bad(self, nick, claimant):
         return relations.bad_nick(
             nick,
-            reserved=self.bot._reserved_nick_names(self.GROUP, claimant),
-            taken=self.bot._taken_nick_names(self.GROUP, claimant),
+            reserved=nicking.reserved_nick_names(self.GROUP, claimant),
+            taken=nicking.taken_nick_names(self.GROUP, claimant),
         )
 
     def test_member_cannot_take_owner_nick(self):
@@ -234,8 +235,8 @@ class NameCollisionTest(unittest.TestCase):
         b = self.bot
         return relations.bad_nick(
             nick,
-            reserved=b._reserved_nick_names(self.GROUP, subject),
-            taken=b._taken_nick_names(self.GROUP, subject),
+            reserved=nicking.reserved_nick_names(self.GROUP, subject),
+            taken=nicking.taken_nick_names(self.GROUP, subject),
         )
 
     def test_cannot_take_another_members_name(self):

@@ -264,14 +264,29 @@ class RelationStore:
 
     # ── 顶格名单 ──
     def pin(self, member_openid):
-        if member_openid:
-            self.pinned.add(member_openid)
-            rec = self.records.get(member_openid)
-            return rec
-        return None
+        if not member_openid:
+            return None
+        self.pinned.add(member_openid)
+        matched = None
+        for key, rec in self.records.items():
+            if key.rsplit("|", 1)[-1] == member_openid:
+                self._restore_pin(key, rec)
+                matched = rec
+        return matched
 
     def unpin(self, member_openid):
         self.pinned.discard(member_openid)
+        for key, rec in self.records.items():
+            if key.rsplit("|", 1)[-1] == member_openid:
+                self._restore_pin(key, rec)
+
+    def _restore_pin(self, key, rec):
+        # This flag is derived from current configuration, never historical
+        # authority restored from state.json. pin() may run after hydrate().
+        rec.pop("pinned", None)
+        if self._is_pinned(key.rsplit("|", 1)[-1]):
+            rec["score"] = SCORE_MAX
+            rec["pinned"] = True
 
     def _is_pinned(self, member_openid):
         return member_openid in self.pinned
@@ -286,14 +301,22 @@ class RelationStore:
         for k, rec in (raw or {}).items():
             if not isinstance(rec, dict):
                 continue
-            self.records[k] = {
+            # Keep extension fields written by the relation layer across restarts.
+            restored_rec = dict(rec)
+            restored_rec.update({
                 "score": clamp_score(rec.get("score", 0)),
                 "nick": rec.get("nick") or None,
                 "first_seen": float(rec.get("first_seen") or time.time()),
                 "last_seen": float(rec.get("last_seen") or 0),
                 "interactions": int(rec.get("interactions") or 0),
                 "pending_milestone": rec.get("pending_milestone"),
-            }
+                "told_day": str(rec.get("told_day") or ""),
+                "decay_steps": max(0, int(rec.get("decay_steps") or 0)),
+            })
+            if restored_rec.get("mode") not in PERSONA_MODES:
+                restored_rec.pop("mode", None)
+            self._restore_pin(k, restored_rec)
+            self.records[k] = restored_rec
             restored += 1
         return restored
 
@@ -310,9 +333,8 @@ class RelationStore:
                 "interactions": 0, "pending_milestone": None,
             }
             self.records[k] = rec
-        if rec is not None and self._is_pinned(member_openid):
-            rec["score"] = SCORE_MAX
-            rec["pinned"] = True   # 打标记，让 _settle 知道这条不参与衰减
+        if rec is not None:
+            self._restore_pin(k, rec)
         return rec
 
     # ── 衰减 ──
@@ -325,7 +347,14 @@ class RelationStore:
         if idle <= grace or self.step_days <= 0:
             return False
         steps = 1 + int((idle - grace) / (self.step_days * 86400.0))
-        pull = steps * self.amount
+        # last_seen is the anchor; reads settle only steps not settled before.
+        # Persist this counter even at score zero, so reads cannot charge the same
+        # interval again after a restart or a later score change.
+        settled = max(0, int(rec.get("decay_steps") or 0))
+        if steps <= settled:
+            return False
+        rec["decay_steps"] = steps
+        pull = (steps - settled) * self.amount
         old = rec["score"]
         new = max(0, old - pull) if old > 0 else (min(0, old + pull) if old < 0 else 0)
         if new != old:
@@ -358,6 +387,7 @@ class RelationStore:
         if count:
             rec["interactions"] += 1
         rec["last_seen"] = now
+        rec["decay_steps"] = 0
         new_score = int(rec["score"])
         new_level = level_key(new_score)
         # 提醒按**每 10 分一个台阶**，不看档位：档位间隔本身不均匀（0/10/30/60/85），

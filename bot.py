@@ -19,13 +19,10 @@ from datetime import datetime, timezone
 
 import aiohttp
 import certifi
-import httpx
 import botpy
 from botpy.connection import ConnectionState
 from botpy.message import GroupMessage, C2CMessage, Message
-from openai import AsyncOpenAI
 
-import archive as archive_mod
 import config
 import digest as digest_mod
 import naming
@@ -44,6 +41,7 @@ os.environ["SSL_CERT_FILE"] = certifi.where()
 
 def setup_logging():
     """带时间戳 + 自动轮转的日志。改造前 bot.log 会无限增长且每行都没有时间信息。"""
+    os.makedirs(os.path.dirname(config.LOG_FILE), exist_ok=True)
     root = logging.getLogger()
     root.setLevel(config.LOG_LEVEL)
     fmt = logging.Formatter(
@@ -66,8 +64,7 @@ def setup_logging():
 def patch_aiohttp_ssl():
     """botpy 的 WS 连接在某些本机证书链环境下会握手失败，必要时要关掉校验。
 
-    默认是关闭的（与改造前行为一致），但这是有代价的：任何中间人都能看到明文流量。
-    本机证书正常的话，请在 .env 里设 SSL_VERIFY=true。
+    默认开启校验；只有显式 SSL_VERIFY=false 才启用兼容模式。
     """
     if config.SSL_VERIFY:
         logger.info("🔒 SSL 校验已开启（SSL_VERIFY=true）")
@@ -118,6 +115,9 @@ def install_ws_watchdog():
     async def patched(self, message_event, ws):
         _ws_watch["last_rx"] = time.time()
         _ws_watch["conn"] = ws
+        if STATUS.lifecycle not in {"starting", "stopped"}:
+            STATUS.gateway_connected = True
+            STATUS.lifecycle = "ready"
         return await original(self, message_event, ws)
 
     BotWebSocket._is_system_event = patched
@@ -129,6 +129,11 @@ def install_ws_watchdog():
 async def _ws_watchdog_tick():
     """看门狗巡检一轮。返回 True = 这次踢了。独立成函数是为了好测。"""
     conn = _ws_watch.get("conn")
+    if conn is not None and conn.closed:
+        STATUS.gateway_connected = False
+        if STATUS.lifecycle != "stopped":
+            STATUS.lifecycle = "reconnecting"
+        STATUS.write()
     if not _ws_watch["last_rx"]:
         return False
     silent = time.time() - _ws_watch["last_rx"]
@@ -140,6 +145,9 @@ async def _ws_watchdog_tick():
         # 连接已经是死的：重连链路理应正在跑，别再补刀，等新连接的下一响
         logger.warning("🐾 看门狗：网关静默 %.0f 秒（连接已关闭，等重连链路接手）", silent)
         return False
+    STATUS.gateway_connected = False
+    STATUS.lifecycle = "reconnecting"
+    STATUS.write()
     _ws_watch["kicks"] += 1
     logger.warning("🐾 看门狗：网关 %.0f 秒没有任何下行（心跳 ACK 也没来），"
                    "主动断开让它重连（第 %d 次）", silent, _ws_watch["kicks"])
@@ -149,15 +157,16 @@ async def _ws_watchdog_tick():
 
 async def ws_watchdog_loop():
     """看门狗主循环：每 15 秒巡检一次。"""
-    await asyncio.sleep(config.WS_WATCHDOG_STALE_SECONDS)  # 先给首连留足时间
+    await STATUS.sleep(config.WS_WATCHDOG_STALE_SECONDS)  # 先给首连留足时间
     while True:
         try:
             await _ws_watchdog_tick()
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            STATUS.error(e)
             logger.error("❌ 看门狗巡检异常（不影响主流程）: %s", e)
-        await asyncio.sleep(15)
+        await STATUS.sleep(15)
 
 
 
@@ -167,17 +176,16 @@ async def ws_watchdog_loop():
 import runtime
 import activation
 import providers
-from runtime import hits, owner_label, load_owner, save_owner, _all_named
-from providers import (PROVIDER_CHAIN, AI_CLIENTS, MODEL_CHAINS, MODEL_CHAINS_DIGEST,
-                       MODEL_CHAINS_JUDGE, _TIER_CHAINS, _provider_state, _key_idx,
-                       _slow_until, _activity, _HARD_FAIL_MARKS, _FATAL_FAIL_MARKS,
-                       _last_msg_ts, _note_activity, _provider_available, _penalize_slow_model,
-                       _model_slow, _someone_else_can_serve, _pick_last_resort,
-                       _provider_serving, _provider_block_reason, _is_hard_fail,
-                       _is_fatal_fail, _note_provider_fail, _note_provider_ok,
-                       call_model, probe_provider)
+from runtime import hits, owner_label, load_owner, save_owner, named_members
+call_model = providers.call_model
+probe_provider = providers.probe_provider
+providers.initialize(budget=runtime.BUDGET, on_usage=runtime.STATE.mark_dirty)
+from health import STATUS
+from delivery import (Sender, DeliveryResult, passive_reply_window, message_age_seconds,
+                      GROUP_PASSIVE_WINDOW_SECONDS, C2C_PASSIVE_WINDOW_SECONDS)
+import media
 from affinity import (apply_relation_delta, affinity_budget, apply_affinity_delta_capped,
-                      apply_digest_affinity, apply_digest_modes, _affinity_ledger)
+                      apply_digest_affinity, apply_digest_modes, affinity_ledger)
 # 背景前言：每条背景都挂的同一段「读法说明」。[图片：…] 引导是 2026-10-19 补的——
 # 异步描述落在背景里之后，模型面对「这是什么」还会装瞎开玩笑（实测「糊得像马赛克」）。
 _BG_PREAMBLE = ("（注意：下面每一句开头都标了发言人 —— 这些话是「他们」说的，"
@@ -189,12 +197,11 @@ _BG_PREAMBLE = ("（注意：下面每一句开头都标了发言人 —— 这�
 
 
 from nicking import (extract_mentions, mention_nicks_from_content, mention_nick_from_content,
-                     learn_display_names, mention_label_for, _strip_call, refresh_names,
-                     _sync_rename, _sync_clear, _reserved_nick_names, nick_locked,
-                     set_nick_locked, _taken_nick_names, reset_nick_flood,
-                     _nick_block_reason, _nick_note_reject, _nick_note_accept,
-                     NICK_FLOOD, _nick_rejects, _nick_cool, _nick_done,
-                     _RE_PLAIN_MENTION, _RE_TRAILING_DOTS, _RE_MACHINE_ID)
+                     learn_display_names, mention_label_for, strip_call, refresh_names,
+                     sync_rename, sync_clear, reserved_nick_names, nick_locked,
+                     set_nick_locked, taken_nick_names, reset_nick_flood,
+                     nick_block_reason, nick_note_reject, nick_note_accept)
+
 
 
 
@@ -206,10 +213,14 @@ for gid, items in (runtime.STATE.data.get("buffers") or {}).items():
 
 group_last_random_reply = dict(runtime.STATE.data.get("cooldowns") or {})
 processed_msg_ids = collections.deque(maxlen=config.DEDUP_MAX)
+media.initialize(state=runtime.STATE, archive=runtime.ARCHIVE,
+                 buffers=group_buffers, budget=runtime.BUDGET)
 
 
 # 主动发言（催债）需要拿到 client 实例，这里存个引用
 _bot_ref = {"client": None}
+_media_tasks = set()
+_background_tasks = set()
 
 # 「老干部」已改为「风纪委员」。存档里如果还留着旧的 cadre，读写时自动迁移，
 # 免得群里某一档模式卡在被删除的枚举值上。
@@ -295,13 +306,11 @@ wordfilter.add_runtime_words([config.OWNER_CLAIM_PHRASE])
 
 def owner_hint_pending(group_id):
     """这次回复要不要捎上「怎么认领群主」的引导。每个群最多捎一次。"""
-    if runtime.OWNER_OPENID or not group_id:
+    if runtime.OWNER_OPENID or not group_id or not config.OWNER_CLAIM_PHRASE:
         return False
     slot = runtime.STATE.data.setdefault("groups", {}).setdefault(group_id, {})
     if slot.get("owner_hint"):
         return False
-    slot["owner_hint"] = True
-    runtime.STATE.mark_dirty()
     return True
 
 
@@ -451,8 +460,8 @@ def resolve_mode(mode):
 
 async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
                        context_hint="", is_random_banter=False, relation_note="",
-                       group_memory="", owner_label="", private=False, state_note=""):
-    """根据当前模式生成回复。整段持session锁，保证上下文读写不会被并发请求撕裂。
+                       group_memory="", owner_label="", private=False, state_note="", allow_fallback=True):
+    """生成候选回复；正式消息入口持session锁，并在送达后提交实际正文。
 
     返回 (正文, 情感分值或 None)。分值为 None 表示这次没拿到模型给的记账标签
     —— 默认就不再要求模型记账了，好感度改由每日压缩评估（见 config.CMD_PROTOCOL_ENABLED）。
@@ -511,213 +520,89 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
 
         max_tokens = config.AI_MAX_TOKENS_BANTER if is_random_banter else config.AI_MAX_TOKENS
 
-        async with runtime.SESSIONS.lock(session_id):
-            messages = runtime.SESSIONS.build_messages(
-                session_id, head, user_text,
-                memory_block=group_memory, turn_context=turn_context,
-            )
-            # 对话一律走对话梯队：不为「插嘴」单独换模型，那会让同一个角色在不同路径上表现不一致
+        messages = runtime.SESSIONS.build_messages(
+            session_id, head, user_text,
+            memory_block=group_memory, turn_context=turn_context,
+        )
+        # 对话一律走对话梯队：不为「插嘴」单独换模型，那会让同一个角色在不同路径上表现不一致
+        raw = await call_model(messages, max_tokens)
+        if not raw:
+            return (_pick_fallback() if allow_fallback else None), None
+        body, payload = split_cmd(raw)
+        # 采样乱码闸（2026-10-15 <CMD! 残片 / 10-19 0A9F%F5，均智谱 glm-4.7）：
+        # 命中就重生成一次；两次都乱就照发并留痕——不在这里和模型无限拉扯。
+        glitch = _garbage_run(body)
+        if glitch:
+            logger.warning("🧯 模型输出疑似采样乱码（%s…），重生成一次。原文: %s",
+                           glitch[:10], raw[:140])
             raw = await call_model(messages, max_tokens)
-            if not raw:
-                return _pick_fallback(), None
             body, payload = split_cmd(raw)
-            # 采样乱码闸（2026-10-15 <CMD! 残片 / 10-19 0A9F%F5，均智谱 glm-4.7）：
-            # 命中就重生成一次；两次都乱就照发并留痕——不在这里和模型无限拉扯。
             glitch = _garbage_run(body)
             if glitch:
-                logger.warning("🧯 模型输出疑似采样乱码（%s…），重生成一次。原文: %s",
-                               glitch[:10], raw[:140])
-                raw = await call_model(messages, max_tokens)
-                body, payload = split_cmd(raw)
-                glitch = _garbage_run(body)
-                if glitch:
-                    logger.warning("🧯 重生成仍含乱码（%s…），按原样发送", glitch[:10])
-            # 标签解析失败时退化：拿主干文本，不计分
-            if not body:
-                return _pick_fallback(), None
-            delta = None
-            if isinstance(payload, dict) and "aff" in payload:
-                try:
-                    delta = relations.clamp_delta(int(payload["aff"]))
-                except (TypeError, ValueError):
-                    delta = None
-            runtime.SESSIONS.record(session_id, user_text, body)
-            runtime.STATE.mark_dirty()
-            return body, delta
+                logger.warning("🧯 重生成仍含乱码（%s…），按原样发送", glitch[:10])
+        # 标签解析失败时退化：拿主干文本，不计分
+        if not body:
+            return (_pick_fallback() if allow_fallback else None), None
+        delta = None
+        if isinstance(payload, dict) and "aff" in payload:
+            try:
+                delta = relations.clamp_delta(int(payload["aff"]))
+            except (TypeError, ValueError):
+                delta = None
+        return body, delta
     except Exception as e:
         logger.exception("❌ 生成回复异常: %s", e)
-        return "（反手掏出一张闪避）刚才群里信息密度过载，这波连招没接住！好兄弟再艾特我一次我听着呢！", None
+        return (_pick_fallback() if allow_fallback else None), None
 
 
 # ══════════════════════ 5. 发送与限流提示 ══════════════════════
 
 
-# QQ 的被动回复是有时效的（官方「消息收发概述」）：群聊 5 分钟 / 每条最多 5 次，
-# 单聊 60 分钟 / 4 次。这里各留一点余量给时钟偏差和生成耗时 —— 贴着边界回照样会被拒。
-GROUP_PASSIVE_WINDOW_SECONDS = 240      # 群聊 5 分钟，留 1 分钟
-C2C_PASSIVE_WINDOW_SECONDS = 3000       # 单聊 60 分钟，留 10 分钟
+def _blocked_reply(message):
+    return naming.render("（刚才的话没能发出来，先换个话题，等会儿再聊。）",
+                         owner=owner_label(getattr(message, "group_openid", None)))
 
 
-def passive_reply_window(message):
-    """这条消息走被动回复的时效（秒）。认不出的类型按更紧的群聊口径算。"""
-    if isinstance(message, C2CMessage):
-        return C2C_PASSIVE_WINDOW_SECONDS
-    return GROUP_PASSIVE_WINDOW_SECONDS
+SENDER = Sender(fallback=_blocked_reply)
 
 
-def message_age_seconds(message):
-    """消息从发出来到现在过了多久（秒）。
-
-    拿不到、或解不出时间戳时返回 None —— 调用方当作「不旧」，保持原行为：
-    不因为一个读不懂的时间戳，就把该发的回复吞掉。
-    """
-    raw = getattr(message, "timestamp", None)
-    if not raw:
-        return None
-    text = str(raw).strip().replace("Z", "+00:00")
-    try:
-        sent = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if sent.tzinfo is None:
-        # 平台给的是带偏移的 RFC3339。真遇到没带时区的，按**本地**时间算 ——
-        # 当成 UTC 会凭空多出 8 小时，等于把该回的回复全吞了，比误发一次危险得多。
-        return (datetime.now() - sent).total_seconds()
-    return (datetime.now(timezone.utc) - sent).total_seconds()
-
-
-def _is_connection_error(err_str):
-    """发送期的「网络根本不通」类错误。只有这类值得补投——对方明确拒收的不算。"""
-    e = (err_str or "").lower()
-    return ("cannot connect" in e or "connectorerror" in e
-            or "serverdisconnected" in e or "connectionreset" in e)
-
-
-# 断网补投队列：发送期网络不通时暂存。进程内存即可——断网期间进程还活着，只是网断了；
-# 一旦重启进程，腾讯也不会再收这条被动回复（时效早过了），持久化没有意义。
-_FAILED_SENDS = collections.deque(maxlen=20)
-
-
-def _queue_failed_send(message, reply_text, why):
-    _FAILED_SENDS.append((message, reply_text, time.time()))
-    logger.warning("🔗 %s —— 回复已入补投队列（%d 条待发，网络恢复后自动补）",
-                   why, len(_FAILED_SENDS))
-
-
-async def _drain_once():
-    """补投一轮：网络回来后把没过被动时效的滞留回复发出去。resend_queue_loop 每 10s 调一次。"""
-    if not _FAILED_SENDS:
-        return
-    now = time.time()
-    remaining = collections.deque()
-    net_down = False
-    while _FAILED_SENDS and not net_down:
-        message, reply_text, ts = _FAILED_SENDS.popleft()
-        window = passive_reply_window(message)
-        if now - ts > window - 15:
-            logger.warning("⏳ 补投放弃（滞留 %d 秒，被动时效余量不足）: %s",
-                           int(now - ts), reply_text[:60])
-            continue
-        try:
-            sent = await message.reply(content=reply_text, msg_type=0)
-        except Exception as e:
-            if _is_connection_error(str(e)):
-                net_down = True   # 网还没回来，后面的别撞了，原样留在队里
-                remaining.append((message, reply_text, ts))
-            else:
-                logger.error("❌ 补投失败: %s", str(e)[:160])
-            continue
-        if sent:
-            logger.info("📤 [补投成功] 断网期间滞留 %d 秒: %s",
-                        int(now - ts), reply_text.replace("\n", " ")[:120])
-        else:
-            remaining.append((message, reply_text, ts))   # 又是吞超时，下轮再说
-    if remaining:
-        _FAILED_SENDS.extendleft(reversed(remaining))
+async def safe_reply(message, reply_text, *, on_delivered=None, **delivery):
+    return await SENDER.reply(message, reply_text, on_delivered=on_delivered, **delivery)
 
 
 async def resend_queue_loop():
-    """每 10 秒补投一轮；网络没回来时首条就会撞连接错误提前收手，空转开销可忽略。"""
     while True:
-        await asyncio.sleep(10)
-        try:
-            await _drain_once()
-        except Exception as e:
-            logger.warning("⚠️ 补投轮异常（下轮继续）: %s", str(e)[:160])
+        await STATUS.sleep(10)
+        await SENDER.drain()
 
 
-def _log_sent(sent, reply_text, tag="已回复"):
-    mid = sent.get("id", "?") if isinstance(sent, dict) else getattr(sent, "id", "?")
-    logger.info("📤 [%s] id=%s: %s", tag, str(mid)[:48], reply_text.replace("\n", " ")[:200])
+async def reply_in_session(message, session_id, user_text, *, on_delivered=None,
+                           owner_hint_group=None, **context):
+    """Serialize generation and send; queued delivery commits through the same callback."""
+    async with runtime.SESSIONS.lock(session_id):
+        generation = runtime.SESSIONS.begin_turn(session_id)
+        body, delta = await get_ai_reply(session_id, user_text, allow_fallback=False, **context)
+        generated = bool(body)
+        body = body or _pick_fallback()
+        hint = bool(generated and owner_hint_group and owner_hint_pending(owner_hint_group))
+        candidate = f"{body}\n{OWNER_CLAIM_HINT}" if hint else body
 
+        def commit(result):
+            if runtime.SESSIONS.generation(session_id) != generation:
+                return  # a mode/reset action invalidated this old pending reply
+            runtime.SESSIONS.record(session_id, user_text, result.text)
+            if generated and result.text == candidate:
+                if hint:
+                    runtime.STATE.data.setdefault("groups", {}).setdefault(owner_hint_group, {})["owner_hint"] = True
+                if on_delivered:
+                    on_delivered()
+            runtime.STATE.mark_dirty()
 
-async def safe_reply(message, reply_text):
-    """安全回复：命中腾讯内容风控时自动降级；网络不通时进补投队列。
-
-    发之前还有一道**过期闸**：被动回复有时效（群聊 5 分钟 / 单聊 60 分钟），
-    而机器人掉线期间积压的消息会在重连时补推过来 —— 那时再回，腾讯直接拒：
-    `40034005 回复消息msg_id已过期`。模型跑了、答案也有了，就是发不出去，
-    群里一片安静，看起来跟宕机一模一样（2026-09-17 实测踩到过）。
-    所以太老的消息干脆不回，只留一条日志，省掉那次注定失败的请求。
-
-    2026-10-12 实测第三种丢法：本机断网约 5 分钟（两家 LLM 同时超时 + QQ API
-    连不上），兜底回复在重连前 47 秒发出，ConnectionError 记了 ❌ 就没了 ——
-    而重连发生在被动时效内，其实来得及补。所以连接类失败现在**入补投队列**，
-    resend_queue_loop 每 10 秒试一轮，过了时效余量才放弃。
-    """
-    age = message_age_seconds(message)
-    window = passive_reply_window(message)
-    if age is not None and age > window:
-        logger.warning(
-            "⏳ 这条消息已经发出 %d 秒，超过被动回复时效 %d 秒，不再回复"
-            "（多半是掉线期间积压、重连后补推过来的，硬回腾讯也会拒 40034005）",
-            int(age), window)
-        return
-    try:
-        sent = await message.reply(content=reply_text, msg_type=0)
-    except Exception as e:
-        err_str = str(e)
-        logger.error("❌ 消息发送失败（拟回复：%s）: %s", reply_text[:60], err_str[:160])
-        if "40034006" in err_str or "违规" in err_str:
-            try:
-                await message.reply(
-                    content=naming.render(
-                        "（刚才的话被腾讯巡逻超管一巴掌拍回去了，{owner}喊我去买奶茶了，"
-                        "群友莫谈国事好好摸鱼！）",
-                        owner=owner_label(getattr(message, "group_openid", None))),
-                    msg_type=0,
-                )
-            except Exception:
-                pass
-            return
-        if _is_connection_error(err_str):
-            _queue_failed_send(message, reply_text, "疑似本机断网")
-        return
-
-    if sent:
-        _log_sent(sent, reply_text)
-        return
-
-    # ⚠️ 走到这里 = botpy 的 http 层把 TimeoutError **吞掉**了（只打一行警告，
-    # 不重试、不抛异常，直接 return None），于是「发送」其实生死未卜 ——
-    # 2026-10-06 22:27 实测：日志里记了 📤，群里什么都没有，看起来像掉线。
-    # 同一 msg_id+msg_seq 重试一次是安全的：首条若已在腾讯落地，重试会被
-    # seq 去重拒绝（消息本来就在群里）；若没落地，这次正好补上。
-    logger.warning("📤 上一次发送超时（botpy 吞错返回 None），同一 msg_seq 重试一次")
-    try:
-        sent = await message.reply(content=reply_text, msg_type=0)
-    except Exception as e:
-        err_str = str(e)
-        if _is_connection_error(err_str):
-            _queue_failed_send(message, reply_text, "重试仍连不上")
-            return
-        logger.warning("⚠️ 重试被拒（多半是首条其实已送达，被 msg_seq 去重挡下）: %s",
-                       err_str[:160])
-        return
-    if sent:
-        _log_sent(sent, reply_text, tag="已回复·重试成功")
-        return
-    _queue_failed_send(message, reply_text, "两次发送都超时")
+        result = await safe_reply(
+            message, candidate, on_delivered=commit,
+            is_current=lambda: runtime.SESSIONS.generation(session_id) == generation,
+            retry_lock=runtime.SESSIONS.lock(session_id))
+        return body, delta, result
 
 
 def _throttled_notice_key(group_id, kind):
@@ -748,7 +633,7 @@ class BudgetGate:
             )
             return False
 
-        if not runtime.BUDGET.try_consume():
+        if not runtime.BUDGET.can_consume():
             logger.warning("🛑 今日全局调用额度已用尽（%d/%d）", runtime.BUDGET.used, runtime.BUDGET.limit)
             await notify_if_quiet(
                 message, "budget",
@@ -1008,7 +893,7 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
             return
         runtime.RELATIONS.set_nick(group_id, sender_openid, None, source="claim")
         runtime.RENAMES.note(group_id, old, sender_openid)
-        _sync_clear(group_id, sender_openid, old)
+        sync_clear(group_id, sender_openid, old)
         runtime.STATE.mark_dirty()
         await safe_reply(message, "（拿橡皮把小本本上的字擦干净）行，以后就不乱叫了，逮着泛称直接用。")
         return
@@ -1029,7 +914,7 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
 
     # 闸门排在这里，排在**名字本身合不合格**之前：先把一次围攻能试几次压住，
     # 再看名字本身 —— 顺序无所谓对错，只是前者是「能不能问」，后者是「问到的是什么」。
-    blocked = _nick_block_reason(group_id, subject, is_owner=is_owner)
+    blocked = nick_block_reason(group_id, subject, is_owner=is_owner)
     if blocked:
         logger.info("⏳ 改名节流挡住一笔（%s 想叫「%s」）：%s", str(subject)[-4:], nick, blocked)
         await safe_reply(message, f"（把小本本合上一半）{blocked}，到时候再喊我一声。")
@@ -1037,21 +922,21 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
 
     problem = relations.bad_nick(
         nick,
-        reserved=_reserved_nick_names(group_id, subject),
-        taken=_taken_nick_names(group_id, subject),
+        reserved=reserved_nick_names(group_id, subject),
+        taken=taken_nick_names(group_id, subject),
     )
     if problem:
         # 只有**撞到敏感词**才计入围攻统计：重名、冒名顶替这些是正常的业务冲突，
         # 拿来当「有人在攻击」的证据会冤枉好人。
         if wordfilter.has_hit(nick):
-            _nick_note_reject(group_id)
+            nick_note_reject(group_id)
         await safe_reply(message, f"（皱眉盯着你写的字看了半天）这个名字不成（{problem}），换一个吧。")
         return
 
     # 词表过了不等于安全：谐音、拆字、缩写天生就是拿来绕开字面匹配的。
     # 再让审核梯队看一眼（失败返回 None = 放行，不因审核不可用而堵死起名）。
     if await judge_nick(nick) is False:
-        _nick_note_reject(group_id)
+        nick_note_reject(group_id)
         logger.info("🕵️ 称呼审核拦下：%s 想用「%s」", sender_openid[-4:], nick)
         await safe_reply(message,
             "（笔尖悬在小本本上方，半天没落下去）这名字我不敢往上写，换一个吧。")
@@ -1078,8 +963,8 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
         runtime.RELATIONS.set_nick(group_id, target, nick, source="owner")
         runtime.RENAMES.note(group_id, old_nick, target)
         runtime.STATE.mark_dirty()
-        _sync_rename(group_id, old_nick, nick)
-        _nick_note_accept(group_id, target)
+        sync_rename(group_id, old_nick, nick, member_id=target)
+        nick_note_accept(group_id, target)
         logger.info("✍️ 采纳称呼：%s → 「%s」（%s御赐）", old_nick or "（未留名）", nick,
                     owner_label(group_id))
         if old_nick and old_nick != nick:
@@ -1102,8 +987,8 @@ async def handle_nick_command(message, cmd, group_id, sender_openid, is_owner, m
     runtime.RELATIONS.set_nick(group_id, sender_openid, nick)
     runtime.RENAMES.note(group_id, old, sender_openid)
     runtime.STATE.mark_dirty()
-    _sync_rename(group_id, old, nick)
-    _nick_note_accept(group_id, sender_openid)
+    sync_rename(group_id, old, nick, member_id=sender_openid)
+    nick_note_accept(group_id, sender_openid)
     logger.info("✍️ 采纳称呼：%s → 「%s」（本人认领）", old or "（未留名）", nick)
     if old and old != nick:
         await safe_reply(message,
@@ -1200,7 +1085,7 @@ def _other_names(group_id, exclude_openid, limit=8):
 
     只给**称呼**，不带 openid 尾巴 —— 这段会进 prompt，模型一复读就成了群里的乱码。
     """
-    return [r.get("nick") for oid, r in _all_named(group_id)
+    return [r.get("nick") for oid, r in named_members(group_id)
             if oid != exclude_openid and r.get("nick")][:limit]
 
 
@@ -1314,8 +1199,9 @@ async def run_digest(group_id, reason=""):
     if lock.locked():
         return
     async with lock:
-        entries = runtime.ARCHIVE.since(group_id, runtime.DIGESTS.last_run(group_id),
-                                limit=config.DIGEST_MAX_PENDING)
+        entries, batch_cursor = runtime.ARCHIVE.pending(
+            group_id, runtime.DIGESTS.cursor(group_id),
+            since_ts=runtime.DIGESTS.last_run(group_id), limit=config.DIGEST_MAX_PENDING)
         if not entries:
             return
         logger.info("🗜️  开始压缩群 %s 的长期记忆（%d 条待处理 / %s）",
@@ -1325,10 +1211,9 @@ async def run_digest(group_id, reason=""):
             result = await digest_mod.compress_group(
                 runtime.DIGESTS, group_id, entries, ask_digest,
                 resolver=_resolve_name(group_id),
-                budget=runtime.BUDGET.try_consume,
                 log=logger.info,
                 refresh=lambda t: refresh_names(group_id, t),
-                ledger=_affinity_ledger(group_id),
+                ledger=affinity_ledger(group_id),
             )
         except Exception as e:
             logger.error("❌ 群记忆压缩异常: %s", str(e)[:200])
@@ -1337,15 +1222,18 @@ async def run_digest(group_id, reason=""):
             logger.warning("⚠️ 群 %s 记忆未产出结果，原文保留在归档里，下轮再试", group_id[-6:])
             return
 
-        runtime.DIGESTS.mark_compressed(group_id)
+        runtime.DIGESTS.mark_compressed(
+            group_id, ts=started, cursor=result.get("source_cursor", batch_cursor))
         runtime.STATE.mark_dirty()
         logger.info("📜 群 %s 记忆已更新（%.1fs / %d 条）：%s",
-                    group_id[-6:], time.time() - started, len(entries),
+                    group_id[-6:], time.time() - started, result["entry_count"],
                     (result.get("brief") or "")[:70])
 
         # 承诺账本跟着摘要对齐：新出现的记上，摘要里消失的自动撤下
         if config.PROMISE_ENABLED:
-            added, dropped = runtime.PROMISES.sync(group_id, (result.get("data") or {}).get("promises"))
+            added, dropped = runtime.PROMISES.sync(
+                group_id, (result.get("data") or {}).get("promises"),
+                member_resolver=lambda name: runtime.member_id_for(group_id, name))
             if added or dropped:
                 runtime.STATE.mark_dirty()
                 logger.info("🧾 承诺账本已同步：新增 %d 条，撤下 %d 条", added, dropped)
@@ -1370,7 +1258,7 @@ async def run_digest(group_id, reason=""):
             try:
                 path = runtime.ARCHIVE.write_memory(
                     group_id, result.get("brief") or "", result.get("data") or {},
-                    meta={"本次压缩消息数": len(entries), "耗时": f"{time.time() - started:.1f}s"},
+                    meta={"本次压缩消息数": result["entry_count"], "耗时": f"{time.time() - started:.1f}s"},
                 )
                 logger.info("📝 已写入 %s", os.path.relpath(path, config.BASE_DIR))
             except Exception as e:
@@ -1380,12 +1268,12 @@ async def run_digest(group_id, reason=""):
 async def digest_loop():
     """后台定时扫描：到点就压，归档里攒太多也立即压。"""
     while True:
-        await asyncio.sleep(config.DIGEST_CHECK_INTERVAL)
+        await STATUS.sleep(config.DIGEST_CHECK_INTERVAL)
         if not config.DIGEST_ENABLED:
             continue
         try:
             for gid in list(runtime.DIGESTS.groups.keys()):
-                pending = len(runtime.ARCHIVE.since(gid, runtime.DIGESTS.last_run(gid)))
+                pending = len(runtime.ARCHIVE.pending(gid, runtime.DIGESTS.cursor(gid), since_ts=runtime.DIGESTS.last_run(gid))[0])
                 if not runtime.DIGESTS.needs_compress(
                         gid, config.DIGEST_INTERVAL_HOURS, config.DIGEST_MIN_PENDING,
                         pending, count_trigger=config.DIGEST_COUNT_TRIGGER):
@@ -1394,6 +1282,7 @@ async def digest_loop():
                     gid, config.DIGEST_INTERVAL_HOURS, pending,
                     count_trigger=config.DIGEST_COUNT_TRIGGER))
         except Exception as e:
+            STATUS.error(e)
             logger.error("⚠️ 群记忆调度异常: %s", str(e)[:200])
 
 
@@ -1406,7 +1295,7 @@ _last_proactive = {}
 async def proactive_loop():
     """主动性巡检：每 30 分钟看一眼，闸门全过就让模型照着最近的话题开个头。"""
     while True:
-        await asyncio.sleep(config.PROACTIVE_CHECK_SECONDS)
+        await STATUS.sleep(config.PROACTIVE_CHECK_SECONDS)
         try:
             now = time.time()
             hour = datetime.now().hour
@@ -1427,80 +1316,25 @@ async def proactive_loop():
             if len(fresh) < 2:
                 continue
             topics = "\n".join(f"- {b.get('text', '')[:60]}" for b in fresh[-4:])
-            prompt = naming.render(prompts.PROMPT_PROACTIVE, topics=topics)
-            raw = await call_model([{"role": "user", "content": prompt}],
-                                   config.AI_MAX_TOKENS_BANTER)
-            body, _ = split_cmd(raw or "")
+            ok, _ = runtime.GROUP_BUCKET.try_acquire(gid)
+            if not ok or not runtime.BUDGET.can_consume():
+                continue
+            prompt = naming.render(prompts.PROMPT_PROACTIVE).replace("{topics}", topics)
+            body, _ = await get_ai_reply(
+                f"{gid}_proactive", prompt, mode=runtime.STATE.get_mode(gid),
+                is_random_banter=True, context_hint=topics,
+                owner_label=owner_label(gid), state_note=activation.state_line("", mood_v),
+                allow_fallback=False)
             if not body or body.strip().upper() == "SKIP" or _garbage_run(body):
                 continue    # 模型自己觉得没得接/又抽风了——这轮不说话
-            # 主动发言也吃令牌桶 + 日预算（不弹限流提示，这轮跳过就行）
-            ok, _ = runtime.GROUP_BUCKET.try_acquire(gid)
-            if not ok or not runtime.BUDGET.try_consume():
-                continue
             if await post_to_group(gid, body.strip()):
                 _last_proactive[gid] = time.time()
                 logger.info("🌙 [自发开口] 距上次群消息 %.0f 分钟", (time.time() - last_msg_ts) / 60)
         except asyncio.CancelledError:
             raise
         except Exception as e:
+            STATUS.error(e)
             logger.error("❌ 主动巡检异常（不影响主流程）: %s", e)
-
-
-# ── 读图（2026-10-19，克制版）──
-# 群友发图 → glm-4v-flash（这把 key 上免费，实测可用）一句话客观描述 → 描述替换 [图片]
-# 标记进背景缓存，**读一次永久复用**（QQ 图床 URL 有时效，描述文本才是能存的）。
-# 克制三闸：60s 冷却 / 每日 30 张 / 只在「要回复这张图」或闸门放行时读。
-_vision_state = {"last": 0.0, "day": "", "count": 0}
-_caption_cache = {}
-
-
-def _vision_gate(now):
-    """异步预读的闸门（克制）：开关 + 冷却 + 每日上限。返回 True 并**消耗**一次名额。"""
-    if not config.VISION_ENABLED:
-        return False
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if _vision_state["day"] != today:
-        _vision_state["day"], _vision_state["count"] = today, 0
-    if _vision_state["count"] >= config.VISION_DAILY_CAP:
-        return False
-    if now - _vision_state["last"] < config.VISION_COOLDOWN_SECONDS:
-        return False
-    _vision_state["last"] = now
-    _vision_state["count"] += 1
-    return True
-
-
-def _vision_budget_ok(now):
-    """回复路径的同步读图只受每日上限约束（回复需要它，不吃冷却）。"""
-    if not config.VISION_ENABLED:
-        return False
-    today = time.strftime("%Y-%m-%d", time.localtime(now))
-    if _vision_state["day"] != today:
-        _vision_state["day"], _vision_state["count"] = today, 0
-    return _vision_state["count"] < config.VISION_DAILY_CAP
-
-
-async def _caption_into_buffer(group_id, image_url, entry_time):
-    """异步读一张图，把一句话描述替换进背景缓存。失败就保持裸 [图片]。"""
-    try:
-        caption = _caption_cache.get(image_url)
-        if caption is None:
-            caption = await providers.describe_image(image_url)
-    except Exception as e:
-        logger.warning("🖼 读图异常: %s", str(e)[:100])
-        return
-    if not caption:
-        return
-    _caption_cache[image_url] = caption
-    if len(_caption_cache) > 300:
-        _caption_cache.clear()      # 简单防膨胀：清了也无所谓，大不了重新读
-    for entry in group_buffers.get(group_id) or []:
-        if entry.get("text") == "[图片]" and abs(float(entry.get("time") or 0) - entry_time) < 5:
-            entry["text"] = f"[图片：{caption}]"
-            runtime.STATE.mark_dirty()
-            logger.info("🖼 [图片已描述] %s", caption[:70])
-            return
-    logger.info("🖼 [图片描述已入缓存] %s", caption[:70])
 
 
 # ── 承诺催债 ──
@@ -1515,7 +1349,9 @@ async def post_to_group(group_id, text):
     if client is None or not text:
         return False
     try:
-        await client.api.post_group_message(group_openid=group_id, content=text, msg_type=0)
+        sent = await client.api.post_group_message(group_openid=group_id, content=text, msg_type=0)
+        if not sent:
+            return False
         logger.info("📢 [主动发言] 群 %s | %s", group_id[-6:], text.replace("\n", " ")[:150])
         return True
     except Exception as e:
@@ -1529,7 +1365,7 @@ async def dun_promises(group_id):
     if not dunnable:
         return
     row = dunnable[0]
-    if not runtime.BUDGET.try_consume():
+    if not runtime.BUDGET.can_consume():
         logger.warning("🛑 今日额度已用尽，本次催债跳过（%d/%d）", runtime.BUDGET.used, runtime.BUDGET.limit)
         return
     runtime.STATE.mark_dirty()
@@ -1558,7 +1394,7 @@ async def dun_promises(group_id):
 async def promise_loop():
     """后台催债：每小时看一次，只在白天、且群里当天有人说话时才开口。"""
     while True:
-        await asyncio.sleep(config.PROMISE_CHECK_INTERVAL)
+        await STATUS.sleep(config.PROMISE_CHECK_INTERVAL)
         if not config.PROMISE_ENABLED:
             continue
         try:
@@ -1571,6 +1407,7 @@ async def promise_loop():
                     continue
                 await dun_promises(gid)
         except Exception as e:
+            STATUS.error(e)
             logger.error("⚠️ 催债调度异常: %s", str(e)[:200])
 
 
@@ -1590,6 +1427,9 @@ async def promise_loop():
 class GroupBot(botpy.Client):
     async def on_ready(self):
         _bot_ref["client"] = self
+        STATUS.lifecycle = "ready"
+        STATUS.gateway_connected = True
+        STATUS.write()
         # 平台昵称登记进 naming：它是「附带别名」，不是触发词的权威来源 ——
         # 只会往 bot_names() 里**多加**一个叫法，顶不掉 .env 的 BOT_NAMES；
         # 而且登录时读一次，改了 QQ 昵称要重启进程才会生效。
@@ -1629,7 +1469,7 @@ class GroupBot(botpy.Client):
         logger.info("🗄️  原文归档=%s/ （%d 天 / %d 条）| 摘要 MD=%s/",
                     config.ARCHIVE_DIR, arch["days"], arch["lines"], config.MEMORY_DIR)
         if config.DIGEST_ENABLED:
-            pending = {g: len(runtime.ARCHIVE.since(g, runtime.DIGESTS.last_run(g))) for g in runtime.DIGESTS.groups}
+            pending = {g: len(runtime.ARCHIVE.pending(g, runtime.DIGESTS.cursor(g), since_ts=runtime.DIGESTS.last_run(g))[0]) for g in runtime.DIGESTS.groups}
             logger.info("🧠 群聊长期记忆已启用 | 攒够 %d 条或每 %.0f 小时压缩一次 | 待压缩 %s",
                         config.DIGEST_COUNT_TRIGGER, config.DIGEST_INTERVAL_HOURS,
                         "、".join(f"群{k[-6:]}:{v}条" for k, v in pending.items()) or "无")
@@ -1640,7 +1480,9 @@ class GroupBot(botpy.Client):
             logger.info("🧾 承诺催债已启用 | 在账 %d 条 | 宽限 %.0f 小时，最多催 %d 次",
                         total, config.PROMISE_GRACE_HOURS, config.PROMISE_MAX_NAG)
         logger.info("=" * 50)
-        asyncio.create_task(probe_provider())
+        task = asyncio.create_task(probe_provider())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
     async def on_group_message_create(self, message: GroupMessage):
         await self.handle_group_msg(message, is_at=False)
@@ -1654,9 +1496,6 @@ class GroupBot(botpy.Client):
         if message.id in processed_msg_ids:
             return
         processed_msg_ids.append(message.id)
-
-        # 这条消息也算「群还活着」：被让位的供应商要等群静下来才回来重试（见 _provider_available）
-        _note_activity()
 
         raw_content = message.content or ""
         group_id = message.group_openid
@@ -1672,8 +1511,8 @@ class GroupBot(botpy.Client):
                     and getattr(att, "url", None):
                 image_url = att.url
                 break
-        if image_url and not raw_content.strip():
-            raw_content = "[图片]"
+        if image_url:
+            raw_content = f"{raw_content} [图片]".strip()
 
         # 2. 识别 @机器人 或直接喊它的名字
         #    「要不要理这条」必须看**原始 content**：判定要趁 <@!openid> 还在的时候做。
@@ -1694,9 +1533,10 @@ class GroupBot(botpy.Client):
             raw_content, mention_label=mention_label_for(group_id, bot_id, bot_name))
         # 名字全部按当前配置取，代码里不写死任何人名（见 naming.py）
         has_name_call = any(n and n in user_input for n in naming.bot_names())
-        is_at = is_at or ("<@" in raw_content) or has_name_call
+        bot_tags = (f"<@{bot_id}>", f"<@!{bot_id}>") if bot_id else ()
+        is_at = is_at or any(tag in raw_content for tag in bot_tags) or has_name_call
         if is_at:
-            user_input = _strip_call(user_input)
+            user_input = strip_call(user_input)
 
         # 读不出人话的消息（纯表情/纯链接）到这里就没了。整条丢弃：
         # 不入库、不进背景缓存、不回复。只有「@了机器人却一个字没说」例外，
@@ -1714,8 +1554,9 @@ class GroupBot(botpy.Client):
         # ⚠️ 本地控制指令（「猫娘模式」这类）照样落盘留痕，但打上 cmd 标记 ——
         #    压缩长期记忆时会跳过它们。它们是操作不是聊天，进了压缩就变成
         #    「这人想变猫娘」这种人物事实（2026-09-21 实测事故）。
-        runtime.ARCHIVE.append(group_id, sender_openid, user_input, at=is_at,
-                       cmd=is_control_command(user_input))
+        archived = runtime.ARCHIVE.append(
+            group_id, sender_openid, user_input, at=is_at,
+            cmd=is_control_command(user_input), message_id=message.id)
         if config.DIGEST_ENABLED:
             runtime.DIGESTS.touch(group_id)
         # 记一下这个群最近有人说话：主动催债前要确认群里还活着。
@@ -1729,13 +1570,8 @@ class GroupBot(botpy.Client):
         #     口头禅就得回来加一个词，而且把「？」这种真实的接话信号也一起挡掉了。
         buf = group_buffers[group_id]
         if not buf or buf[-1]["sender"] != sender_openid or buf[-1]["text"] != user_input:
-            buf.append({"sender": sender_openid, "text": user_input, "time": time.time()})
+            buf.append({"sender": sender_openid, "text": user_input, "time": time.time(), "message_id": message.id})
             runtime.STATE.data["buffers"][group_id] = list(buf)
-
-        # 读图（克制版）：闸门放行就异步读——描述落进背景缓存，**读一次永久复用**
-        # （QQ 图床 URL 有时效，描述文本才是能存的）。不挡主流程：描述慢一拍，下一轮就看得见。
-        if image_url and "[图片]" in user_input and _vision_gate(time.time()):
-            asyncio.create_task(_caption_into_buffer(group_id, image_url, time.time()))
 
         # 4. 群主认领 —— **群里永远不授权**，这里只负责把人指到私聊去。
         #    以前这段真的会在群里认主（谁先喊谁得），等于把身份挂在大喇叭上招领；
@@ -1745,7 +1581,8 @@ class GroupBot(botpy.Client):
             if runtime.OWNER_OPENID is None:
                 # 每个群只正面回一次，免得有人反复喊就反复刷屏
                 if claim_redirect_pending(group_id):
-                    await safe_reply(message, OWNER_CLAIM_HINT)
+                    await safe_reply(message, OWNER_CLAIM_HINT if config.OWNER_CLAIM_PHRASE
+                                     else "当前没有开放群主认领，需要的话请联系部署者。")
                 return
             if runtime.OWNER_OPENID == sender_openid:
                 await safe_reply(message, f"{owner}，您早就认领过了 —— 您的 OpenID 已经焊死在我的"
@@ -1855,7 +1692,7 @@ class GroupBot(botpy.Client):
 
         # 名字绑错人时用它当场核对：谁的名字挂在哪个人头上
         if hits(user_input, NAME_TABLE_TRIGGERS):
-            rows = _all_named(group_id)
+            rows = named_members(group_id)
             await safe_reply(message, relations.render_name_table(rows, mode=current_mode))
             return
 
@@ -1868,7 +1705,7 @@ class GroupBot(botpy.Client):
             if hits(user_input, PROMISE_CLEAR_TRIGGERS):
                 rec = runtime.RELATIONS.get(group_id, sender_openid)
                 nick = (rec or {}).get("nick") or ""
-                removed = runtime.PROMISES.resolve(group_id, keyword=nick or sender_openid[-4:])
+                removed = runtime.PROMISES.resolve(group_id, who=sender_openid, keyword=nick)
                 if removed:
                     runtime.STATE.mark_dirty()
                     await safe_reply(message,
@@ -1948,32 +1785,25 @@ class GroupBot(botpy.Client):
                     runtime.STATE.mark_dirty()
 
         if not should_reply:
+            if image_url:
+                task = asyncio.create_task(media.caption_for(
+                    group_id, message.id, sender_openid, image_url))
+                _media_tasks.add(task)
+                task.add_done_callback(_media_tasks.discard)
             return
 
-        # 回复要引用图片时同步读一张（绕过冷却、只吃每日上限）——回复等得起这一两秒。
-        # 异步预读可能已经把描述放进缓存了，命中就不重复调。
-        if image_url and config.VISION_ENABLED and "[图片]" in user_input:
-            caption = _caption_cache.get(image_url)
-            if caption is None and _vision_budget_ok(time.time()):
-                caption = await providers.describe_image(image_url)
-                if caption:
-                    _caption_cache[image_url] = caption
-            if caption:
-                user_input = f"{user_input}\n[图片：{caption}]"
-            elif "[图片]" in user_input:
-                # 读不出来就直说——模型看不见图时会开始瞎编（实测「糊得像马赛克」）
-                user_input = (f"{user_input}\n"
-                              "（这张图你读不出来：别装作看见了，更别评价画质——"
-                              "直接说没看懂，请对方描述一下或重发一张清晰的）")
-
-        if is_at and not user_input:
-            me = naming.bot_name()
-            await safe_reply(message, f"找{me}啥事？直接说，{me}在线接单！")
+        if is_at and not user_input and not image_url:
+            await safe_reply(message, f"找{naming.bot_name()}啥事？直接说就行。")
             return
-
-        # 10. 两道闸：群级令牌桶 + 全局日预算
         if not await BudgetGate.check(message, group_id):
             return
+        if image_url:
+            caption = await media.caption_for(
+                group_id, message.id, sender_openid, image_url, foreground=True)
+            if caption:
+                user_input = f"{user_input}\n[图片：{caption}]"
+            else:
+                user_input += "\n（本轮图片暂不可读；明确说明这一点，不猜测图中内容。）"
 
         # 11. 组装群聊背景 + session，走 AI
         context_hint = ""
@@ -2026,12 +1856,11 @@ class GroupBot(botpy.Client):
                 target_record, sender_openid, mode=active_mode,
                 other_names=_other_names(group_id, sender_openid),
             )
-            if target_record.get("pending_milestone"):
-                # 消费掉，并记下「今天已经报过一次」—— 台阶播报一天只说一次，
-                # 免得放宽日上限之后它把同一句播成每日常态（见 relations.apply 里的说明）。
+        pending_milestone = (target_record or {}).get("pending_milestone")
+        def commit_milestone():
+            if pending_milestone and target_record.get("pending_milestone") == pending_milestone:
                 target_record["pending_milestone"] = None
                 target_record["told_day"] = time.strftime("%Y-%m-%d")
-                runtime.STATE.mark_dirty()
 
         # 群聊长期记忆注入（2026-10-06 对照实验后收敛）：**只喂人物名册**。
         # 名册是防张冠李戴的事实底账（谁叫什么、当前什么状态），一行一人、全是稳定状态。
@@ -2051,16 +1880,14 @@ class GroupBot(botpy.Client):
                         group_id,
                         prompts.PROMPT_MEMORY_HEADER + "\n" + people_block)
 
-        reply_text, delta = await get_ai_reply(
-            session_id, user_input,
+        reply_text, delta, delivery = await reply_in_session(
+            message, session_id, user_input, on_delivered=commit_milestone,
+            owner_hint_group=group_id,
             is_owner=is_owner, mode=active_mode,
             context_hint=context_hint, is_random_banter=is_random,
             relation_note=relation_note, group_memory=group_memory,
             owner_label=owner_label(group_id), state_note=state_note,
         )
-        if owner_hint_pending(group_id):
-            reply_text = f"{reply_text}\n{OWNER_CLAIM_HINT}"
-        await safe_reply(message, reply_text)
 
         # 日内微调（2026-10-06 改）：
         #   「被 @ 且没扣分就 +1」撤掉了 —— 那等于把好感度变成「被搭理次数」，
@@ -2148,18 +1975,16 @@ class GroupBot(botpy.Client):
             await safe_reply(message, NICK_PRIVATE_CHAT_HINT)
             return
 
-        if not runtime.BUDGET.try_consume():
+        if not runtime.BUDGET.can_consume():
             logger.warning("🛑 今日额度已用尽，私聊也一并拒绝（%d/%d）", runtime.BUDGET.used, runtime.BUDGET.limit)
             runtime.STATE.mark_dirty()
             await safe_reply(message, "（小声）今天额度用冒了，明天再陪你聊啊兄弟。")
             return
         runtime.STATE.mark_dirty()
 
-        reply_text, _delta = await get_ai_reply(
-            f"user_{sender_openid}", user_input, is_owner=is_owner, mode="normal",
-            private=True,
-        )
-        await safe_reply(message, reply_text)
+        await reply_in_session(
+            message, f"user_{sender_openid}", user_input,
+            is_owner=is_owner, mode="normal", private=True)
 
 
 # ══════════════════════ 8. 启动 / 优雅退出 / 重连 ══════════════════════
@@ -2188,7 +2013,7 @@ def install_signal_handlers():
 async def prune_loop():
     """定期清理过期会话，避免长期运行下内存无界增长。"""
     while True:
-        await asyncio.sleep(config.SESSION_PRUNE_INTERVAL)
+        await STATUS.sleep(config.SESSION_PRUNE_INTERVAL)
         try:
             dropped = runtime.SESSIONS.prune()
             if dropped:
@@ -2199,10 +2024,11 @@ async def prune_loop():
                 runtime.STATE.mark_dirty()
                 logger.info("🧹 已清理 %d 份长期失联的关系档案，当前 %s", stale, runtime.RELATIONS.counts())
         except Exception as e:
+            STATUS.error(e)
             logger.error("⚠️ 会话清理异常: %s", e)
 
 
-def run_bot():
+def _run_bot():
     errors = config.validate()
     if errors:
         raise SystemExit("❌ 配置缺失：\n  - " + "\n  - ".join(errors))
@@ -2212,26 +2038,38 @@ def run_bot():
     install_ws_watchdog()
     load_owner()
 
-    _main_models = MODEL_CHAINS.get(config.AI_PROVIDER) or []
+    _main_models = providers.MODEL_CHAINS.get(config.AI_PROVIDER) or []
     logger.info("🤖 供应商=%s | 主模型=%s | 梯队=%s",
                 config.PROVIDER["label"],
                 _main_models[0] if _main_models else "（无可用 Key）",
-                " → ".join(config.PROVIDER_PRESETS[n]["label"] for n in PROVIDER_CHAIN))
+                " → ".join(config.PROVIDER_PRESETS[n]["label"] for n in providers.PROVIDER_CHAIN))
     if runtime.SESSIONS._sessions:
         logger.info("💾 已恢复 %s 个会话上下文", len(runtime.SESSIONS._sessions))
 
+    STATUS.configure(config.STATUS_FILE, lambda: {
+        "providers": providers.status(),
+        "budget": {"day": runtime.BUDGET.today(), "used": runtime.BUDGET.used,
+                   "limit": runtime.BUDGET.limit, "remaining": runtime.BUDGET.remaining},
+        "delivery": SENDER.status(),
+        "paths": {"state": config.STATE_FILE, "archive": config.ARCHIVE_DIR,
+                  "memory": config.MEMORY_DIR, "log": config.LOG_FILE}})
+    STATUS.write()
     install_signal_handlers()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.create_task(runtime.STATE.flush_loop())
-    loop.create_task(ws_watchdog_loop())
-    loop.create_task(prune_loop())
+    jobs = {
+        "flush": lambda: runtime.STATE.flush_loop(sleep=STATUS.sleep, on_error=STATUS.error),
+        "watchdog": ws_watchdog_loop, "prune": prune_loop,
+        "proactive": proactive_loop, "resend": resend_queue_loop,
+    }
     if config.DIGEST_ENABLED:
-        loop.create_task(digest_loop())
+        jobs["digest"] = digest_loop
     if config.PROMISE_ENABLED:
-        loop.create_task(promise_loop())
-    loop.create_task(proactive_loop())
-    loop.create_task(resend_queue_loop())
+        jobs["promise"] = promise_loop
+    for name, factory in jobs.items():
+        task = loop.create_task(STATUS.run(name, factory))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
     attempt = 0
     while True:
@@ -2239,7 +2077,8 @@ def run_bot():
         try:
             intents = botpy.Intents(public_messages=True, public_guild_messages=True)
             # timeout：QQ API 的 HTTP 超时（botpy 默认 5s，见 config.QQ_API_TIMEOUT 的注释）
-            client = GroupBot(intents=intents, timeout=int(config.QQ_API_TIMEOUT))
+            client = GroupBot(intents=intents, timeout=int(config.QQ_API_TIMEOUT),
+                              ext_handlers=False)
             client.run(appid=config.QQ_APP_ID, secret=config.QQ_APP_SECRET)
             attempt = 0
         except SystemExit:
@@ -2251,6 +2090,9 @@ def run_bot():
             logger.warning("🛑 收到 Ctrl+C")
             raise
         finally:
+            STATUS.gateway_connected = False
+            STATUS.lifecycle = "reconnecting"
+            STATUS.write()
             try:
                 runtime.STATE.save_now(force=True)
             except Exception as e:
@@ -2268,11 +2110,34 @@ def run_bot():
         time.sleep(delay)
 
 
-if __name__ == "__main__":
+async def _shutdown(*, cancel_all=False):
+    tasks = (list(asyncio.all_tasks() - {asyncio.current_task()})
+             if cancel_all else list(_background_tasks))
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await media.close(cancel=True)
+    tasks = list(_media_tasks)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await providers.close()
+
+
+def run_bot():
     try:
-        run_bot()
+        return _run_bot()
     finally:
+        STATUS.lifecycle = "stopped"
+        STATUS.gateway_connected = False
+        STATUS.write()
         try:
+            loop = asyncio.get_event_loop()
+            if not loop.is_closed() and not loop.is_running():
+                loop.run_until_complete(_shutdown(cancel_all=True))
+        finally:
             runtime.STATE.save_now(force=True)
-        except Exception:
-            pass
+
+
+if __name__ == "__main__":
+    run_bot()

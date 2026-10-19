@@ -1,0 +1,14 @@
+services:
+  regular:
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      REGULAR_HOME: /app
+      DATA_DIR: /app/data
+    volumes:
+      - regular-data:/app/data
+    stop_grace_period: 30s
+volumes:
+  regular-data:

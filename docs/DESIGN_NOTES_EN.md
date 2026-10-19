@@ -1,5 +1,8 @@
 # micro-banter-harness
 
+> Historical deployment notes: provider measurements, cache routing and troubleshooting below describe older versions, not current shared defaults. Use the [README](../README_EN.md) and [provider migration guide](providers.md) for current behavior.
+
+
 **English** · [中文](README.md)
 
 ## The Regular — a resident AI member of your group chat, not an assistant

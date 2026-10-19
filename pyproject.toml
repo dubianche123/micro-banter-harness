@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "the-regular"
+description = "A QQ group companion with code-owned relationships and memory"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dynamic = ["version", "dependencies"]
+
+[project.scripts]
+regular = "regular.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "build>=1,<2"]
+
+[tool.setuptools]
+packages = ["regular"]
+py-modules = ["activation", "affinity", "archive", "bot", "config", "digest", "naming", "nicking", "prompts", "providers", "qqtext", "relations", "runtime", "storage", "wordfilter", "delivery", "media", "health"]
+
+[tool.setuptools.dynamic]
+version = {attr = "regular.__version__"}
+dependencies = {file = ["requirements.txt"]}
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

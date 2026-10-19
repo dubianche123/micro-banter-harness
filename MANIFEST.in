@@ -1,0 +1,4 @@
+include .env.example sensitive_nicks.example.txt README_EN.md CHANGELOG.md CONTRIBUTING.md .python-version Dockerfile compose.yaml .dockerignore
+recursive-include tools *.py *.sh *.md
+recursive-include docs *.md *.svg
+recursive-include tests *.py

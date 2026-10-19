@@ -16,6 +16,7 @@ import inspect
 import os
 import re
 import sys
+import subprocess
 import tempfile
 import types
 import unittest
@@ -95,14 +96,18 @@ class BaseClaimTest(unittest.IsolatedAsyncioTestCase):
         self.sent = []
         self._orig_reply = bot.safe_reply
 
-        async def fake_reply(message, text):
+        async def fake_reply(message, text, *, on_delivered=None, **kwargs):
             self.sent.append(text)
+            result = bot.DeliveryResult("delivered", text, {"id": "fake-receipt"})
+            if on_delivered:
+                on_delivered(result)
+            return result
 
         bot.safe_reply = fake_reply
         runtime.ARCHIVE = _StubSink()
         runtime.DIGESTS = _StubSink()
         runtime.OWNER_OPENID = None
-        config.OWNER_CLAIM_PHRASE = self.saved_phrase
+        config.OWNER_CLAIM_PHRASE = "test-only-private-phrase"
         # 清掉每群标记，让「只提示一次」这类用例彼此独立
         runtime.STATE.data.get("groups", {}).pop(GROUP, None)
         self._mid = 0
@@ -386,9 +391,16 @@ class ClaimPhraseIsScrubbedTest(unittest.TestCase):
     """
 
     def test_phrase_is_registered_as_a_sensitive_word(self):
-        self.assertTrue(wordfilter.has_hit(f"口令是{config.OWNER_CLAIM_PHRASE}"))
-        self.assertEqual(wordfilter.scrub(f"口令是{config.OWNER_CLAIM_PHRASE}"),
-                         "口令是【已隐去】")
+        with tempfile.TemporaryDirectory() as directory:
+            env = dict(os.environ, REGULAR_HOME=directory, DATA_DIR=directory,
+                       OWNER_CLAIM_PHRASE="test-only-private-phrase", ZHIPU_API_KEY="",
+                       GEMINI_API_KEY="", OPENAI_API_KEY="")
+            result = subprocess.run([sys.executable, "-c",
+                "import bot,config,wordfilter; "
+                "assert wordfilter.has_hit('口令是'+config.OWNER_CLAIM_PHRASE); "
+                "assert wordfilter.scrub('口令是'+config.OWNER_CLAIM_PHRASE)=='口令是【已隐去】'"],
+                env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_short_phrase_is_rejected(self):
         """一个字的口令本来就该改掉，而且单字进词表误伤面太大。"""

@@ -1,0 +1,26 @@
+name: Bug report / 故障反馈
+description: Report a reproducible problem without private credentials or chat logs.
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version, Python and platform
+      placeholder: regular --version; python --version; macOS/Linux/Docker
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps and expected/actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted local diagnostics
+      description: Use regular doctor --json and regular status --json. Review paths/aliases before sharing; omit keys, secrets, OpenIDs and raw chat.
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal offline reproduction
+      description: Prefer regular demo or a focused test with a fake provider.

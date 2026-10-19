@@ -6,7 +6,7 @@
 
 **A resident group-chat companion with code-owned relationships and memory.**
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-5375B5)](requirements.txt) [![QQ](https://img.shields.io/badge/QQ-Group%20%2B%20C2C-B48543)](bot.py) [![License](https://img.shields.io/badge/License-MIT-3A9F82)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-5375B5)](requirements.txt) [![Offline checks](https://github.com/dubianche123/micro-banter-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/dubianche123/micro-banter-harness/actions/workflows/ci.yml) [![QQ](https://img.shields.io/badge/QQ-Group%20%2B%20C2C-B48543)](bot.py) [![License](https://img.shields.io/badge/License-MIT-3A9F82)](LICENSE)
 
 [中文](README.md) · **English**
 
@@ -25,7 +25,7 @@ Under that social surface is a small agent harness: **code holds durable state, 
 | A familiar voice | Eight relationship tiers influence tone and activation; code applies scores, nonlinear growth, decay and limits. |
 | A different way of getting along with each person | The digest proposes an interaction mode (banter/confidant/defender/hype) from real interactions; a hard whitelist validates it into the archive. |
 | A character that can stay quiet | Mention/name triggers, probability, cooldown, quiet hours, mood and affinity control replies. |
-| Understand the images people send | Images go through a free multimodal read once; a one-line caption is cached in the background forever. |
+| Understand the images people send | A configured vision model captions images; results are reused by message identity under budget and vision limits. |
 | Local games and lookups | Dice, relationship queries, rankings and ledger lookup have local handlers. |
 | Rename a group member | Per-group identity, owner permissions, name checks and rename cooldowns. |
 | Change the atmosphere | Shared personality modes; eligibility is resolved from local state. |
@@ -63,70 +63,128 @@ This layout creates opportunities for prefix caching. Actual cache behavior depe
 
 ## Quick start
 
-### 1. Clone & Install Dependencies
+### 1. Install and try the local demo
 
-Requires Python 3.10+. The project is ultra-lightweight: **no databases, no heavy frameworks**, just 5 lean dependencies:
+Python 3.10+ is required; Python 3.12 is recommended. No database is needed.
 
 ```bash
 git clone https://github.com/dubianche123/micro-banter-harness.git
 cd micro-banter-harness
-
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
+regular demo
+regular demo 查好感 掷骰子 群史记
 ```
 
-### 2. Configure `.env`
+In the interactive demo, `/user NAME` switches speakers, `/group ID` switches groups,
+and `/help` lists controls.
 
-Copy the template:
+The demo uses the production message handler, temporary state and a fixed fake model.
+It never connects to QQ or real models; the temporary data is removed on exit.
+It demonstrates local commands and relationship handling, not model quality or QQ permissions.
+
+### 2. Initialize and check configuration
 
 ```bash
-cp .env.example .env
+regular init --interactive
+regular doctor
 ```
 
-Open `.env` and fill in the essential credentials:
+Secret prompts are hidden. Initialization creates a private `0600` `.env` and never
+overwrites an existing file. For noninteractive setup, use `regular init` and edit
+the blank credentials. See [.env.example](.env.example); real environment variables
+have precedence over the file.
 
-```env
-# 1. Tencent QQ Open Platform Credentials
-QQ_APP_ID=your_app_id
-QQ_APP_SECRET=your_app_secret
+Set `QQ_APP_ID` and `QQ_APP_SECRET`. All entry points default to `AI_PROVIDER=openai`:
+explicitly provide `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODELS`.
+Zhipu/Gemini remain optional presets. Set `BOT_NAMES` to the actual group aliases;
+blank `FALLBACK_PROVIDER` disables cross-endpoint fallback.
 
-# 2. What the bot is called in your group (Trigger words, comma-separated)
-BOT_NAMES=Buddy,Alex,@Buddy
+All endpoints share one bounded policy: explicit candidates, up to 3 attempts,
+20 seconds per attempt and 30 seconds total by default. Every physical attempt
+consumes the same daily budget. Routing uses SDK error types and HTTP status,
+without vendor-message matching, cache yielding or slow-model special cases.
+See [provider configuration and migration](docs/providers.md) for task chains,
+explicit vision capabilities and retired settings.
 
-# 3. Secret phrase to claim ownership in private chat
-OWNER_CLAIM_PHRASE=your_secret_passphrase_here
+Owner claiming is disabled by default. For owner features, configure a private
+`OWNER_CLAIM_PHRASE`, then send that phrase in C2C direct chat. Never send it in a
+group. An existing `owner.txt` remains valid. TLS verification is on by default.
 
-# 4. Primary AI Provider (gemini or zhipu) and Key
-AI_PROVIDER=gemini
-GEMINI_API_KEY=your_gemini_key
-# ZHIPU_API_KEY=your_fallback_zhipu_key (optional)
-```
+`regular doctor` checks local configuration, dependencies, resolved paths, saved
+JSON and configured capabilities. It does not connect or infer. Explicit
+`regular doctor --network` permits provider `/models` metadata checks; success
+does not prove model access/quota. `--json` provides structured diagnostics without
+credentials; review local paths and bot aliases before sharing them.
 
-### 3. QQ Platform & Group Settings (Two Important Steps)
+### 3. Configure QQ and run
 
-1. **Enable All Group Messages**: In QQ Group Settings $\to$ Bot Settings $\to$ set message scope to **"Obtain all messages in group" (获取群内全部消息)**. This is required for the bot to observe context and chime in.
-2. **Enable Direct Message (C2C) Permissions**: In the QQ Open Platform console, enable C2C direct message permissions for safe ownership claim and 1-on-1 chatting.
-
-### 4. Run & Daemonize
+1. Configure your QQ application, sandbox members and C2C permissions.
+2. In group settings → the bot → message scope, select **获取群内全部消息**.
+3. These switches require live verification; local diagnostics cannot confirm them.
 
 ```bash
-# Foreground run
-python bot.py
-
-# Or background run (with proxy if needed):
-HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 \
-NO_PROXY=bigmodel.cn,open.bigmodel.cn nohup python -u bot.py >> bot.log 2>&1 &
+regular run
+# In a second terminal, inspect gateway/budget/providers/background-task status:
+regular status
+regular status --json
 ```
 
-> 🍏 **For macOS users**: Comes with a one-click launchd daemon installer (keeps process alive and prevents machine sleep):
-> ```bash
-> bash tools/launchd/install.sh
-> ```
+Use `regular --directory /path/to/instance doctor` for a separate deployment
+working directory. `.env` and relative runtime paths are resolved there.
+`python bot.py` remains supported. Stop foreground execution with Ctrl+C. Run one
+instance per deployment.
 
-### 5. Claim Group Ownership via DM
+### 4. Choose a process supervisor
 
-After launching, the owner sends `OWNER_CLAIM_PHRASE` in a **private DM to the bot**. Once verified, the bot permanently binds your OpenID, locks your affinity to maximum, and grants exclusive admin commands.
+The macOS helper generates a plist using your actual paths. It never starts a
+service by default, kills processes, injects a proxy or changes power settings:
+
+```bash
+bash tools/launchd/install.sh          # Generate data/io.github.the-regular.plist; inspect it
+bash tools/launchd/install.sh install  # Explicitly install; do not start yet
+bash tools/launchd/install.sh start    # Explicitly start; stop the manual instance first
+bash tools/launchd/install.sh status
+# bash tools/launchd/install.sh stop
+```
+
+It uses `.venv/bin/python` by default; set `REGULAR_PYTHON=/absolute/venv/bin/python`
+for another environment. Configure any required proxy in your own `.env`; the
+service reads the same deployment configuration.
+
+Linux users can follow the [systemd user-service steps](tools/systemd/README.md).
+The Docker path uses one container; first initialize/fill `.env` on the host:
+
+```bash
+docker compose build
+docker compose run --rm regular regular doctor
+docker compose up -d
+docker compose exec regular regular status
+docker compose logs -f
+```
+
+State, logs, archives and memory use the `regular-data` named volume; the container
+runs as a non-root user. Recreating it retains the volume. `docker compose down -v`
+deletes it, so keep your own backups. QQ uses outbound connections; no web port is
+exposed.
+
+### Upgrading and existing data
+
+New deployments use `data/`. If root-level `state.json`, `owner.txt`, `archive/` or
+`memory/` already exists, leaving `DATA_DIR` unset retains that layout and doctor
+reports it. No automatic move, merge or deletion occurs.
+
+To reorganize old data, stop the instance, back up those four items and `.env`,
+copy them to the target directory, explicitly set `DATA_DIR`, then check and
+restart. Existing `STATE_FILE`, `OWNER_FILE`, `ARCHIVE_DIR`, `MEMORY_DIR` and
+`LOG_FILE` overrides still take precedence and remain deployment-relative; review
+them during migration.
+
+The helper does not silently unload old `com.qqbot.xiaowang` or
+`com.qqbot.keepawake` services. Unload old services yourself before starting the new
+one to avoid duplicate replies, and restore your desired sleep policy separately.
+See [CHANGELOG](CHANGELOG.md) for changes.
 
 ---
 
@@ -136,7 +194,7 @@ After launching, the owner sends `OWNER_CLAIM_PHRASE` in a **private DM to the b
 | :--- | :--- | :---: |
 | **Chat** | `@bot` or say its name directly (e.g. `Buddy what's good`) | 1 call |
 | **Random Banter** | Talk normally in the group; it chimes in based on probability | 1 call |
-| **Send an image** | `@bot` with a picture (it reads it once and remembers) | 1 call + one free vision call |
+| **Send an image** | `@bot` with a picture (it reads it once and remembers) | 1 chat + up to 1 vision call (provider pricing applies) |
 | **Cyber Duel** | `roll dice` / `duel` / `掷骰子` / `比大小` | **0** |
 | **Claim / Rename** | `call me Alex` / `叫我阿强` / `别叫我了` | 0~1 call |
 | **Switch Mode** | `catgirl mode` / `crazy mode` / `discipline mode` / `fortune mode` | **0** |
@@ -154,10 +212,10 @@ After launching, the owner sends `OWNER_CLAIM_PHRASE` in a **private DM to the b
 
 Tweak bot behavior and budget guardrails in `.env`:
 
-* `BANTER_PROBABILITY`: Probability of random banter (default `0.08` or 8%)
-* `OWNER_MENTION_PROBABILITY`: Banter chance when owner is mentioned (default `0.25`)
+* `BANTER_PROBABILITY`: Probability of random banter (default `0.12` or 12%)
+* `OWNER_MENTION_PROBABILITY`: Banter chance when owner is mentioned (default `0.30`)
 * `BANTER_COOLDOWN_SECONDS`: Minimum cooldown between banter replies (default `120`s)
-* `AI_DAILY_BUDGET`: Max daily LLM calls for the whole group (default `3000`, prevents wallet drain)
+* `DAILY_BUDGET`: Max daily LLM calls for the whole group (default `3000`, prevents wallet drain)
 * `MODE_SWITCH_MIN_AFFINITY`: Minimum affinity level required to switch modes (default `familiar`)
 
 ---

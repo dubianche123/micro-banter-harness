@@ -1,0 +1,13 @@
+name: Feature request / 改进建议
+description: Describe an operator or group-chat problem and a small reusable solution.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Concrete user problem
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested behavior and existing open-source references

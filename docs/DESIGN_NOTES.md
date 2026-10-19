@@ -1,5 +1,8 @@
 # micro-banter-harness
 
+> 历史部署笔记：以下供应商测速、缓存策略与排错建议记录旧版本，不是当前共享版默认。当前安装见[README](../README.md)，通用路由和退役配置见[供应商迁移](providers.md)。
+
+
 [English](README_EN.md) · **中文**
 
 ## The Regular —— 一个常驻你们群的 AI 群友，不是助理

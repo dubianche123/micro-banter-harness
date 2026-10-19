@@ -42,7 +42,6 @@ class ThrottleRuleTest(unittest.TestCase):
 
     def setUp(self):
         self.saved = copy.deepcopy(nicking.NICK_FLOOD)
-        self.orig = (nicking.NICK_FLOOD, nicking._nick_rejects, nicking._nick_cool, nicking._nick_done)
         bot.reset_nick_flood()
         nicking.NICK_FLOOD = copy.deepcopy(self.saved)
         nicking.NICK_FLOOD["self_gap"] = 180.0
@@ -52,57 +51,57 @@ class ThrottleRuleTest(unittest.TestCase):
         bot.reset_nick_flood()
 
     def test_a_group_with_no_history_is_open(self):
-        self.assertIsNone(bot._nick_block_reason(GID, A, now=1000.0))
+        self.assertIsNone(nicking.nick_block_reason(GID, A, now=1000.0))
 
     def test_two_rejects_do_not_freeze_the_group_yet(self):
-        self.assertFalse(bot._nick_note_reject(GID, now=1000.0))
-        self.assertFalse(bot._nick_note_reject(GID, now=1010.0))
-        self.assertIsNone(bot._nick_block_reason(GID, A, now=1011.0),
+        self.assertFalse(nicking.nick_note_reject(GID, now=1000.0))
+        self.assertFalse(nicking.nick_note_reject(GID, now=1010.0))
+        self.assertIsNone(nicking.nick_block_reason(GID, A, now=1011.0),
                           "才两次就封，正常人会以为功能坏了")
 
     def test_third_reject_freezes_the_whole_group(self):
         nicking.NICK_FLOOD["max_rejects"] = 3
-        bot._nick_note_reject(GID, now=1000.0)
-        bot._nick_note_reject(GID, now=1010.0)
-        self.assertTrue(bot._nick_note_reject(GID, now=1020.0), "第三次该触发冷静期了")
+        nicking.nick_note_reject(GID, now=1000.0)
+        nicking.nick_note_reject(GID, now=1010.0)
+        self.assertTrue(nicking.nick_note_reject(GID, now=1020.0), "第三次该触发冷静期了")
 
-        hit = bot._nick_block_reason(GID, A, now=1030.0)
+        hit = nicking.nick_block_reason(GID, A, now=1030.0)
         self.assertIsNotNone(hit, "冷静期里居然放行了")
         self.assertIn("分钟", hit, "得告诉人等多久，不然他会一直重试")
 
     def test_cooldown_expires(self):
         nicking.NICK_FLOOD["max_rejects"] = 1
         nicking.NICK_FLOOD["cooldown"] = 600.0
-        bot._nick_note_reject(GID, now=1000.0)
-        self.assertIsNotNone(bot._nick_block_reason(GID, A, now=1100.0))
-        self.assertIsNone(bot._nick_block_reason(GID, A, now=1700.0),
+        nicking.nick_note_reject(GID, now=1000.0)
+        self.assertIsNotNone(nicking.nick_block_reason(GID, A, now=1100.0))
+        self.assertIsNone(nicking.nick_block_reason(GID, A, now=1700.0),
                           "冷静期过了就该恢复正常")
 
     def test_old_rejects_fall_out_of_the_window(self):
         nicking.NICK_FLOOD["max_rejects"] = 3
-        bot._nick_note_reject(GID, now=0.0)
-        bot._nick_note_reject(GID, now=10.0)
+        nicking.nick_note_reject(GID, now=0.0)
+        nicking.nick_note_reject(GID, now=10.0)
         # 隔了整整一个窗口之后，前面的账已经不算了
-        self.assertFalse(bot._nick_note_reject(GID, now=5000.0))
+        self.assertFalse(nicking.nick_note_reject(GID, now=5000.0))
 
     def test_the_owner_is_exempt_from_the_group_freeze(self):
         """群主的手不该被别人的火中取栗绑住 —— 他本来就有全群的改名权。"""
         nicking.NICK_FLOOD["max_rejects"] = 1
-        bot._nick_note_reject(GID, now=1000.0)
-        self.assertIsNone(bot._nick_block_reason(GID, A, is_owner=True, now=1010.0))
-        self.assertIsNotNone(bot._nick_block_reason(GID, A, is_owner=False, now=1010.0))
+        nicking.nick_note_reject(GID, now=1000.0)
+        self.assertIsNone(nicking.nick_block_reason(GID, A, is_owner=True, now=1010.0))
+        self.assertIsNotNone(nicking.nick_block_reason(GID, A, is_owner=False, now=1010.0))
 
     def test_the_same_person_cannot_rattle_off_names(self):
-        bot._nick_note_accept(GID, A, now=1000.0)
-        self.assertIsNotNone(bot._nick_block_reason(GID, A, now=1050.0),
+        nicking.nick_note_accept(GID, A, now=1000.0)
+        self.assertIsNotNone(nicking.nick_block_reason(GID, A, now=1050.0),
                              "刚改完就能再改，等于让人无限试")
-        self.assertIsNone(bot._nick_block_reason(GID, A, now=1000.0 + 181.0))
+        self.assertIsNone(nicking.nick_block_reason(GID, A, now=1000.0 + 181.0))
 
     def test_the_gap_is_per_name_not_per_group(self):
         """群主连着给**不同的人**改名不该被间隔卡住 —— 那是他的正常用法。"""
-        bot._nick_note_accept(GID, A, now=1000.0)
-        self.assertIsNone(bot._nick_block_reason(GID, B, now=1001.0))
-        self.assertIsNotNone(bot._nick_block_reason(GID, A, now=1001.0))
+        nicking.nick_note_accept(GID, A, now=1000.0)
+        self.assertIsNone(nicking.nick_block_reason(GID, B, now=1001.0))
+        self.assertIsNotNone(nicking.nick_block_reason(GID, A, now=1001.0))
 
 
 class ThrottleWiringTest(unittest.IsolatedAsyncioTestCase):
@@ -194,7 +193,7 @@ class ThrottleWiringTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已经有人叫这个", self._last())
         for i in range(3):
             await self._ask(f"重名测试{i}")
-        self.assertEqual(nicking._nick_rejects.get(GID, []), [], "重名被算进围攻统计了")
+        self.assertEqual(nicking.nick_flood_status(GID)["rejects"], [], "重名被算进围攻统计了")
 
     async def test_a_sensitive_word_hit_counts_as_an_attack(self):
         """撞本地敏感词是最硬的证据，当然要计数。"""
@@ -202,7 +201,7 @@ class ThrottleWiringTest(unittest.IsolatedAsyncioTestCase):
         try:
             for i in range(3):
                 await self._ask("典中典暗号测试")
-            self.assertIsNotNone(nicking._nick_cool.get(GID), "敏感词命中没触发冷静期")
+            self.assertIsNotNone(nicking.nick_flood_status(GID)["cooldown_until"], "敏感词命中没触发冷静期")
         finally:
             bot.wordfilter._runtime.discard("典中典暗号测试")
 
@@ -225,9 +224,9 @@ class ThrottleWiringTest(unittest.IsolatedAsyncioTestCase):
         bot.judge_nick = AsyncNoneJudge(self)
         await self._ask("阿强")
         nicking.NICK_FLOOD["window"] = 600.0
-        bot._nick_note_reject(GID)
-        bot._nick_note_reject(GID)
-        bot._nick_note_reject(GID)
+        nicking.nick_note_reject(GID)
+        nicking.nick_note_reject(GID)
+        nicking.nick_note_reject(GID)
         await self._ask("阿远")
         self.assertTrue(self.sent, "挡住了却不回话，用户只会以为机器人死机了")
         self.assertIn("歇", self._last())

@@ -7,6 +7,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -34,10 +35,9 @@ class BotNameTest(unittest.TestCase):
         self.assertEqual(naming.bot_name(), expected)
 
     def test_no_duplicate_when_platform_matches_config(self):
-        if not config.BOT_NAMES:
-            self.skipTest("没配 BOT_NAMES，测不了去重")
-        naming.set_platform_name(config.BOT_NAMES[0])
-        self.assertEqual(naming.bot_names().count(config.BOT_NAMES[0]), 1)
+        with patch.object(config, "BOT_NAMES", ["test-alias"]):
+            naming.set_platform_name("test-alias")
+            self.assertEqual(naming.bot_names().count("test-alias"), 1)
 
     def test_always_falls_back_to_something(self):
         """三样都没有（没配、平台也没给）也要有个自称，不能是空串。"""

@@ -17,6 +17,7 @@ sys.path.insert(0, "..")
 import runtime
 
 import bot
+import affinity
 import config
 import prompts
 import relations
@@ -174,14 +175,14 @@ class TwoTierStandardsTest(unittest.TestCase):
     def test_ledger_lists_tiers_by_nick(self):
         runtime.RELATIONS.set_nick(self.GID, "OID-LD-1", "阿强")
         runtime.RELATIONS.get(self.GID, "OID-LD-1")["score"] = 40
-        text = bot._affinity_ledger(self.GID)
+        text = affinity.affinity_ledger(self.GID)
         self.assertIn("阿强=", text)
         self.assertIn(relations.level_label(relations.level_key(40)), text)
 
     def test_ledger_none_when_nobody_named(self):
         for k in [k for k in list(runtime.RELATIONS.records) if k.startswith(self.GID)]:
             runtime.RELATIONS.records.pop(k, None)
-        self.assertIsNone(bot._affinity_ledger(self.GID))
+        self.assertIsNone(affinity.affinity_ledger(self.GID))
 
     def test_ledger_reaches_the_reduce_payload(self):
         """底账不接线等于没做 —— 它必须真的进 reduce 的 user payload。"""
@@ -202,7 +203,7 @@ class TwoTierStandardsTest(unittest.TestCase):
         entries = [{"sender": "OID-LD-2", "text": "在吗", "ts": time.time()}]
         out = asyncio.run(digest.compress_group(
             store, self.GID, entries, ask,
-            ledger=bot._affinity_ledger(self.GID)))
+            ledger=affinity.affinity_ledger(self.GID)))
         self.assertIsNotNone(out)
         self.assertIn("【当前关系底账】", seen["user"])
         self.assertIn("铁蛋=", seen["user"])

@@ -4,31 +4,20 @@
 缺少必要凭证会直接启动失败并给出提示 —— 宁可 fail fast，也不要带残缺配置跑起来。
 """
 
+import logging
 import os
-import re
+from pathlib import Path
+from dotenv import load_dotenv as _load_dotenv
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# CLI sets REGULAR_HOME explicitly; direct source runs keep the old project root.
+BASE_DIR = str(Path(os.environ.get("REGULAR_HOME", Path(__file__).parent)).expanduser().resolve())
+CONFIG_ERRORS = []
 
 
-# ── 简易 .env 加载器（不引入额外依赖；真实环境变量优先级高于 .env）──
 def load_dotenv(path=None):
-    path = path or os.path.join(BASE_DIR, ".env")
-    if not os.path.exists(path):
-        return False
-    try:
-        with open(path, encoding="utf-8") as f:
-            for raw in f:
-                line = raw.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                key, val = key.strip(), val.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = val
-        return True
-    except Exception as e:
-        print(f"⚠️ 读取 .env 失败: {e}")
-        return False
+    """Use python-dotenv's quoting/comments, without replacing real environment values."""
+    return _load_dotenv(path or os.path.join(BASE_DIR, ".env"), override=False,
+                        encoding="utf-8", interpolate=False)
 
 
 load_dotenv()
@@ -43,13 +32,20 @@ def _env_bool(name, default=False):
     val = os.environ.get(name)
     if val is None:
         return default
-    return val.strip().lower() in ("1", "true", "yes", "on")
+    value = val.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off", ""):
+        return False
+    CONFIG_ERRORS.append(f"{name} 必须是 true/false")
+    return default
 
 
 def _env_int(name, default):
     try:
         return int(str(os.environ.get(name, default)).strip())
     except (TypeError, ValueError):
+        CONFIG_ERRORS.append(f"{name} 数值无效")
         return default
 
 
@@ -57,6 +53,7 @@ def _env_float(name, default):
     try:
         return float(str(os.environ.get(name, default)).strip())
     except (TypeError, ValueError):
+        CONFIG_ERRORS.append(f"{name} 数值无效")
         return default
 
 
@@ -79,120 +76,70 @@ BOT_NAMES = [n.strip() for n in _env_str("BOT_NAMES", "").split(",") if n.strip(
 # 而且是谁先喊谁得 —— 随手一个群成员，甚至不在群里的人，都能把身份抢走。
 # 私聊只有当事人自己和机器人看得到，抢答这条路直接没了。
 #
-# 又为什么是「可配置」而不是写死一句：写死的口令等于公开的口令。默认值只是让开箱
-# 能用，真正部署时应该改成只有你知道的一句 —— `.env` 里覆盖即可，改完重启生效。
+# 默认关闭认领；需要时在 `.env` 配置只有你知道的口令，改完重启生效。
 # 留空 = 关闭私聊认主通道（那台机器只能靠手动写 owner.txt 认领）。
-DEFAULT_OWNER_CLAIM_PHRASE = "认主"
-OWNER_CLAIM_PHRASE = _env_str("OWNER_CLAIM_PHRASE", DEFAULT_OWNER_CLAIM_PHRASE)
+DEFAULT_OWNER_CLAIM_PHRASE = ""
+OWNER_CLAIM_PHRASE = os.environ.get("OWNER_CLAIM_PHRASE", DEFAULT_OWNER_CLAIM_PHRASE).strip()
 
 # ══════════════════ AI 供应商 ══════════════════
-# 两家都走 OpenAI 兼容协议，所以调用代码完全共用，切换只需改 AI_PROVIDER。
+# All endpoints use the existing OpenAI-compatible SDK. Presets are conveniences,
+# not statements about an account's model access, price, quota or reliability.
 PROVIDER_PRESETS = {
+    "openai": {
+        "label": "OpenAI-compatible",
+        "base_url": _env_str("OPENAI_BASE_URL"),
+        "api_key": _env_str("OPENAI_API_KEY"),
+        "models": [],
+        "extra_body": {},
+    },
     "zhipu": {
         "label": "智谱 GLM",
         "base_url": _env_str("ZHIPU_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
         "api_key": _env_str("ZHIPU_API_KEY"),
-        # 正经对话走这个梯队：4.7 质量明显更好但慢 3~6 倍，额度耗尽(429)自动回落 4.5-air，
-        # 再不行上免费的 4-flash。三档都实测可用。
         "models": ["glm-4.7", "glm-4.5-air", "glm-4-flash"],
-        # 压缩/后台批处理走这个。分的是「任务」，不是「快慢」—— 换模型要挑那个换了不亏的地方：
-        #   ① 压缩的 prompt（SYSTEM_MAP/SYSTEM_REDUCE）跟聊天**不共享任何前缀**，换模型零缓存损失；
-        #   ② 压缩在后台跑，不怕慢；
-        #   ③ 压缩不参与人格，弱模型不会让机器人「插嘴时突然变笨」；
-        #   ④ 实测更强的那档**反而更容易被内容过滤拒掉** —— 同一份今日 transcript，4.7 直接
-        #      1301 contentFilter，4.5-air 正常出结果。压缩要吞原始聊天，这活不适合强模型。
-        # 刻意不追加主梯队：两个都挂了就等下一轮，消息留在归档里不会丢（last_run 不推进）。
         "models_digest": ["glm-4.5-air", "glm-4-flash"],
-        # 称呼审核梯队：这活要的是「认得出来」，只有最强那档干得了 ——
-        # 实测同一批用例：4.5-air 把谐音称呼放行、还把正常昵称「阿澈」误杀；4.7 七个全对。
-        # 起名是低频操作（有人起名才触发），单次约 137 token；整条链挂掉时调用方直接放行，
-        # 不因为审核不了就阻断起名（本地词表仍在兜底）。
         "models_judge": ["glm-4.7"],
-        # ⚠️ 别迷信 GET /models —— 它只列了 10 个付费模型，glm-4-flash / 4.5-flash / 4.7-flash
-        #    都不在列表里却实际能调。列表里没写不等于不能用，反过来也不等于有额度。
-        # ⚠️ 别加 glm-4.6 / glm-5 / glm-5-turbo / glm-5.3-flash：这个 Key 对它们全是「余额不足」。
-        # ⚠️ 千万别再写第二个 "models" 键 —— Python 取后一个，会把上面的梯队整条顶掉（踩过）。
-        # glm-4.5 系列默认先「思考」再作答（答案之外还有个 reasoning_content）。群聊秒回必须关掉，
-        # 否则既慢（实测 3.1s vs 0.5s），又容易因思考 token 占满 max_tokens 导致最终答案 content 为空。
         "extra_body": {"thinking": {"type": "disabled"}},
-        # 采样温度（2026-10-19）：全局 0.9（角色需要），但智谱 5 天里三次采样乱码
-        # （<CMD! 残片 / 0A9F%F5 / 贷款Dai款+哥)人），全是 token 噪声——高温是温床。
-        # 单独降到 0.7：角色感的来源主要是提示词和长度闸，不靠这么高的采样野性。
-        # 观察点：🧯 乱码频率。若依旧，下一档是把答题座换回 Gemini。
         "temperature": 0.7,
     },
     "gemini": {
         "label": "Google Gemini",
         "base_url": _env_str("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"),
         "api_key": _env_str("GEMINI_API_KEY"),
-        # 免费层里 3.5-flash-lite 有 500 次/天配额，其余仅 20 次/天，所以必须排第一个当工作马。
-        # 它是这一档里**又快又不笨**的那个：实测带 1186 字 system 的插嘴请求 1.1~1.7s
-        # （同请求 4.7 要 4.7s），且 token 计数只有智谱的三分之一（297 vs 1149）。
-        # 不配 3.8-flash：实测 5.5s 才吐 1 个字，慢且没必要。
         "models": ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash"],
-        # 称呼审核梯队。**不挑最强，挑最准** —— 实测同一批用例（2 个敏感称呼 + 6 个正常昵称）：
-        #   gemini-3.5-flash-lite  8/8 全对
-        #   gemini-3.5-flash       误杀「阿澈」「阿龙」两个正常昵称
-        # 「更强 = 判得更准」在这里不成立：高档模型倾向于把陌生专有名词一律当风险。
-        "models_judge": ["gemini-3.5-flash-lite"],
-        # 压缩梯队。实测它能吞下 260 条原始聊天（4732 字）并正常产出。
-        # 选它还有个附加好处：同一份含政治人名的 transcript，4.5-air 会把「评价某某某」照抄进摘要，
-        # 而它主动写成「有人在群里试探敏感话题（不复述）」—— 摘要每轮都会注入 prompt，
-        # 少一句复述就少一处固化源。
         "models_digest": ["gemini-3.5-flash-lite"],
-        # 单模型超时。这条路要经代理出国，链路不稳时**卡住**比**报错**更常见：
-        # 实测正常 1.1~1.7s，给 12s 已经很宽裕，超了就不值得再等 —— 留给智谱答。
-        "timeout": 12.0,
+        "models_judge": ["gemini-3.5-flash-lite"],
         "extra_body": {},
     },
 }
 
-AI_PROVIDER = _env_str("AI_PROVIDER", "zhipu").lower()
+for _provider_name, _preset in PROVIDER_PRESETS.items():
+    for _tier_key in ("models", "models_digest", "models_judge"):
+        _model_override = _env_str(f"{_provider_name.upper()}_{_tier_key.upper()}")
+        if _model_override:
+            _models = [name.strip() for name in _model_override.split(",") if name.strip()]
+            if _models:
+                _preset[_tier_key] = list(dict.fromkeys(_models))
+            else:
+                CONFIG_ERRORS.append(f"{_provider_name.upper()}_{_tier_key.upper()} 至少需要一个模型名")
+
+AI_PROVIDER = _env_str("AI_PROVIDER", "openai").lower()
 if AI_PROVIDER not in PROVIDER_PRESETS:
-    print(f"⚠️ 未知的 AI_PROVIDER={AI_PROVIDER!r}，已回退到智谱 zhipu")
-    AI_PROVIDER = "zhipu"
+    CONFIG_ERRORS.append("AI_PROVIDER 必须是 openai、zhipu 或 gemini")
+    AI_PROVIDER = "openai"
 PROVIDER = PROVIDER_PRESETS[AI_PROVIDER]
-
-# 备用供应商：主供应商整条链路不通时自动回落（典型场景是代理断了，Gemini 连不上）。
-# 留空或设为与 AI_PROVIDER 相同 = 不降级。降级只在模型调用层生效，与 /models 探活无关。
-FALLBACK_PROVIDER = _env_str("FALLBACK_PROVIDER", "zhipu").lower()
+FALLBACK_PROVIDER = _env_str("FALLBACK_PROVIDER", "").lower()
 if FALLBACK_PROVIDER and FALLBACK_PROVIDER not in PROVIDER_PRESETS:
-    print(f"⚠️ 未知的 FALLBACK_PROVIDER={FALLBACK_PROVIDER!r}，已禁用降级")
+    CONFIG_ERRORS.append("FALLBACK_PROVIDER 必须为空、openai、zhipu 或 gemini")
     FALLBACK_PROVIDER = ""
-# 连续失败这么多次就把这家暂时拉黑，免得每条消息都干等一个超时周期。
-# 阈值定 2（原来 3）：主供应商是走代理的 Gemini，链路抖一下就该让位给直连的智谱，
-# 没必要连撞三次。连接层/地区类错误不数次数，直接按 hard 处理（见 bot._note_provider_fail）。
-PROVIDER_FAIL_THRESHOLD = _env_int("PROVIDER_FAIL_THRESHOLD", 2)
-# 冷却从 300 降到 120：主供应商不稳，冷却期太长会让「优先 Gemini」名存实亡 ——
-# 网络抖动通常几十秒就恢复，而探测成本很低（连接失败实测只要 1.3~2.3s），
-# 所以宁可让它早点回来重试，也不要一挂就晾五分钟。
-# ⚠️ 这只是**最短**让位时间，不是唯一条件 —— 能不能回来还要看下面那条缓存窗口。
-PROVIDER_COOLDOWN_SECONDS = _env_float("PROVIDER_COOLDOWN_SECONDS", 120.0)
 
-# 结构性故障（地区封禁 / Key 失效）的隔离时长，默认 30 分钟。
-# 这一类跟上面的「抖动」不是一回事：Gemini 的 `User location is not supported`
-# 由出口 IP 决定，两分钟后再试必然还是同一个错。实测 2026-09-17~18 一天半里
-# 这类 400 撞了 **39 次** —— 每两分钟被放回来重撞一轮，每轮还会顺着模型梯队连试 3 档，
-# 全员熔断时更要被当成「冷却剩余最短」的那家挑去带伤上阵。
-# 30 分钟的依据：够长到不再刷无效请求，也够短到换代理或换 Key 之后能在可接受时间内自愈
-# （真要立刻恢复，改完重启进程即可）。
-PROVIDER_FATAL_COOLDOWN_SECONDS = _env_float("PROVIDER_FATAL_COOLDOWN_SECONDS", 1800.0)
-
-# 缓存还热着的窗口：群里距最后一条消息不超过这么久，就认为被让位那家的前缀缓存
-# 还没凉，**先别切回去**（切换要重新 prefill 一整段，等于把缓存白扔）。
-# 等群静到超过这个时长，缓存该过期了，这时候回去重试才是免费的。
-#
-# 定标依据是实测，不是官方文档 —— 官方只说「缓存有合理的时效性」：
-#   · 智谱（tests/probe_cache_ttl.py，1340 字前缀 ≈ 994 token）：复用命中 99%，
-#     距上次请求 60s / 120s / 240s / **420s 仍命中**，边界没探到 → 取 600s 留余量。
-#   · Gemini：同一次实测里 cached_tokens 从头到尾 **都是 0**，连「立刻复用」那次也是。
-#     注意请求体实测 1088~1093 token，**已经超过官方 1024 的下限** —— 所以不是「不够大」，
-#     就是这一档模型在我们这个体积下吃不到隐式缓存。
-#     推论：「缓存优先」实际上只在智谱这一侧有意义，切回 Gemini 不损失任何缓存。
-# 群一直热聊就一直留在备用供应商上 —— 这是**有意**的取舍：缓存优先于速度。
-# 代价是这段时间回复慢（4.7 实测 ~4.7s vs 3.5-flash-lite ~1.3s），嫌慢就往下调小。
-# 例外：备用供应商也服务不了时必须让主供应商顶上，否则整条链全哑（见 bot._provider_available）。
-PROVIDER_CACHE_WARM_SECONDS = _env_float("PROVIDER_CACHE_WARM_SECONDS", 600.0)
+# Old deployment-specific policies were intentionally removed, not silently
+# emulated. Doctor reports configured old settings; docs/providers.md explains.
+IGNORED_PROVIDER_SETTINGS = (
+    "PROVIDER_FAIL_THRESHOLD", "PROVIDER_COOLDOWN_SECONDS",
+    "PROVIDER_FATAL_COOLDOWN_SECONDS", "PROVIDER_CACHE_WARM_SECONDS",
+    "MODEL_SLOW_PENALTY_SECONDS",
+)
 
 
 def load_api_keys(provider=None):
@@ -210,10 +157,8 @@ def load_api_keys(provider=None):
         with open(key_file, encoding="utf-8") as f:
             keys = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
     except Exception as e:
-        print(f"⚠️ 读取 {os.path.basename(key_file)} 失败: {e}")
+        logging.getLogger("regular.config").warning("Could not read provider key file %s", os.path.basename(key_file))
         return [default_key] if default_key else []
-    if keys:
-        print(f"🔑 已从 {os.path.basename(key_file)} 加载 {len(keys)} 个 {preset['label']} Key")
     return keys or ([default_key] if default_key else [])
 
 
@@ -221,19 +166,35 @@ AI_KEYS = load_api_keys()
 CANDIDATE_MODELS = list(PROVIDER["models"])
 
 # ══════════════════ 安全 / 网络 ══════════════════
-# 默认仍关闭 SSL 校验（与改造前行为一致，规避本机证书链问题）。
-# 若本机证书链正常，强烈建议 SSL_VERIFY=true —— 关闭校验意味着存在中间人攻击面。
-SSL_VERIFY = _env_bool("SSL_VERIFY", False)
+# 默认验证 TLS。证书问题应修复证书链；兼容旧环境时可显式关闭，并由 doctor 提示。
+SSL_VERIFY = _env_bool("SSL_VERIFY", True)
 
-# ══════════════════ 日志 ══════════════════
-LOG_FILE = os.path.join(BASE_DIR, _env_str("LOG_FILE", "bot.log"))
-LOG_MAX_BYTES = _env_int("LOG_MAX_BYTES", 2 * 1024 * 1024)   # 超过就轮转
+# ══════════════════ 运行数据路径 ══════════════════
+# New installs keep runtime files together. Existing root-level deployments stay
+# in place until the operator deliberately configures DATA_DIR; never move data on import.
+_LEGACY_NAMES = ("state.json", "owner.txt", "archive", "memory")
+LEGACY_DATA_PATHS = [os.path.join(BASE_DIR, n) for n in _LEGACY_NAMES
+                     if os.path.exists(os.path.join(BASE_DIR, n))]
+_explicit_data_dir = _env_str("DATA_DIR")
+_data_location = Path(_explicit_data_dir or ("." if LEGACY_DATA_PATHS else "data")).expanduser()
+DATA_DIR = str((Path(BASE_DIR) / _data_location).resolve())
+LEGACY_DATA_LAYOUT = not _explicit_data_dir and bool(LEGACY_DATA_PATHS)
+
+
+def data_path(name, default):
+    """Explicit old per-file paths remain project-relative; defaults follow DATA_DIR."""
+    value = _env_str(name)
+    return str((Path(BASE_DIR) / Path(value).expanduser() if value else Path(DATA_DIR) / default).resolve())
+
+
+LOG_FILE = data_path("LOG_FILE", "bot.log")
+LOG_MAX_BYTES = _env_int("LOG_MAX_BYTES", 2 * 1024 * 1024)
 LOG_BACKUP_COUNT = _env_int("LOG_BACKUP_COUNT", 5)
 LOG_LEVEL = _env_str("LOG_LEVEL", "INFO").upper()
+STATE_FILE = data_path("STATE_FILE", "state.json")
+OWNER_FILE = data_path("OWNER_FILE", "owner.txt")
+STATUS_FILE = data_path("STATUS_FILE", "status.json")
 
-# ══════════════════ 持久化 ══════════════════
-STATE_FILE = os.path.join(BASE_DIR, _env_str("STATE_FILE", "state.json"))
-OWNER_FILE = os.path.join(BASE_DIR, _env_str("OWNER_FILE", "owner.txt"))
 STATE_SAVE_INTERVAL = _env_float("STATE_SAVE_INTERVAL", 30.0)  # 脏数据刷盘间隔（秒）
 SESSION_PRUNE_INTERVAL = _env_float("SESSION_PRUNE_INTERVAL", 600.0)
 
@@ -258,13 +219,8 @@ BUDGET_WARN_RATIO = _env_float("BUDGET_WARN_RATIO", 0.8)
 # ══════════════════ AI 调用 ══════════════════
 AI_TIMEOUT_SECONDS = _env_float("AI_TIMEOUT_SECONDS", 20.0)   # 单个模型
 
-# 单个模型超时后，这一档在多长时间内先跳过（默认 10 分钟）。
-# 理由见 bot._penalize_slow_model：梯队顺序是共享引用，「往下挪一位」就再也回不去，
-# 而晚高峰变慢的模型过一阵往往又快又好；所以记的是**到期时间**而不是新顺序，
-# 凉够了自己回到原位试运行 —— 答上来就留用，再超时就再罚一轮。
-# ⚠️ 不能省：每一轮都先撞一次队首的慢档，剩下的预算常常连第二档都跑不完
-# （实测 2026-09-18 晚，glm-4.7 一小时超时 4 次，每次都把整轮拖成就地兜底话术）。
-MODEL_SLOW_PENALTY_SECONDS = _env_float("MODEL_SLOW_PENALTY_SECONDS", 600.0)
+# 每次逻辑调用的总物理尝试数；候选来自显式模型/备用端点，不隐式重试。
+AI_MAX_ATTEMPTS = _env_int("AI_MAX_ATTEMPTS", 3)
 
 # 网关看门狗：botpy 收不到任何下行（含心跳 ACK）超过这么久，就主动断开 ws 触发重连。
 # 心跳每 30s 一来一回，正常静默不会超过一分钟；阈值取 90s = 连续 3 个 ACK 没来。
@@ -299,12 +255,17 @@ OWNER_MENTION_PROBABILITY = _env_float("OWNER_MENTION_PROBABILITY", 0.30)
 # 4 小时间隔 / 群静默 10min~6h / 只在白天 / 心情不差。巡检每 30 分钟一次，纯检查零成本。
 PROACTIVE_CHECK_SECONDS = _env_float("PROACTIVE_CHECK_SECONDS", 1800.0)
 
-# ── 读图（2026-10-19，克制版）──
-# 群友发图 → glm-4v-flash（这把 key 上免费，实测可用）一句话客观描述 → 描述替换 [图片]
-# 标记进背景缓存，**读一次永久复用**（QQ 图床 URL 有时效，描述文本才是能存的）。
-# 克制三闸：60s 冷却 / 每日 30 张 / 只在「要回复这张图」或闸门放行时读。
-VISION_ENABLED = _env_bool("VISION_ENABLED", True)
-VISION_MODEL = os.environ.get("VISION_MODEL", "glm-4v-flash")
+# ── 读图：明确声明模型能力；图片缓存与名额由 media.py 统一管理 ──
+# 所有入口默认关闭；启用时显式填写视觉模型。配置不代表账号具备实际调用权限。
+VISION_ENABLED = _env_bool("VISION_ENABLED", False)
+VISION_PROVIDER = _env_str("VISION_PROVIDER", AI_PROVIDER).lower()
+if VISION_PROVIDER not in PROVIDER_PRESETS:
+    CONFIG_ERRORS.append("VISION_PROVIDER 必须是 openai、zhipu 或 gemini")
+    VISION_PROVIDER = AI_PROVIDER
+VISION_MODEL = _env_str("VISION_MODEL")
+VISION_INPUT_MODE = _env_str("VISION_INPUT_MODE", "url").lower()
+if VISION_INPUT_MODE not in ("url", "download"):
+    CONFIG_ERRORS.append("VISION_INPUT_MODE 必须是 url 或 download")
 VISION_COOLDOWN_SECONDS = _env_float("VISION_COOLDOWN_SECONDS", 60.0)
 VISION_DAILY_CAP = _env_int("VISION_DAILY_CAP", 30)
 BANTER_CHANCE_MAX = _env_float("BANTER_CHANCE_MAX", 0.5)
@@ -370,8 +331,8 @@ DIGEST_WRITE_MD = _env_bool("DIGEST_WRITE_MD", True)
 
 # ══════════════════ 原始消息归档（见 archive.py）═════════════════
 # 摘要是有损压缩，出错时得有地方回查，所以原文单独按天留存。
-ARCHIVE_DIR = _env_str("ARCHIVE_DIR", "archive")
-MEMORY_DIR = _env_str("MEMORY_DIR", "memory")
+ARCHIVE_DIR = data_path("ARCHIVE_DIR", "archive")
+MEMORY_DIR = data_path("MEMORY_DIR", "memory")
 ARCHIVE_KEEP_DAYS = _env_int("ARCHIVE_KEEP_DAYS", 90)   # 原始消息保留天数，0 = 永不清理
 ARCHIVE_MAX_TEXT = _env_int("ARCHIVE_MAX_TEXT", 500)    # 单条消息存多少字
 
@@ -383,7 +344,18 @@ PROMISE_MAX_NAG = _env_int("PROMISE_MAX_NAG", 2)                   # 催满几�
 PROMISE_MAX_ITEMS = _env_int("PROMISE_MAX_ITEMS", 12)              # 每群最多记几条
 PROMISE_CHECK_INTERVAL = _env_float("PROMISE_CHECK_INTERVAL", 3600.0)  # 后台检查间隔（秒）
 # 这些小时段内不主动开口（本地时间），免得半夜把群吵醒
-PROMISE_QUIET_HOURS = {int(h) for h in re.findall(r"\d+", _env_str("PROMISE_QUIET_HOURS", "23,0,1,2,3,4,5,6,7,8"))}
+def _quiet_hours():
+    try:
+        hours = {int(h.strip()) for h in _env_str("PROMISE_QUIET_HOURS", "23,0,1,2,3,4,5,6,7,8").split(",") if h.strip()}
+        if not hours.issubset(range(24)):
+            raise ValueError
+        return hours
+    except ValueError:
+        CONFIG_ERRORS.append("PROMISE_QUIET_HOURS 必须是逗号分隔的 0~23 小时")
+        return set()
+
+
+PROMISE_QUIET_HOURS = _quiet_hours()
 
 # ══════════════════ 其它 ══════════════════
 DEDUP_MAX = _env_int("DEDUP_MAX", 500)   # 消息去重 ID 队列长度
@@ -394,11 +366,31 @@ RESET_BACKOFF_AFTER = _env_float("RESET_BACKOFF_AFTER", 120.0)  # 稳定运行�
 
 def validate():
     """启动前校验，缺东西就 fail fast。"""
-    errors = []
+    errors = list(CONFIG_ERRORS)
+    for name in ("BANTER_PROBABILITY", "OWNER_MENTION_PROBABILITY", "BANTER_CHANCE_MAX", "MEME_PROBABILITY", "BUDGET_WARN_RATIO"):
+        if not 0 <= globals()[name] <= 1:
+            errors.append(f"{name} 必须在 0~1 之间")
+    for name in ("DAILY_BUDGET", "VISION_DAILY_CAP"):
+        if globals()[name] < 0:
+            errors.append(f"{name} 不能为负数")
     if not QQ_APP_ID:
         errors.append("缺少 QQ_APP_ID（在 .env 里配置）")
     if not QQ_APP_SECRET:
         errors.append("缺少 QQ_APP_SECRET（在 .env 里配置）")
+    if VISION_ENABLED and not VISION_MODEL:
+        errors.append("VISION_ENABLED 已开启但缺少 VISION_MODEL；请明确选择支持图片的模型")
+    if AI_MAX_ATTEMPTS < 1:
+        errors.append("AI_MAX_ATTEMPTS 必须至少为 1")
+    if AI_TIMEOUT_SECONDS <= 0 or AI_TOTAL_TIMEOUT <= 0:
+        errors.append("AI_TIMEOUT_SECONDS 和 AI_TOTAL_TIMEOUT 必须大于 0")
+    for provider_name in dict.fromkeys((AI_PROVIDER, FALLBACK_PROVIDER)):
+        if not provider_name:
+            continue
+        preset = PROVIDER_PRESETS[provider_name]
+        if not preset.get("base_url"):
+            errors.append(f"缺少 {provider_name.upper()}_BASE_URL")
+        if not preset["models"]:
+            errors.append(f"缺少 {provider_name.upper()}_MODELS")
     if not AI_KEYS:
         errors.append(f"缺少 {PROVIDER['label']} 的 API Key（在 .env 或 api_keys_{AI_PROVIDER}.txt 里配置）")
     return errors

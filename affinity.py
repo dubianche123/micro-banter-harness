@@ -190,3 +190,7 @@ def _affinity_ledger(group_id):
         return None
     return ("【当前关系底账】以下是他和各人现在的交情档位，"
             "判断玩笑还是敌意之前先看这个：\n" + "、".join(rows))
+
+
+# Public rendering entry point; keep one implementation for runtime and probes.
+affinity_ledger = _affinity_ledger

@@ -24,6 +24,7 @@ class WsWatchdogTest(unittest.IsolatedAsyncioTestCase):
         cls.bot = bot
 
     def setUp(self):
+        self.saved_health = (self.bot.STATUS.lifecycle, self.bot.STATUS.gateway_connected)
         self.saved = dict(self.bot._ws_watch)
         self.bot._ws_watch.clear()
         self.bot._ws_watch.update(last_rx=0.0, conn=None, kicks=0)
@@ -31,6 +32,7 @@ class WsWatchdogTest(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.bot._ws_watch.clear()
         self.bot._ws_watch.update(self.saved)
+        self.bot.STATUS.lifecycle, self.bot.STATUS.gateway_connected = self.saved_health
 
     def _fake_conn(self, closed=False):
         kicked = {"code": None, "n": 0}
@@ -89,6 +91,15 @@ class WsWatchdogTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.bot._ws_watchdog_tick())
         self.assertEqual(kicked["n"], 0)
         self.assertLess(time.time() - self.bot._ws_watch["last_rx"], 1.0)
+
+    async def test_closed_socket_marks_status_reconnecting_even_before_timeout(self):
+        self.bot.STATUS.lifecycle = "ready"
+        self.bot.STATUS.gateway_connected = True
+        conn, _ = self._fake_conn(closed=True)
+        self.bot._ws_watch.update(last_rx=time.time(), conn=conn)
+        await self.bot._ws_watchdog_tick()
+        self.assertFalse(self.bot.STATUS.gateway_connected)
+        self.assertEqual(self.bot.STATUS.lifecycle, "reconnecting")
 
     async def test_never_seen_anything_yet_is_safe(self):
         """首连之前 last_rx=0：什么都不做，而不是把 epoch 当成静默一万年。"""

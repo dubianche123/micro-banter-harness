@@ -115,15 +115,17 @@ class StateStore:
         self._dirty = False
         return True
 
-    async def flush_loop(self):
+    async def flush_loop(self, *, sleep=asyncio.sleep, on_error=None):
         """后台定时刷盘；被取消时最后再补一次，防止刚标的脏数据丢掉。"""
         try:
             while True:
-                await asyncio.sleep(self.save_interval)
+                await sleep(self.save_interval)
                 if self._dirty:
                     try:
                         self.save_now()
                     except Exception as e:
+                        if on_error:
+                            on_error(e)
                         print(f"⚠️ 状态落盘失败: {e}")
         except asyncio.CancelledError:
             self.save_now()
@@ -167,6 +169,27 @@ def trim_messages(messages, max_messages, max_chars):
     return msgs
 
 
+class _SessionLock(asyncio.Lock):
+    """Count holders and waiters so pruning cannot replace a live lock."""
+    def __init__(self):
+        super().__init__()
+        self.users = 0
+
+    async def __aenter__(self):
+        self.users += 1
+        try:
+            return await super().__aenter__()
+        except BaseException:
+            self.users -= 1
+            raise
+
+    async def __aexit__(self, *args):
+        try:
+            return await super().__aexit__(*args)
+        finally:
+            self.users -= 1
+
+
 class SessionStore:
     """每人每会话一份上下文，socket:[messages] 滑动窗口 + TTL + 并发锁。
 
@@ -182,11 +205,33 @@ class SessionStore:
         self.max_sessions = max_sessions
         self._sessions = {}
         self._locks = {}
+        self._epochs = {}
+        self._epoch_counter = 0
+
+    def generation(self, session_id):
+        if session_id not in self._epochs:
+            self._epoch_counter += 1
+            self._epochs[session_id] = self._epoch_counter
+        return self._epochs[session_id]
+
+    def _invalidate(self, session_id):
+        self._epoch_counter += 1
+        self._epochs[session_id] = self._epoch_counter
+
+    def begin_turn(self, session_id):
+        """A newer turn supersedes an older unconfirmed reply in this session."""
+        self._invalidate(session_id)
+        now = time.time()
+        session = self._live(session_id, now)
+        if session is None:
+            session = self._sessions.setdefault(session_id, {"messages": []})
+        session["last_time"] = now
+        return self.generation(session_id)
 
     def lock(self, session_id):
         lock = self._locks.get(session_id)
         if lock is None:
-            lock = asyncio.Lock()
+            lock = _SessionLock()
             self._locks[session_id] = lock
         return lock
 
@@ -254,8 +299,10 @@ class SessionStore:
         """
         prefix = f"{group_id}_"
         killed = [sid for sid in self._sessions if sid.startswith(prefix)]
-        for sid in killed:
-            self._sessions.pop(sid, None)
+        for sid in set(self._sessions) | set(self._locks) | set(self._epochs):
+            if sid.startswith(prefix):
+                self._sessions.pop(sid, None)
+                self._invalidate(sid)
         return len(killed)
 
     def drop_session(self, session_id):
@@ -265,6 +312,7 @@ class SessionStore:
         错上加错的自证循环），档案和摘要都是对的、脏的只有这个窗口 —— 换一个人继续聊
         不受影响，就不该动 clear_group 连坐全群。
         """
+        self._invalidate(session_id)
         return self._sessions.pop(session_id, None) is not None
 
     def rename_user(self, group_id, old, new):
@@ -296,18 +344,28 @@ class SessionStore:
         expired = [
             sid for sid, sess in self._sessions.items()
             if now - sess.get("last_time", 0) > self.ttl * 2
+            and not (sid in self._locks and self._locks[sid].users)
         ]
         for sid in expired:
             self._sessions.pop(sid, None)
             self._locks.pop(sid, None)
+            self._epochs.pop(sid, None)
 
         if len(self._sessions) > self.max_sessions:
             oldest = sorted(
-                self._sessions.items(), key=lambda kv: kv[1].get("last_time", 0)
+                ((sid, sess) for sid, sess in self._sessions.items()
+                 if not (sid in self._locks and self._locks[sid].users)),
+                key=lambda kv: kv[1].get("last_time", 0)
             )[: len(self._sessions) - self.max_sessions]
             for sid, _ in oldest:
                 self._sessions.pop(sid, None)
                 self._locks.pop(sid, None)
+                self._epochs.pop(sid, None)
+        # Failed/expired sends can leave a lock without a committed session.
+        for sid, lock in list(self._locks.items()):
+            if sid not in self._sessions and not lock.users:
+                self._locks.pop(sid, None)
+                self._epochs.pop(sid, None)
         return len(expired)
 
     def hydrate(self, raw: dict):
@@ -396,7 +454,15 @@ class DailyBudget:
     def remaining(self):
         return max(0, self.limit - self.used)
 
+    def can_consume(self, cost=1):
+        """只读检查；调用方预检不预约额度，实际请求入口再原子消费。"""
+        if cost < 0:
+            raise ValueError("cost must be non-negative")
+        return self.used + cost <= self.limit
+
     def try_consume(self, cost=1):
+        if not self.can_consume(cost):
+            return False
         today = self.today()
         if self._state.get("day") != today:
             self._state["day"] = today

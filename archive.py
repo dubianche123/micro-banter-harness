@@ -12,14 +12,15 @@
 绝大部分时候只看 MD；真要查证，回到 JSONL 按时间/人/关键词搜就行。
 
 这也顺带解决了另一个问题：摘要的「待压缩队列」不用再塞进 state.json 了。
-以前 pending 既占内存又占状态文件，现在待压缩 = 归档里时间戳晚于上次压缩的那些行，
-单一数据源，重启不丢，也不会因为压缩失败把消息弄丢。
+以前 pending 既占内存又占状态文件，现在待压缩 = 归档里已提交偏移之后的那些行。
+偏移随摘要保存在 StateStore，只有成功处理的前缀才能提交；同毫秒与晚到消息也不会被跳过。
 """
 
 import json
 import os
 import re
 import time
+import uuid
 
 DEFAULT_ARCHIVE_DIR = "archive"
 DEFAULT_MEMORY_DIR = "memory"
@@ -48,6 +49,7 @@ class MessageArchive:
         self._fp = None
         self._fp_day = None
         self._last_prune = 0.0
+        self._message_cache = {}
         os.makedirs(self.archive_dir, exist_ok=True)
         os.makedirs(self.memory_dir, exist_ok=True)
 
@@ -62,7 +64,8 @@ class MessageArchive:
             self._fp_day = day
         return self._fp
 
-    def append(self, group_id, sender, text, ts=None, at=False, keep=True, cmd=False):
+    def append(self, group_id, sender, text, ts=None, at=False, keep=True, cmd=False,
+               message_id=None):
         """落一条原始消息。返回写入的字典（被过滤掉则返回 None）。
 
         cmd=True 表示这是一条**本地控制指令**（「猫娘模式」「查好感」「决斗」之类），
@@ -79,16 +82,90 @@ class MessageArchive:
             "group": group_id,
             "sender": sender,
             "text": t[: self.max_text],
+            "message_id": str(message_id or uuid.uuid4().hex),
         }
         if at:
             row["at"] = 1
         if cmd:
             row["cmd"] = 1
+        self._write_row(row)
+        self._message_cache[row["message_id"]] = row
+        if len(self._message_cache) > 5000:
+            self._message_cache.pop(next(iter(self._message_cache)))
+        if keep:
+            self._maybe_prune(ts)
+        return row
+
+    def _write_row(self, row):
         fp = self._ensure_fp(row["day"])
         fp.write(json.dumps(row, ensure_ascii=False) + "\n")
         fp.flush()
-        if keep:
-            self._maybe_prune(ts)
+
+    def _source_message(self, group_id, message_id):
+        cached = self._message_cache.get(message_id)
+        if cached and cached.get("group") == group_id:
+            return cached
+        for name in self._archive_names():
+            try:
+                with open(os.path.join(self.archive_dir, name), encoding="utf-8") as fp:
+                    for line in fp:
+                        try:
+                            row = json.loads(line)
+                        except (ValueError, TypeError):
+                            continue
+                        if (isinstance(row, dict) and row.get("group") == group_id
+                                and row.get("message_id") == message_id
+                                and row.get("kind") != "caption"):
+                            return row
+            except OSError:
+                continue
+        return None
+
+    def append_caption(self, group_id, message_id, caption, sender=None, ts=None):
+        """Persist derived image evidence linked to the immutable source ID.
+
+        The original JSONL row is never edited. A caption arriving after a digest
+        commit is a new pending event, so it is not lost behind that commit.
+        Unknown IDs and mismatched senders are rejected rather than guessed.
+        """
+        caption = str(caption or "").strip()
+        message_id = str(message_id or "")
+        source = self._source_message(group_id, message_id)
+        if not caption or not source or (sender is not None and sender != source.get("sender")):
+            return None
+        text = f"[图片：{caption[:self.max_text]}]"
+        cache_key = (group_id, message_id, text)
+        if cache_key in self._message_cache:
+            return self._message_cache[cache_key]
+        # Reuse the archive as the durable evidence index. The small shared
+        # in-process cache only avoids rereading it for concurrent references.
+        for name in self._archive_names():
+            try:
+                with open(os.path.join(self.archive_dir, name), encoding="utf-8") as fp:
+                    for line in fp:
+                        try:
+                            existing = json.loads(line)
+                        except (ValueError, TypeError):
+                            continue
+                        if (isinstance(existing, dict) and existing.get("group") == group_id
+                                and existing.get("kind") == "caption"
+                                and existing.get("message_id") == message_id
+                                and existing.get("text") == text):
+                            self._message_cache[cache_key] = existing
+                            return existing
+            except OSError:
+                continue
+        ts = time.time() if ts is None else ts
+        row = {
+            "ts": round(ts, 3), "day": day_key(ts), "group": group_id,
+            "sender": source.get("sender"), "kind": "caption",
+            "message_id": source["message_id"], "evidence_id": uuid.uuid4().hex,
+            "text": text,
+        }
+        self._write_row(row)
+        self._message_cache[cache_key] = row
+        if len(self._message_cache) > 5000:
+            self._message_cache.pop(next(iter(self._message_cache)))
         return row
 
     def close(self):
@@ -148,43 +225,90 @@ class MessageArchive:
             cur += 86400.0
         return days
 
-    def since(self, group_id, since_ts, limit=5000, include_cmd=False):
-        """读出某群自某个时刻以来的所有原始消息。
+    def _archive_names(self):
+        try:
+            return sorted(name for name in os.listdir(self.archive_dir)
+                          if name.endswith(".jsonl"))
+        except OSError:
+            return []
 
-        这是压缩的唯一数据来源：压缩成功才推进 last_run，失败就原样再读一遍，
-        所以消息不会因为一次模型报错就永久丢失。
+    def pending(self, group_id, cursor=None, since_ts=0, limit=5000,
+                include_cmd=False):
+        """Return the oldest uncommitted entries and their read-offset snapshot.
 
-        ⚠️ 默认**跳过带 cmd 标记的本地指令**（include_cmd=False）：它们是操作不是聊天，
-        进了压缩就变成人物事实（「他喊了猫娘模式」→「他想变猫娘」）。
+        Offsets are byte positions in append-only daily files. Capture file sizes
+        before reading: messages arriving during model calls (even with equal or
+        older event timestamps) remain beyond the committed snapshot. Each entry
+        carries its prefix `_cursor`, allowing bounded digest blocks to commit
+        exactly the portion they processed. This metadata is never rendered.
+
+        A missing cursor imports old timestamp-only state. Its lower bound is
+        carried with the initial file-size snapshot until all of that snapshot
+        has been scanned, including filtered tails after a returned prefix.
+        Later arrivals are outside that snapshot and are never timestamp-filtered.
         """
-        out = []
-        for day in self._days_between(since_ts):
-            path = self._file_for(day)
-            if not os.path.exists(path):
-                continue
+        offsets = dict(cursor or {})
+        files = []
+        for name in self._archive_names():
+            path = os.path.join(self.archive_dir, name)
             try:
-                with open(path, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
+                files.append((name, path, os.path.getsize(path)))
+            except OSError:
+                continue
+        migration = offsets.get("_legacy")
+        if cursor is None and since_ts:
+            migration = {"since_ts": float(since_ts),
+                         "ends": {name: end for name, _, end in files}}
+            offsets["_legacy"] = migration
+        out = []
+        for name, path, end in files:
+            pos = max(0, int(offsets.get(name) or 0))
+            try:
+                with open(path, "rb") as fp:
+                    fp.seek(pos)
+                    while fp.tell() < end:
+                        line = fp.readline(end - fp.tell())
+                        if not line or not line.endswith(b"\n"):
+                            break   # a partial tail is retried, not committed
+                        offsets[name] = fp.tell()
                         try:
                             row = json.loads(line)
-                        except Exception:
+                        except (ValueError, UnicodeError):
                             continue
-                        if row.get("group") != group_id:
+                        if not isinstance(row, dict) or row.get("group") != group_id:
                             continue
-                        if float(row.get("ts") or 0) <= since_ts:
+                        if (migration and fp.tell() <= migration["ends"].get(name, 0)
+                                and float(row.get("ts") or 0) <= migration["since_ts"]):
                             continue
                         if not include_cmd and row.get("cmd"):
                             continue
+                        row["_cursor"] = dict(offsets)
                         out.append(row)
+                        if limit and len(out) >= limit:
+                            return out, dict(offsets)
             except OSError:
                 continue
-        out.sort(key=lambda r: r.get("ts") or 0)
-        if limit and len(out) > limit:
-            out = out[-limit:]   # 超量时只保最近的，宁可漏旧的也不让上下文失控
-        return out
+        # A skipped legacy tail belongs to the same scan, even when the last
+        # returned message was earlier in the file. Commit it only with that
+        # final message; bounded earlier prefixes retain migration metadata.
+        if migration and all(offsets.get(name, 0) >= migration["ends"].get(name, 0)
+                             for name, _, _ in files):
+            offsets.pop("_legacy", None)
+        if out:
+            out[-1]["_cursor"] = dict(offsets)
+        return out, dict(offsets)
+
+    def since(self, group_id, since_ts, limit=5000, include_cmd=False):
+        """Timestamp-based historical read; new digest work should use pending().
+
+        Retained for callers and old state migration. Limit keeps the oldest
+        prefix, so a bounded consumer can never skip unprocessed earlier rows.
+        """
+        rows, _ = self.pending(group_id, since_ts=since_ts, limit=limit,
+                               include_cmd=include_cmd)
+        for row in rows:
+            row.pop("_cursor", None)
+        return rows
 
     def search(self, group_id=None, keyword="", since_ts=None, limit=50):
         """出错了回去查原文：按关键词翻旧账。"""
