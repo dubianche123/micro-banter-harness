@@ -181,6 +181,17 @@ class RequestsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(providers.AI_CLIENTS["zhipu"][0].max_retries, 0)
             await providers.close()
 
+    async def test_separate_vision_endpoint_initializes_alongside_chat(self):
+        providers.AI_CLIENTS.clear()
+        providers._initialized = False
+        with patch.object(providers.config, "load_api_keys", return_value=["fake"]), \
+             patch.multiple(providers.config, VISION_ENABLED=True, VISION_PROVIDER="gemini", VISION_MODEL="vision-only-model"):
+            providers.initialize()
+            self.assertEqual(set(providers.AI_CLIENTS), {"zhipu", "gemini"})
+            self.assertIn("bigmodel.cn", str(providers.AI_CLIENTS["zhipu"][0].base_url))
+            self.assertIn("googleapis.com", str(providers.AI_CLIENTS["gemini"][0].base_url))
+            await providers.close()
+
     async def test_vision_failure_is_not_replayed_as_an_implicit_download_retry(self):
         calls = []
         async def create(**kwargs):

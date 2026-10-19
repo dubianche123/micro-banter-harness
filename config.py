@@ -70,17 +70,6 @@ QQ_APP_SECRET = _env_str("QQ_APP_SECRET")
 # 这一串同时管三件事：识别「是不是在叫它」、剥掉喊人前缀、提示词里的自称。
 BOT_NAMES = [n.strip() for n in _env_str("BOT_NAMES", "").split(",") if n.strip()]
 
-# 认领群主用的暗号，**只在私聊里认**（群里说破天也不授权，见 bot.handle_group_msg）。
-#
-# 为什么必须私聊：群聊是大声公。认领动作一旦放在群里，口令就等于念给所有人听，
-# 而且是谁先喊谁得 —— 随手一个群成员，甚至不在群里的人，都能把身份抢走。
-# 私聊只有当事人自己和机器人看得到，抢答这条路直接没了。
-#
-# 默认关闭认领；需要时在 `.env` 配置只有你知道的口令，改完重启生效。
-# 留空 = 关闭私聊认主通道（那台机器只能靠手动写 owner.txt 认领）。
-DEFAULT_OWNER_CLAIM_PHRASE = ""
-OWNER_CLAIM_PHRASE = os.environ.get("OWNER_CLAIM_PHRASE", DEFAULT_OWNER_CLAIM_PHRASE).strip()
-
 # ══════════════════ AI 供应商 ══════════════════
 # All endpoints use the existing OpenAI-compatible SDK. Presets are conveniences,
 # not statements about an account's model access, price, quota or reliability.
@@ -132,15 +121,6 @@ FALLBACK_PROVIDER = _env_str("FALLBACK_PROVIDER", "").lower()
 if FALLBACK_PROVIDER and FALLBACK_PROVIDER not in PROVIDER_PRESETS:
     CONFIG_ERRORS.append("FALLBACK_PROVIDER 必须为空、openai、zhipu 或 gemini")
     FALLBACK_PROVIDER = ""
-
-# Old deployment-specific policies were intentionally removed, not silently
-# emulated. Doctor reports configured old settings; docs/providers.md explains.
-IGNORED_PROVIDER_SETTINGS = (
-    "PROVIDER_FAIL_THRESHOLD", "PROVIDER_COOLDOWN_SECONDS",
-    "PROVIDER_FATAL_COOLDOWN_SECONDS", "PROVIDER_CACHE_WARM_SECONDS",
-    "MODEL_SLOW_PENALTY_SECONDS",
-)
-
 
 def load_api_keys(provider=None):
     """多 Key 灾备轮询：同级目录建 api_keys_{provider}.txt，每行一个 Key（# 开头为注释）。
@@ -255,14 +235,16 @@ OWNER_MENTION_PROBABILITY = _env_float("OWNER_MENTION_PROBABILITY", 0.30)
 # 4 小时间隔 / 群静默 10min~6h / 只在白天 / 心情不差。巡检每 30 分钟一次，纯检查零成本。
 PROACTIVE_CHECK_SECONDS = _env_float("PROACTIVE_CHECK_SECONDS", 1800.0)
 
-# ── 读图：明确声明模型能力；图片缓存与名额由 media.py 统一管理 ──
-# 所有入口默认关闭；启用时显式填写视觉模型。配置不代表账号具备实际调用权限。
-VISION_ENABLED = _env_bool("VISION_ENABLED", False)
+# ── 读图：默认复用主聊天模型，可为纯文本主模型单独指定视觉模型/供应商 ──
+# 配置继承不代表模型具备图片能力；不支持图片时单配 VISION_MODEL，或关闭读图。
+VISION_ENABLED = _env_bool("VISION_ENABLED", True)
 VISION_PROVIDER = _env_str("VISION_PROVIDER", AI_PROVIDER).lower()
 if VISION_PROVIDER not in PROVIDER_PRESETS:
     CONFIG_ERRORS.append("VISION_PROVIDER 必须是 openai、zhipu 或 gemini")
     VISION_PROVIDER = AI_PROVIDER
-VISION_MODEL = _env_str("VISION_MODEL")
+_vision_model = _env_str("VISION_MODEL")
+VISION_MODEL_INHERITED = not _vision_model and VISION_PROVIDER == AI_PROVIDER
+VISION_MODEL = _vision_model or (CANDIDATE_MODELS[0] if VISION_MODEL_INHERITED and CANDIDATE_MODELS else "")
 VISION_INPUT_MODE = _env_str("VISION_INPUT_MODE", "url").lower()
 if VISION_INPUT_MODE not in ("url", "download"):
     CONFIG_ERRORS.append("VISION_INPUT_MODE 必须是 url 或 download")
@@ -378,7 +360,10 @@ def validate():
     if not QQ_APP_SECRET:
         errors.append("缺少 QQ_APP_SECRET（在 .env 里配置）")
     if VISION_ENABLED and not VISION_MODEL:
-        errors.append("VISION_ENABLED 已开启但缺少 VISION_MODEL；请明确选择支持图片的模型")
+        if VISION_PROVIDER != AI_PROVIDER:
+            errors.append("VISION_PROVIDER 与 AI_PROVIDER 不同；请显式设置该供应商的 VISION_MODEL")
+        else:
+            errors.append("读图无法继承主聊天模型；请配置主供应商的 MODELS 或单独设置 VISION_MODEL")
     if AI_MAX_ATTEMPTS < 1:
         errors.append("AI_MAX_ATTEMPTS 必须至少为 1")
     if AI_TIMEOUT_SECONDS <= 0 or AI_TOTAL_TIMEOUT <= 0:

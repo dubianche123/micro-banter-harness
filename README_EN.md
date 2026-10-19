@@ -105,12 +105,28 @@ All endpoints share one bounded policy: explicit candidates, up to 3 attempts,
 20 seconds per attempt and 30 seconds total by default. Every physical attempt
 consumes the same daily budget. Routing uses SDK error types and HTTP status,
 without vendor-message matching, cache yielding or slow-model special cases.
-See [provider configuration and migration](docs/providers.md) for task chains,
-explicit vision capabilities and retired settings.
+See [provider configuration](docs/providers.md) for task chains and independent
+image-model configuration.
 
-Owner claiming is disabled by default. For owner features, configure a private
-`OWNER_CLAIM_PHRASE`, then send that phrase in C2C direct chat. Never send it in a
-group. An existing `owner.txt` remains valid. TLS verification is on by default.
+An unowned bot automatically records the first user who sends a nonempty C2C
+private message as its owner in `owner.txt`, silently and without a phrase or
+extra claim notification. That message still runs its normal command or chat
+handling. Later messages do not replace a saved owner; group messages cannot claim ownership. Before first
+use, restrict QQ message-list access to the intended owner or test members, then
+have the owner send a private message first. QQ supports full or allowlist access;
+see the [official scope documentation](https://bot.q.qq.com/wiki/#_10-%E4%BD%BF%E7%94%A8%E8%8C%83%E5%9B%B4%E4%B8%8E%E4%BA%BA%E5%91%98%E9%85%8D%E7%BD%AE).
+TLS verification is on by default.
+
+New groups get 10 minutes from joining or first observation. If still unowned,
+the next normal chat reply includes one brief reminder; confirmed delivery stops
+repeats. No separate scheduled message is sent. An explicit ownership question in
+a group receives the private-chat instructions immediately.
+
+Image reading is on by default and inherits the main provider and its first chat
+model. Set `VISION_PROVIDER` / `VISION_MODEL` for a separate image-capable model,
+or `VISION_ENABLED=false` to disable it. Inheriting a configuration does not prove
+image support: unsupported image input produces an explicit failure rather than
+a guessed description.
 
 `regular doctor` checks local configuration, dependencies, resolved paths, saved
 JSON and configured capabilities. It does not connect or infer. Explicit
@@ -120,9 +136,12 @@ credentials; review local paths and bot aliases before sharing them.
 
 ### 3. Configure QQ and run
 
-1. Configure your QQ application, sandbox members and C2C permissions.
-2. In group settings → the bot → message scope, select **获取群内全部消息**.
-3. These switches require live verification; local diagnostics cannot confirm them.
+1. Configure your QQ application, sandbox members and C2C permissions; restrict
+   message-list access to the intended owner or test members.
+2. After startup, have the owner send one nonempty private message. Ownership is
+   saved silently while that message is handled normally.
+3. In group settings → the bot → message scope, select **获取群内全部消息**.
+4. These switches require live verification; local diagnostics cannot confirm them.
 
 ```bash
 regular run
@@ -169,24 +188,14 @@ runs as a non-root user. Recreating it retains the volume. `docker compose down 
 deletes it, so keep your own backups. QQ uses outbound connections; no web port is
 exposed.
 
-### Upgrading and existing data
+### Runtime data
 
-**Read the [0.2 upgrade checklist](docs/UPGRADE_0.2.md) before upgrading** for provider/vision defaults, retired routing settings, physical-attempt budgets, data paths and old service removal. English migration essentials are included.
+Runtime state, owner identity, logs, archives and summaries default to the
+deployment's `data/` directory. Set `DATA_DIR` to choose another location;
+relative paths are resolved from the deployment directory. Stop the instance
+before backing up the data directory and `.env`. See [CHANGELOG](CHANGELOG.md)
+for version changes.
 
-New deployments use `data/`. If root-level `state.json`, `owner.txt`, `archive/` or
-`memory/` already exists, leaving `DATA_DIR` unset retains that layout and doctor
-reports it. No automatic move, merge or deletion occurs.
-
-To reorganize old data, stop the instance, back up those four items and `.env`,
-copy them to the target directory, explicitly set `DATA_DIR`, then check and
-restart. Existing `STATE_FILE`, `OWNER_FILE`, `ARCHIVE_DIR`, `MEMORY_DIR` and
-`LOG_FILE` overrides still take precedence and remain deployment-relative; review
-them during migration.
-
-The helper does not silently unload old `com.qqbot.xiaowang` or
-`com.qqbot.keepawake` services. Unload old services yourself before starting the new
-one to avoid duplicate replies, and restore your desired sleep policy separately.
-See [CHANGELOG](CHANGELOG.md) for changes.
 
 ---
 
@@ -233,7 +242,7 @@ Pull requests and stars are welcome! Bring a true companion to your chat group.
 | --- | --- |
 | The process starts but group chatter never arrives | QQ sandbox membership and the group's **获取群内全部消息** setting. |
 | It never reacts to its spoken name | `BOT_NAMES`; the trigger words must match your deployment. |
-| Chat works but owner commands do not | C2C permission and the private ownership-claim step. |
+| Chat works but owner commands do not | QQ message-list access, C2C permission and the owner's first private message; saved ownership is in `owner.txt`. |
 | A nickname appears to be missing in private chat | Nicknames are scoped to a group; C2C has no group identity. |
 | Cache cost differs from the notes | Provider, model/task tier, prefix stability and the observed cache TTL. |
 

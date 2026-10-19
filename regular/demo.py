@@ -28,7 +28,7 @@ class DemoSession:
         environment = {"REGULAR_HOME": str(home), "DATA_DIR": str(home / "data"),
             "QQ_APP_ID": "", "QQ_APP_SECRET": "", "ZHIPU_API_KEY": "",
             "GEMINI_API_KEY": "", "OPENAI_API_KEY": "", "AI_PROVIDER": "zhipu", "FALLBACK_PROVIDER": "",
-            "OWNER_CLAIM_PHRASE": "", "BOT_NAMES": "老群友", "VISION_ENABLED": "false"}
+            "BOT_NAMES": "老群友", "VISION_ENABLED": "false"}
         self.stack.enter_context(patch.dict(os.environ, environment))
         try:
             import bot

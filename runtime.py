@@ -94,18 +94,18 @@ BUDGET = storage.DailyBudget(config.DAILY_BUDGET, STATE.data.setdefault("usage",
 OWNER_OPENID = None
 
 def load_owner():
+    """Only a missing file means unowned; unreadable saved ownership is an error."""
     global OWNER_OPENID
-    if os.path.exists(config.OWNER_FILE):
-        try:
-            with open(config.OWNER_FILE, encoding="utf-8") as f:
-                saved = f.read().strip()
-            if saved:
-                OWNER_OPENID = saved
-                # 群主的好感度钉死在最高档：亲近靠档案体现，不靠谄媚台词
-                RELATIONS.pin(OWNER_OPENID)
-                logger.info("👑 已加载持久化群主 OpenID: %s（好感度已锁定顶格）", OWNER_OPENID)
-        except Exception as e:
-            logger.warning("读取 owner.txt 失败: %s", e)
+    try:
+        with open(config.OWNER_FILE, encoding="utf-8") as stream:
+            saved = stream.read().strip()
+    except FileNotFoundError:
+        return
+    if saved:
+        OWNER_OPENID = saved
+        RELATIONS.pin(OWNER_OPENID)
+        logger.info("👑 已加载持久化群主 OpenID: %s（好感度已锁定顶格）", OWNER_OPENID)
+
 
 def owner_label(group_id=None):
     """群里怎么称呼群主：他自己认领的称呼；还没认领就退回通用词「群主」。
@@ -118,12 +118,25 @@ def owner_label(group_id=None):
     return naming.owner_label(rec.get("nick"))
 
 def save_owner(openid):
-    try:
-        os.makedirs(os.path.dirname(config.OWNER_FILE), exist_ok=True)
-        with open(config.OWNER_FILE, "w", encoding="utf-8") as f:
-            f.write(openid)
-    except Exception as e:
-        logger.warning("写入 owner.txt 失败: %s", e)
+    storage.atomic_write_text(config.OWNER_FILE, openid)
+
+
+def claim_owner(openid):
+    """Bind the first C2C sender after persistence; no await means no in-process race."""
+    global OWNER_OPENID
+    if OWNER_OPENID is not None:
+        return False
+    load_owner()
+    if OWNER_OPENID is not None:
+        return False
+    if not isinstance(openid, str) or not openid.strip():
+        raise ValueError("A C2C user identity is required")
+    save_owner(openid)
+    OWNER_OPENID = openid
+    RELATIONS.pin(openid)
+    STATE.mark_dirty()
+    return True
+
 
 def hits(text, words):
     """本地触发词匹配的**唯一入口**：子串匹配、空词安全。

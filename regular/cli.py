@@ -29,8 +29,7 @@ def initialize(directory, *, interactive=False):
     values = {"QQ_APP_ID": "", "QQ_APP_SECRET": "", "BOT_NAMES": "",
               "AI_PROVIDER": "openai", "OPENAI_BASE_URL": "", "OPENAI_API_KEY": "",
               "OPENAI_MODELS": "", "ZHIPU_API_KEY": "", "GEMINI_API_KEY": "",
-              "FALLBACK_PROVIDER": "", "OWNER_CLAIM_PHRASE": "", "SSL_VERIFY": "true",
-              "VISION_ENABLED": "false", "VISION_PROVIDER": "openai", "VISION_MODEL": ""}
+              "FALLBACK_PROVIDER": "", "SSL_VERIFY": "true", "VISION_ENABLED": "true"}
     if target.exists():
         print(f"Config already exists; kept unchanged: {target}")
         return 0
@@ -42,15 +41,17 @@ def initialize(directory, *, interactive=False):
         if provider not in ("openai", "zhipu", "gemini"):
             raise ValueError("Provider must be openai, zhipu or gemini")
         values["AI_PROVIDER"] = provider
-        values["VISION_PROVIDER"] = provider
         if provider == "openai":
             values["OPENAI_BASE_URL"] = input("OpenAI-compatible base URL (include /v1 if required): ").strip()
             values["OPENAI_MODELS"] = input("Chat model IDs (ordered, comma separated): ").strip()
         values[f"{provider.upper()}_API_KEY"] = getpass.getpass("Provider API key (hidden): ")
-        values["OWNER_CLAIM_PHRASE"] = getpass.getpass("Owner claim phrase (hidden; blank disables): ")
     # JSON double-quoted strings are valid dotenv values, including escaped newlines.
     text = "# Created by regular init. Keep this file private.\n"
     text += "\n".join(f"{key}={json.dumps(value, ensure_ascii=False)}" for key, value in values.items()) + "\n"
+    text += ("# Vision defaults to the first chat model of AI_PROVIDER. For a text-only chat model,\n"
+             "# set VISION_MODEL to a vision-capable model; set VISION_PROVIDER too for another provider.\n"
+             "# VISION_MODEL=\n# VISION_PROVIDER=\n"
+             "# The first non-empty private message claims ownership; restrict QQ console access.\n")
     try:
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -102,12 +103,8 @@ def doctor(config, *, network=False, as_json=False, dependency_error=None):
         add("configuration", "error", error)
     add("bot_names", "ok" if config.BOT_NAMES else "warning",
         ", ".join(config.BOT_NAMES) if config.BOT_NAMES else "No aliases; only platform nickname/mentions will trigger replies")
-    add("owner_claim", "ok" if config.OWNER_CLAIM_PHRASE != "认主" else "warning",
-        "disabled" if not config.OWNER_CLAIM_PHRASE else
-        ("public legacy phrase; replace it" if config.OWNER_CLAIM_PHRASE == "认主" else "configured (hidden)"))
+    add("owner_claim", "ok", "first non-empty private message; existing owner is retained; group messages cannot claim ownership")
     add("tls", "ok" if config.SSL_VERIFY else "warning", "verified" if config.SSL_VERIFY else "verification disabled")
-    if "AI_DAILY_BUDGET" in os.environ:
-        add("legacy_budget_name", "warning", "AI_DAILY_BUDGET is not read; use DAILY_BUDGET (old documentation used the wrong name)")
     for name in ("STATE_FILE", "OWNER_FILE", "STATUS_FILE", "LOG_FILE", "ARCHIVE_DIR", "MEMORY_DIR"):
         path = getattr(config, name)
         add(f"path.{name}", "ok" if _path_writable(path) else "error", path)
@@ -120,10 +117,7 @@ def doctor(config, *, network=False, as_json=False, dependency_error=None):
             add("state_json", "ok", "readable JSON object")
         except (OSError, ValueError) as error:
             add("state_json", "error", type(error).__name__)
-    if config.LEGACY_DATA_LAYOUT:
-        add("data_layout", "warning", "Existing root data is retained. Back up before explicitly setting DATA_DIR; no automatic migration.")
-    else:
-        add("data_layout", "ok", config.DATA_DIR)
+    add("data_layout", "ok", config.DATA_DIR)
     capabilities = None
     if dependencies_ready:
         try:
@@ -135,12 +129,8 @@ def doctor(config, *, network=False, as_json=False, dependency_error=None):
     else:
         add("provider_capabilities", "warning", "Not inspected while dependencies are missing")
     if capabilities is not None:
-        for warning in capabilities.get("migration_warnings", []):
-            add("provider_migration", "warning", warning)
         if capabilities.get("request_policy"):
             add("request_policy", "ok", json.dumps(capabilities["request_policy"], ensure_ascii=False))
-        if capabilities.get("ignored_settings"):
-            add("provider_migration", "warning", "Legacy settings no longer affect requests: " + ", ".join(capabilities["ignored_settings"]))
         for name in capabilities["provider_chain"]:
             provider = capabilities["providers"][name]
             add(f"provider.{name}", "ok" if provider["key_count"] else "warning",
@@ -148,15 +138,18 @@ def doctor(config, *, network=False, as_json=False, dependency_error=None):
                 f"digest={','.join(provider['digest_models'])}; judge={','.join(provider['judge_models'])}; access unverified")
         vision = capabilities["vision"]
         enabled = config.VISION_ENABLED and vision["configured"]
+        origin = "inherited from first chat model" if config.VISION_MODEL_INHERITED else "explicit vision model"
         add("vision", "ok" if enabled or not config.VISION_ENABLED else "warning",
-            f"{vision['provider']}/{vision['model']}; configured; access unverified" if enabled else
-            ("disabled by configuration" if not config.VISION_ENABLED else "unavailable: vision provider key missing; text chat remains available"))
-    add("qq_permissions", "manual", "QQ console: enable C2C, add sandbox members, and allow all group messages. Local checks cannot verify these switches.")
+            f"{vision['provider']}/{vision['model']}; {origin}; image capability and access unverified" if enabled else
+            ("disabled by configuration" if not config.VISION_ENABLED else
+             "unavailable: vision endpoint, model or key missing; text chat remains available"))
+    add("qq_permissions", "manual", "QQ console: enable C2C and required group events; restrict the bot's usage scope to intended users before first private contact. Local checks cannot verify these switches.")
     if network and not dependencies_ready:
         add("network", "warning", "Skipped: dependencies must be installed first")
     if network and dependencies_ready:
         import httpx
-        names = dict.fromkeys(n for n in (config.AI_PROVIDER, config.FALLBACK_PROVIDER) if n)
+        names = dict.fromkeys(n for n in (config.AI_PROVIDER, config.FALLBACK_PROVIDER,
+                                         config.VISION_PROVIDER if config.VISION_ENABLED else "") if n)
         with httpx.Client(verify=config.SSL_VERIFY, timeout=10.0) as client:
             for name in names:
                 preset = config.PROVIDER_PRESETS[name]

@@ -62,6 +62,9 @@ class PendingSend:
     on_delivered: Callable | None = None
     is_current: Callable | None = None
     retry_lock: object = None
+    send_lock: object = None
+    prepare: Callable | None = None
+    attempts: int = 0
 
 
 class Sender:
@@ -108,37 +111,46 @@ class Sender:
         self.last_status = "queued"
         return DeliveryResult("queued", item.text, reason=reason)
 
-    async def reply(self, message, text, *, on_delivered=None, is_current=None, retry_lock=None):
-        item = PendingSend(message, text, self.clock(), self._next_sequence(message),
-                           on_delivered, is_current, retry_lock)
-        if is_current and not is_current():
-            return DeliveryResult("superseded", text)
-        age = message_age_seconds(message)
-        if age is not None and age > passive_reply_window(message):
-            self.last_status = "expired"
-            return DeliveryResult("expired", text, reason="passive reply window elapsed")
-        for attempt in range(2):
+    async def _attempt(self, item):
+        # Preparation and confirmed-state commit share the same optional scope lock.
+        async with item.send_lock or nullcontext():
             if item.is_current and not item.is_current():
+                self.last_status = "superseded"
                 return DeliveryResult("superseded", item.text)
-            age = message_age_seconds(message)
-            if age is not None and age > passive_reply_window(message):
+            age = message_age_seconds(item.message)
+            if age is not None and age > passive_reply_window(item.message):
                 self.last_status = "expired"
                 return DeliveryResult("expired", item.text, reason="passive reply window elapsed")
+            if item.prepare is not None:
+                text = item.prepare()
+                if text != item.text and item.attempts:
+                    item.sequence = self._next_sequence(item.message)
+                item.text = text
+            item.attempts += 1
+            sent = await item.message.reply(content=item.text, msg_type=0, msg_seq=item.sequence)
+            return await self._delivered(item, sent) if sent else None
+
+    async def reply(self, message, text, *, on_delivered=None, is_current=None,
+                    retry_lock=None, send_lock=None, prepare=None):
+        item = PendingSend(message, text, self.clock(), self._next_sequence(message),
+                           on_delivered, is_current, retry_lock, send_lock, prepare)
+        for attempt in range(2):
             try:
-                sent = await message.reply(content=item.text, msg_type=0, msg_seq=item.sequence)
+                result = await self._attempt(item)
             except Exception as error:
                 if connection_error(error):
                     return self._queue(item, type(error).__name__)
                 if attempt == 0 and self.fallback and ("40034006" in str(error) or "违规" in str(error)):
                     item.text = self.fallback(message)
+                    item.prepare = None
                     item.sequence = self._next_sequence(message)
                     continue
                 self.last_status = "rejected"
                 logger.warning("QQ拒收回复: %s", str(error)[:160])
                 return DeliveryResult("rejected", item.text, reason=type(error).__name__)
-            if sent:
-                return await self._delivered(item, sent)
-            # botpy can swallow an HTTP timeout. Reuse the same sequence once.
+            if result is not None:
+                return result
+            # botpy can swallow a timeout. Unchanged payload retries reuse the sequence.
         return self._queue(item, "unconfirmed timeout")
 
     async def drain(self):
@@ -147,25 +159,20 @@ class Sender:
             for _ in range(count):
                 item = self.pending.popleft()
                 async with item.retry_lock or nullcontext():
-                    if item.is_current and not item.is_current():
-                        self.last_status = "superseded"
-                        continue
                     age = message_age_seconds(item.message)
                     if (self.clock() - item.created_at > passive_reply_window(item.message) - 15
                             or (age is not None and age > passive_reply_window(item.message))):
                         self.last_status = "expired"
                         continue
                     try:
-                        sent = await item.message.reply(content=item.text, msg_type=0, msg_seq=item.sequence)
+                        result = await self._attempt(item)
                     except Exception as error:
                         if connection_error(error):
                             self.pending.appendleft(item)
                             break
                         self.last_status = "rejected"
                         continue
-                    if sent:
-                        await self._delivered(item, sent)
-                    else:
+                    if result is None:
                         self.pending.append(item)
 
     def status(self):

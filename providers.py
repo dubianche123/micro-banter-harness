@@ -7,7 +7,6 @@ import asyncio
 import base64
 from email.utils import parsedate_to_datetime
 import logging
-import os
 import time
 
 import httpx
@@ -83,10 +82,7 @@ def configuration():
         "request_policy": {"max_attempts": config.AI_MAX_ATTEMPTS,
                            "timeout_seconds": config.AI_TIMEOUT_SECONDS,
                            "total_timeout_seconds": config.AI_TOTAL_TIMEOUT},
-        "ignored_settings": [name for name in config.IGNORED_PROVIDER_SETTINGS if name in os.environ],
-        "migration_warnings": (["AI_PROVIDER is unset: the shared default is now openai; explicitly select zhipu/gemini to retain a preset."]
-                               if "AI_PROVIDER" not in os.environ and any(
-                                   config.load_api_keys(name) for name in ("zhipu", "gemini")) else []),
+
     }
 
 

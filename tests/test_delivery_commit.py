@@ -1,5 +1,6 @@
 """Delivery and history invariants with fake QQ receipts and model output."""
 import asyncio
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import unittest
@@ -22,8 +23,7 @@ class DeliveryCommitTest(unittest.IsolatedAsyncioTestCase):
         self.sessions = SessionStore()
         self.state = SimpleNamespace(data={"groups": {}}, mark_dirty=lambda: None)
         self.sender = Sender(fallback=lambda _: "platform fallback")
-        for target, name, value in ((bot.config, "OWNER_CLAIM_PHRASE", "test-only-private-phrase"),
-                                    (bot.runtime, "SESSIONS", self.sessions),
+        for target, name, value in ((bot.runtime, "SESSIONS", self.sessions),
                                     (bot.runtime, "STATE", self.state),
                                     (bot, "SENDER", self.sender)):
             context = patch.object(target, name, value)
@@ -135,6 +135,7 @@ class DeliveryCommitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.history(), [])
 
     async def test_milestone_and_owner_hint_wait_for_real_delivery(self):
+        self.state.data["groups"]["g"] = {"first_seen": time.time() - bot.OWNER_HINT_DELAY_SECONDS - 1}
         done = []
         m = message([None, None, {"id": "late"}])
         await bot.reply_in_session(m, "g_u", "first", owner_hint_group="g",
@@ -144,6 +145,50 @@ class DeliveryCommitTest(unittest.IsolatedAsyncioTestCase):
         await self.sender.drain()
         self.assertTrue(self.state.data["groups"]["g"]["owner_hint"])
         self.assertEqual(done, [1])
+        await bot.reply_in_session(message(identity="after-reminder"), "g_u", "second", owner_hint_group="g")
+        self.assertEqual(self.history()[-1]["content"], "candidate")
+
+    async def test_concurrent_group_replies_have_one_confirmed_reminder(self):
+        self.state.data["groups"]["g"] = {"first_seen": time.time() - 1000}
+        sending, release = asyncio.Event(), asyncio.Event()
+        async def delayed(**kwargs):
+            sending.set()
+            await release.wait()
+            return {"id": "ok"}
+        first, second = message(identity="one"), message(identity="two")
+        first.reply.side_effect = delayed
+        task = asyncio.create_task(bot.reply_in_session(first, "g_one", "first", owner_hint_group="g"))
+        await sending.wait()
+        other = asyncio.create_task(bot.reply_in_session(second, "g_two", "second", owner_hint_group="g"))
+        await asyncio.sleep(0)
+        second.reply.assert_not_awaited()
+        release.set()
+        await asyncio.gather(task, other)
+        texts = [first.reply.call_args.kwargs["content"], second.reply.call_args.kwargs["content"]]
+        self.assertEqual(sum(bot.OWNER_CLAIM_HINT in text for text in texts), 1)
+
+    async def test_queued_reminder_is_removed_if_owner_binds_before_retry(self):
+        self.state.data["groups"]["g"] = {"first_seen": time.time() - 1000}
+        incoming = message([None, None, {"id": "late"}])
+        await bot.reply_in_session(incoming, "g_u", "first", owner_hint_group="g")
+        self.assertIn(bot.OWNER_CLAIM_HINT, incoming.reply.call_args.kwargs["content"])
+        with patch.object(bot.runtime, "OWNER_OPENID", "bound-owner"):
+            await self.sender.drain()
+        self.assertEqual(incoming.reply.call_args.kwargs["content"], "candidate")
+        self.assertEqual(self.history()[-1]["content"], "candidate")
+
+    async def test_another_confirmed_reply_strips_reminder_from_older_queue(self):
+        self.state.data["groups"]["g"] = {"first_seen": time.time() - 1000}
+        incoming = message([None, None, {"id": "late"}], "old-user")
+        await bot.reply_in_session(incoming, "g_old", "first", owner_hint_group="g")
+        await bot.reply_in_session(message(identity="other-user"), "g_other", "second", owner_hint_group="g")
+        await self.sender.drain()
+        self.assertEqual(incoming.reply.call_args.kwargs["content"], "candidate")
+
+    async def test_new_group_has_no_onboarding_suffix(self):
+        await bot.reply_in_session(message(), "g_u", "first", owner_hint_group="g")
+        self.assertEqual(self.history()[-1]["content"], "candidate")
+        self.assertFalse(self.state.data["groups"]["g"].get("owner_hint"))
 
     async def test_no_model_fallback_keeps_one_shot_pending(self):
         self.model.return_value = (None, None)

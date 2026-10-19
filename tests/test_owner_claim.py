@@ -13,13 +13,14 @@
 等于把线上群主换掉。
 """
 import inspect
+import asyncio
 import os
 import re
 import sys
-import subprocess
 import tempfile
 import types
 import unittest
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, "..")
 import runtime
@@ -84,7 +85,6 @@ class BaseClaimTest(unittest.IsolatedAsyncioTestCase):
     def setUpClass(cls):
         cls.saved_owner = runtime.OWNER_OPENID
         cls.saved_owner_file = config.OWNER_FILE
-        cls.saved_phrase = config.OWNER_CLAIM_PHRASE
         cls.saved_archive = runtime.ARCHIVE
         cls.saved_digests = runtime.DIGESTS
 
@@ -95,6 +95,8 @@ class BaseClaimTest(unittest.IsolatedAsyncioTestCase):
 
         self.sent = []
         self._orig_reply = bot.safe_reply
+        self._orig_ai = bot.get_ai_reply
+        bot.get_ai_reply = AsyncMock(return_value=("正常聊天回复", None))
 
         async def fake_reply(message, text, *, on_delivered=None, **kwargs):
             self.sent.append(text)
@@ -107,16 +109,15 @@ class BaseClaimTest(unittest.IsolatedAsyncioTestCase):
         runtime.ARCHIVE = _StubSink()
         runtime.DIGESTS = _StubSink()
         runtime.OWNER_OPENID = None
-        config.OWNER_CLAIM_PHRASE = "test-only-private-phrase"
         # 清掉每群标记，让「只提示一次」这类用例彼此独立
         runtime.STATE.data.get("groups", {}).pop(GROUP, None)
         self._mid = 0
 
     def tearDown(self):
         bot.safe_reply = self._orig_reply
+        bot.get_ai_reply = self._orig_ai
         runtime.OWNER_OPENID = self.saved_owner
         config.OWNER_FILE = self.saved_owner_file
-        config.OWNER_CLAIM_PHRASE = self.saved_phrase
         runtime.ARCHIVE = self.saved_archive
         runtime.DIGESTS = self.saved_digests
         runtime.RELATIONS.pinned.discard(OWNER)
@@ -246,71 +247,141 @@ class GroupChatNeverClaimsTest(BaseClaimTest):
             await self.say_in_group("我是群主")
         self.assertEqual(len(self.sent), 1, f"引导应该只回一次，实际回了 {len(self.sent)} 次")
 
-    async def test_hint_never_contains_the_phrase(self):
-        """引导语只负责指路。把暗号写进去，等于又请回一个大喇叭。"""
-        self.assertNotIn(config.OWNER_CLAIM_PHRASE, bot.OWNER_CLAIM_HINT)
+    async def test_hint_explains_private_automatic_claim(self):
+        self.assertIn("私聊", bot.OWNER_CLAIM_HINT)
+        self.assertIn("自动", bot.OWNER_CLAIM_HINT)
+        self.assertNotIn("OWNER_CLAIM_PHRASE", bot.OWNER_CLAIM_HINT)
 
-    async def test_group_probe_words_do_not_include_the_secret(self):
-        """群里别拿真暗号当探测词：那会让群聊变成一台口令确认器。"""
-        self.assertFalse(
-            any(config.OWNER_CLAIM_PHRASE in w for w in bot.OWNER_CLAIM_PROBE_WORDS),
-            f"探测词 {bot.OWNER_CLAIM_PROBE_WORDS} 里混进了真正的暗号")
+    async def test_automatic_hint_waits_for_grace_period(self):
+        bot.observe_group(GROUP, now=1000)
+        self.assertFalse(bot.owner_hint_pending(GROUP, now=1599))
+        self.assertTrue(bot.owner_hint_pending(GROUP, now=1600))
+
+    async def test_group_join_only_records_observation_without_notice(self):
+        with patch.object(bot.time, "time", return_value=1000):
+            await bot.GroupBot.on_group_add_robot(FakeClient(), types.SimpleNamespace(group_openid=GROUP))
+        self.assertEqual(runtime.STATE.data["groups"][GROUP]["first_seen"], 1000)
+        self.assertEqual(self.sent, [])
+        bot.observe_group(GROUP, now=1599)
+        self.assertEqual(runtime.STATE.data["groups"][GROUP]["first_seen"], 1000)
+
+    async def test_bound_owner_cancels_pending_automatic_hint(self):
+        bot.observe_group(GROUP, now=1000)
+        runtime.claim_owner(OWNER)
+        self.assertFalse(bot.owner_hint_pending(GROUP, now=2000))
 
 
 class PrivateChatClaimTest(BaseClaimTest):
-    """私聊才是认领通道，而且必须说对暗号。"""
+    """The first nonempty C2C binds once, without model or secret input."""
 
-    async def test_correct_phrase_claims_and_persists(self):
-        await self.say_in_private(config.OWNER_CLAIM_PHRASE)
+    async def test_first_message_silently_claims_and_is_still_processed(self):
+        await self.say_in_private("你好")
         self.assertEqual(runtime.OWNER_OPENID, OWNER)
-        with open(config.OWNER_FILE, encoding="utf-8") as f:
-            self.assertEqual(f.read().strip(), OWNER, "认领结果没落到 owner.txt")
-        self.assertIn(OWNER, runtime.RELATIONS.pinned, "认领之后好感度该钉在顶格")
+        with open(config.OWNER_FILE, encoding="utf-8") as stream:
+            self.assertEqual(stream.read(), OWNER)
+        self.assertIn(OWNER, runtime.RELATIONS.pinned)
+        self.assertEqual(self.sent, ["正常聊天回复"])
+        bot.get_ai_reply.assert_awaited_once()
+        self.assertTrue(bot.get_ai_reply.call_args.kwargs["is_owner"])
 
-    async def test_phrase_is_inert_once_someone_else_claimed(self):
-        """认领是一次性的：口令将来就算泄了，也换不掉主人。"""
-        await self.say_in_private(config.OWNER_CLAIM_PHRASE)
-        await self.say_in_private(config.OWNER_CLAIM_PHRASE, sender=OTHER)
-        self.assertEqual(runtime.OWNER_OPENID, OWNER, "第二位说对暗号的人把主人顶掉了")
+    async def test_binding_does_not_depend_on_available_model_budget(self):
+        with patch.object(runtime.BUDGET, "can_consume", return_value=False):
+            await self.say_in_private("你好")
+        self.assertEqual(runtime.OWNER_OPENID, OWNER)
+        bot.get_ai_reply.assert_not_awaited()
 
-    async def test_claim_is_not_transferable_and_says_nothing_about_who_owns_it(self):
-        """被顶替的尝试：只回「有人认领过」，不透露是谁，也不说口令对不对。"""
-        await self.say_in_private(config.OWNER_CLAIM_PHRASE)
-        self.sent.clear()
-        await self.say_in_private(config.OWNER_CLAIM_PHRASE, sender=OTHER)
-        self.assertTrue(self.sent)
+    async def test_explicit_claim_words_need_no_token(self):
+        await self.say_in_private("我是群主")
+        self.assertEqual(runtime.OWNER_OPENID, OWNER)
+
+    async def test_empty_messages_and_missing_identity_do_not_claim(self):
+        for text, sender in (("", OWNER), ("  ", OWNER), ("你好", None)):
+            await self.say_in_private(text, sender=sender)
+        self.assertIsNone(runtime.OWNER_OPENID)
+        self.assertFalse(os.path.exists(config.OWNER_FILE))
+        self.assertEqual(self.sent, [])
+
+    async def test_another_sender_cannot_replace_owner(self):
+        await self.say_in_private("你好")
+        await self.say_in_private("我是群主", sender=OTHER)
+        self.assertEqual(runtime.OWNER_OPENID, OWNER)
+        with open(config.OWNER_FILE, encoding="utf-8") as stream:
+            self.assertEqual(stream.read(), OWNER)
+        self.assertEqual(self.sent, ["正常聊天回复", "正常聊天回复"])
+        self.assertFalse(bot.get_ai_reply.call_args.kwargs["is_owner"])
         self.assertNotIn(OWNER, self.sent[-1])
 
-    async def test_owner_reclaiming_gets_a_short_answer(self):
-        await self.say_in_private(config.OWNER_CLAIM_PHRASE)
-        self.sent.clear()
-        await self.say_in_private(config.OWNER_CLAIM_PHRASE)
-        self.assertEqual(len(self.sent), 1)
+    async def test_existing_owner_can_confirm_without_rewriting(self):
+        await self.say_in_private("你好")
+        with patch.object(runtime, "save_owner") as save:
+            await self.say_in_private("我是群主")
+            save.assert_not_called()
+        self.assertEqual(self.sent, ["正常聊天回复", "正常聊天回复"])
+
+    async def test_restart_restores_the_same_owner(self):
+        await self.say_in_private("你好")
+        runtime.OWNER_OPENID = None
+        runtime.load_owner()
+        await self.say_in_private("我是群主", sender=OTHER)
         self.assertEqual(runtime.OWNER_OPENID, OWNER)
 
-    async def test_old_phrase_is_not_a_valid_phrase(self):
-        """「我是群主」不再是口令 —— 它现在只会收到一句「得说对暗号」。"""
-        self.assertNotEqual(config.OWNER_CLAIM_PHRASE, "我是群主")
-        await self.say_in_private("我是群主")
-        self.assertIsNone(runtime.OWNER_OPENID)
-        self.assertTrue(self.sent)
-        self.assertIn("暗号", self.sent[-1])
-
-    async def test_empty_phrase_disables_the_channel(self):
-        """暗号留空 = 关掉私聊认主通道（那台机器只能手动写 owner.txt）。"""
-        config.OWNER_CLAIM_PHRASE = ""
-        await self.say_in_private("我是群主")
-        self.assertIsNone(runtime.OWNER_OPENID)
-        self.assertTrue(self.sent)
-        self.assertIn("通道", self.sent[-1])
-
-    async def test_custom_phrase_wins(self):
-        """换成自定义暗号之后，默认那句就该失效。"""
-        config.OWNER_CLAIM_PHRASE = "芝麻开门"
-        await self.say_in_private("我是群主")
-        self.assertIsNone(runtime.OWNER_OPENID)
-        await self.say_in_private("芝麻开门")
+    async def test_concurrent_first_messages_bind_only_one_owner(self):
+        await asyncio.gather(self.say_in_private("你好", sender=OWNER),
+                             self.say_in_private("我是群主", sender=OTHER))
         self.assertEqual(runtime.OWNER_OPENID, OWNER)
+        with open(config.OWNER_FILE, encoding="utf-8") as stream:
+            self.assertEqual(stream.read(), OWNER)
+
+    async def test_persistence_failure_leaves_claim_retryable(self):
+        was_pinned = OWNER in runtime.RELATIONS.pinned
+        with patch.object(runtime.storage, "atomic_write_text", side_effect=OSError("disk failure")):
+            await self.say_in_private("你好")
+        self.assertIsNone(runtime.OWNER_OPENID)
+        self.assertEqual(OWNER in runtime.RELATIONS.pinned, was_pinned)
+        self.assertFalse(os.path.exists(config.OWNER_FILE))
+        self.assertIn("没能保存", self.sent[-1])
+        await self.say_in_private("再试一次")
+        self.assertEqual(runtime.OWNER_OPENID, OWNER)
+
+    async def test_existing_file_is_loaded_before_claiming(self):
+        runtime.save_owner(OWNER)
+        await self.say_in_private("我是群主", sender=OTHER)
+        self.assertEqual(runtime.OWNER_OPENID, OWNER)
+        self.assertEqual(self.sent, ["正常聊天回复"])
+        self.assertFalse(bot.get_ai_reply.call_args.kwargs["is_owner"])
+
+    async def test_unreadable_saved_owner_is_not_treated_as_unowned(self):
+        runtime.save_owner(OWNER)
+        with patch("builtins.open", side_effect=PermissionError("unreadable owner")):
+            with self.assertRaises(PermissionError):
+                runtime.load_owner()
+            await self.say_in_private("你好", sender=OTHER)
+        self.assertIsNone(runtime.OWNER_OPENID)
+        with open(config.OWNER_FILE, encoding="utf-8") as stream:
+            self.assertEqual(stream.read(), OWNER)
+        self.assertIn("没能保存", self.sent[-1])
+        runtime.load_owner()
+        self.assertEqual(runtime.OWNER_OPENID, OWNER)
+
+    async def test_unconfirmed_reply_does_not_lose_persistent_ownership(self):
+        bot.safe_reply = AsyncMock(return_value=bot.DeliveryResult("queued", "pending"))
+        await self.say_in_private("你好")
+        runtime.OWNER_OPENID = None
+        runtime.load_owner()
+        self.assertEqual(runtime.OWNER_OPENID, OWNER)
+
+
+class AtomicOwnerFileTest(unittest.TestCase):
+    def test_failed_replace_preserves_previous_text_and_removes_temporary_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "owner.txt")
+            runtime.storage.atomic_write_text(path, "existing")
+            with patch.object(runtime.storage.os, "replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    runtime.storage.atomic_write_text(path, "new")
+            with open(path, encoding="utf-8") as stream:
+                self.assertEqual(stream.read(), "existing")
+            self.assertEqual(os.listdir(directory), ["owner.txt"])
 
 
 class PrivateChatNicknameTest(BaseClaimTest):
@@ -323,6 +394,10 @@ class PrivateChatNicknameTest(BaseClaimTest):
     当事人完全不知道命令根本没生效 —— 「机器人叫不动」的错觉就是这么来的。
     这一组钉住三件事：**不改档、指回群里、不花额度**。
     """
+
+    def setUp(self):
+        super().setUp()
+        runtime.OWNER_OPENID = OWNER
 
     def _nick(self, openid=OWNER):
         return (runtime.RELATIONS.get(GROUP, openid, create=False) or {}).get("nick")
@@ -381,34 +456,6 @@ class PrivateChatNicknameTest(BaseClaimTest):
 
     def test_hint_actually_says_where_to_go(self):
         self.assertIn("群", bot.NICK_PRIVATE_CHAT_HINT)
-
-
-class ClaimPhraseIsScrubbedTest(unittest.TestCase):
-    """暗号本身当成敏感词注册掉。
-
-    万一真有人在群里把它念出来，它就可能顺着摘要回流进长期记忆，之后每一轮 prompt 都
-    带着它 —— 等于把口令抄进了模型上下文。这条钉住「注册」这个动作本身。
-    """
-
-    def test_phrase_is_registered_as_a_sensitive_word(self):
-        with tempfile.TemporaryDirectory() as directory:
-            env = dict(os.environ, REGULAR_HOME=directory, DATA_DIR=directory,
-                       OWNER_CLAIM_PHRASE="test-only-private-phrase", ZHIPU_API_KEY="",
-                       GEMINI_API_KEY="", OPENAI_API_KEY="")
-            result = subprocess.run([sys.executable, "-c",
-                "import bot,config,wordfilter; "
-                "assert wordfilter.has_hit('口令是'+config.OWNER_CLAIM_PHRASE); "
-                "assert wordfilter.scrub('口令是'+config.OWNER_CLAIM_PHRASE)=='口令是【已隐去】'"],
-                env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_short_phrase_is_rejected(self):
-        """一个字的口令本来就该改掉，而且单字进词表误伤面太大。"""
-        self.assertEqual(wordfilter.add_runtime_words(["字"]), 0)
-        self.assertFalse(wordfilter.has_hit("这个字"))
-
-    def test_normal_text_is_not_affected(self):
-        self.assertFalse(wordfilter.has_hit("今天天气不错"))
 
 
 if __name__ == "__main__":

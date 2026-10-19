@@ -19,14 +19,14 @@ from collections import deque
 STATE_VERSION = 1
 
 
-def atomic_write_json(path, data):
-    """原子写：先写临时文件再 os.replace，避免进程被杀时留下半个损坏的 json。"""
+def atomic_write_text(path, text):
+    """Write UTF-8 through one fsynced temporary file and atomic replace."""
     directory = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(directory, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp_", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -36,6 +36,10 @@ def atomic_write_json(path, data):
         except OSError:
             pass
         raise
+
+
+def atomic_write_json(path, data):
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 # ══════════════════════════════ 状态持久化 ══════════════════════════════

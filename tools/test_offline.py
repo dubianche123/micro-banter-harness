@@ -20,7 +20,6 @@ if __name__ == "__main__":
         os.environ["DATA_DIR"] = directory
         os.environ["AI_PROVIDER"] = "zhipu"
         os.environ["FALLBACK_PROVIDER"] = ""
-        os.environ["OWNER_CLAIM_PHRASE"] = ""
         os.environ["SSL_VERIFY"] = "true"
         # Empty values also prevent a developer's .env or account from affecting CI.
         for name in ("QQ_APP_ID", "QQ_APP_SECRET", "ZHIPU_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"):

@@ -15,6 +15,7 @@ import re
 import signal
 import sys
 import time
+import weakref
 from datetime import datetime, timezone
 
 import aiohttp
@@ -176,7 +177,7 @@ async def ws_watchdog_loop():
 import runtime
 import activation
 import providers
-from runtime import hits, owner_label, load_owner, save_owner, named_members
+from runtime import hits, owner_label, load_owner, named_members
 call_model = providers.call_model
 probe_provider = providers.probe_provider
 providers.initialize(budget=runtime.BUDGET, on_usage=runtime.STATE.mark_dirty)
@@ -256,23 +257,12 @@ _throttle_notice = {}  # group_id -> last notice timestamp
 
 
 
-# 群主身份**只在私聊里认**：私聊机器人发一句暗号（`config.OWNER_CLAIM_PHRASE`），
-# 第一个说对的 openid 被永久写进 owner.txt。
-#
-# 为什么不在群里认：群聊是大声公。口令一旦在群里念出来就等于念给所有人听，而且是
-# 「谁先喊谁得」—— 随手一个群成员、甚至根本不在群里的人，都能把身份抢走。挪到私聊之后，
-# 这一句只有当事人自己和机器人看得到，抢答这条路直接没了。
-#
-# 开源给别人的时候，这一步最容易被漏掉 —— 漏了就只有「普通群友」，所有群主特权全都不生效，
-# 而且**没有任何报错**，看起来像功能坏了。所以引导得摆在明面上。
-# ⚠️ 引导语里**不写暗号**：它只负责指路，把口令写出来就又把大声公请回来了。
-OWNER_CLAIM_HINT = (
-    "（顺带一提：这个群还没人认领群主。认领要在**私聊**里跟我说一句暗号 ——"
-    "在群里喊谁都会看见，谁先喊谁得，这事不适合公开办。）")
+# 无人认领时，首条非空 C2C 私聊自动持久认主；群聊消息永远不授权。
+OWNER_HINT_DELAY_SECONDS = 10 * 60
+OWNER_CLAIM_HINT = "（顺带提醒一下：我还没有认主，部署者私聊给我发句话就会自动绑定。）"
 
 # 群里出现这些字样 = 有人在试着认领。**只用来指路去私聊，永远不会授予权限。**
 # 「我是群主」留着是因为群友的第一反应就是喊这句，得把人接住。
-# 刻意**不含**真正的暗号：那会让群聊变成一台确认器（喊对了就有人应声 = 等于验证了口令）。
 OWNER_CLAIM_PROBE_WORDS = ("我是群主", "认领群主", "认领一下")
 
 # 私聊收到改名命令时的回复。
@@ -299,19 +289,34 @@ NICK_LOCKED_DENIED = (
     "（把小本本锁进了抽屉）现在群里锁着名字，改称呼这事我先不办。"
     "要落名得{owner}点头 —— 让他 @你 说「叫 XXX」就行。")
 
-# 暗号本身就当敏感词注册掉：万一真有人在群里念出来，摘要出口会把它就地抹掉，
-# 不会顺着长期记忆回流进每一轮 prompt。
-wordfilter.add_runtime_words([config.OWNER_CLAIM_PHRASE])
+
+_owner_hint_locks = weakref.WeakValueDictionary()
 
 
-def owner_hint_pending(group_id):
-    """这次回复要不要捎上「怎么认领群主」的引导。每个群最多捎一次。"""
-    if runtime.OWNER_OPENID or not group_id or not config.OWNER_CLAIM_PHRASE:
-        return False
+def owner_hint_lock(group_id):
+    lock = _owner_hint_locks.get(group_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _owner_hint_locks[group_id] = lock
+    return lock
+
+
+def observe_group(group_id, now=None):
+    """Remember the first observed join/message; later activity must not restart the grace period."""
     slot = runtime.STATE.data.setdefault("groups", {}).setdefault(group_id, {})
-    if slot.get("owner_hint"):
+    if "first_seen" not in slot:
+        slot["first_seen"] = time.time() if now is None else now
+        runtime.STATE.mark_dirty()
+    return slot
+
+
+def owner_hint_pending(group_id, now=None):
+    """After a grace period, include one reminder with an ordinary group reply."""
+    if runtime.OWNER_OPENID or not group_id:
         return False
-    return True
+    slot = observe_group(group_id, now)
+    now = time.time() if now is None else now
+    return not slot.get("owner_hint") and now - slot["first_seen"] >= OWNER_HINT_DELAY_SECONDS
 
 
 def claim_redirect_pending(group_id):
@@ -325,15 +330,7 @@ def claim_redirect_pending(group_id):
     slot = runtime.STATE.data.setdefault("groups", {}).setdefault(group_id, {})
     if slot.get("claim_redirect"):
         return False
-    slot["claim_redirect"] = True
-    runtime.STATE.mark_dirty()
     return True
-
-
-def matches_claim_phrase(text):
-    """私聊里说对暗号才算数。暗号没配（留空）就永远不算 —— 那等于关掉私聊认主通道。"""
-    phrase = (config.OWNER_CLAIM_PHRASE or "").strip()
-    return bool(phrase) and phrase in (text or "")
 
 
 def looks_like_claim_attempt(text):
@@ -584,24 +581,28 @@ async def reply_in_session(message, session_id, user_text, *, on_delivered=None,
         body, delta = await get_ai_reply(session_id, user_text, allow_fallback=False, **context)
         generated = bool(body)
         body = body or _pick_fallback()
-        hint = bool(generated and owner_hint_group and owner_hint_pending(owner_hint_group))
-        candidate = f"{body}\n{OWNER_CLAIM_HINT}" if hint else body
+        hinted = f"{body}\n{OWNER_CLAIM_HINT}"
+
+        def prepare():
+            return hinted if generated and owner_hint_pending(owner_hint_group) else body
 
         def commit(result):
             if runtime.SESSIONS.generation(session_id) != generation:
                 return  # a mode/reset action invalidated this old pending reply
             runtime.SESSIONS.record(session_id, user_text, result.text)
-            if generated and result.text == candidate:
-                if hint:
+            if generated and result.text in (body, hinted):
+                if result.text == hinted:
                     runtime.STATE.data.setdefault("groups", {}).setdefault(owner_hint_group, {})["owner_hint"] = True
                 if on_delivered:
                     on_delivered()
             runtime.STATE.mark_dirty()
 
         result = await safe_reply(
-            message, candidate, on_delivered=commit,
+            message, body, on_delivered=commit,
             is_current=lambda: runtime.SESSIONS.generation(session_id) == generation,
-            retry_lock=runtime.SESSIONS.lock(session_id))
+            retry_lock=runtime.SESSIONS.lock(session_id),
+            send_lock=owner_hint_lock(owner_hint_group) if owner_hint_group else None,
+            prepare=prepare if owner_hint_group else None)
         return body, delta, result
 
 
@@ -1447,19 +1448,9 @@ class GroupBot(botpy.Client):
                 naming.DEFAULT_BOT_NAME)
         if runtime.OWNER_OPENID:
             logger.info("👑 群主 OpenID 已锁定: %s（好感度锁定顶格；称呼认领后自动生效）", runtime.OWNER_OPENID)
-        elif config.OWNER_CLAIM_PHRASE:
-            # 只在用的是**默认**暗号时才把它打出来 —— 自定义暗号一律不落日志。
-            which = (f"现在用的是默认暗号「{config.OWNER_CLAIM_PHRASE}」，"
-                     "建议改成只有你知道的一句"
-                     if config.OWNER_CLAIM_PHRASE == config.DEFAULT_OWNER_CLAIM_PHRASE
-                     else "用的是你在 .env 里配的自定义暗号（这里不打印）")
-            logger.warning(
-                "👑 还没有群主认领 —— 让群主**私聊**机器人发一句暗号即可永久认领"
-                "（群里说破天也不授权，那等于谁先喊谁得）。%s；认领结果写进 %s，删掉它就能换人认领",
-                which, config.OWNER_FILE)
         else:
-            logger.warning("👑 还没有群主认领，而且 OWNER_CLAIM_PHRASE 是空的 —— "
-                           "私聊认主通道已关闭，只能把 OpenID 手动写进 %s", config.OWNER_FILE)
+            logger.info("👑 尚未认主：首条非空私聊会自动认领并保存到 %s；"
+                        "请在 QQ 后台将私聊使用范围限制给预期认领者", config.OWNER_FILE)
         logger.info("📡 全量群消息监听与智能上下文缓存池已就绪！")
         logger.info("🤖 供应商=%s 主模型=%s | 今日额度已用 %d/%d",
                     config.PROVIDER["label"], config.CANDIDATE_MODELS[0], runtime.BUDGET.used, runtime.BUDGET.limit)
@@ -1483,6 +1474,10 @@ class GroupBot(botpy.Client):
         task = asyncio.create_task(probe_provider())
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
+
+    async def on_group_add_robot(self, event):
+        if event.group_openid:
+            observe_group(event.group_openid)
 
     async def on_group_message_create(self, message: GroupMessage):
         await self.handle_group_msg(message, is_at=False)
@@ -1561,7 +1556,7 @@ class GroupBot(botpy.Client):
             runtime.DIGESTS.touch(group_id)
         # 记一下这个群最近有人说话：主动催债前要确认群里还活着。
         # 就地更新而不是整块替换 —— 这个槽位还存着别的每群标记（比如群主认领提示有没有说过）。
-        runtime.STATE.data.setdefault("groups", {}).setdefault(group_id, {})["last_seen"] = time.time()
+        observe_group(group_id)["last_seen"] = time.time()
         runtime.STATE.mark_dirty()
 
         # 3.5 写入群聊滑动窗口背景缓存。
@@ -1577,21 +1572,19 @@ class GroupBot(botpy.Client):
         #    以前这段真的会在群里认主（谁先喊谁得），等于把身份挂在大喇叭上招领；
         #    现在群里说破天也只是收到一句「去私聊办」，权限一个字都不给。
         if looks_like_claim_attempt(user_input):
-            owner = owner_label(group_id)
             if runtime.OWNER_OPENID is None:
                 # 每个群只正面回一次，免得有人反复喊就反复刷屏
                 if claim_redirect_pending(group_id):
-                    await safe_reply(message, OWNER_CLAIM_HINT if config.OWNER_CLAIM_PHRASE
-                                     else "当前没有开放群主认领，需要的话请联系部署者。")
+                    def commit_redirect(_receipt):
+                        slot = observe_group(group_id)
+                        slot["claim_redirect"] = slot["owner_hint"] = True
+                        runtime.STATE.mark_dirty()
+                    await safe_reply(message, OWNER_CLAIM_HINT, on_delivered=commit_redirect,
+                                     send_lock=owner_hint_lock(group_id),
+                                     is_current=lambda: claim_redirect_pending(group_id))
                 return
-            if runtime.OWNER_OPENID == sender_openid:
-                await safe_reply(message, f"{owner}，您早就认领过了 —— 您的 OpenID 已经焊死在我的"
-                                          "系统核心里，有什么吩咐直接说就行。")
-                return
-            await safe_reply(message,
-                f"（战术后仰并投来极度嫌弃的目光）\n差不多得了！真正的{owner}"
-                "早就私聊跟我对完暗号了，你个山寨货还想在这儿篡位夺权呢？"
-                f"信不信我现在就向{owner}打小报告，给你安排个禁言大礼包？")
+            await safe_reply(message, "已经认得你了，直接说就好。" if runtime.OWNER_OPENID == sender_openid
+                             else "这边已经有人认领过我了。")
             return
 
         is_owner = runtime.OWNER_OPENID is not None and sender_openid == runtime.OWNER_OPENID
@@ -1917,44 +1910,17 @@ class GroupBot(botpy.Client):
         user_input = (message.content or "").strip()
         sender_openid = message.author.user_openid
         logger.info("📩 [私聊] %s | %s", sender_openid, user_input)
-        if not user_input:
+        if not user_input or not sender_openid:
             return
 
-        # 认主：**只在私聊，且必须说对暗号**。第一个说对的 openid 被永久写进 owner.txt。
-        # 认领之后就失效了（不做转移）—— 所以口令将来就算泄了，也抢不走这个位置。
-        if matches_claim_phrase(user_input):
-            if runtime.OWNER_OPENID is None:
-                runtime.OWNER_OPENID = sender_openid
-                save_owner(runtime.OWNER_OPENID)
-                runtime.RELATIONS.pin(runtime.OWNER_OPENID)   # 好感度钉在顶格：亲近靠档案，不靠谄媚台词
-                runtime.STATE.mark_dirty()
-                logger.info("👑 【认主成功】已永久锁定唯一群主 OpenID: %s（好感度锁定顶格）",
-                            runtime.OWNER_OPENID)
-                await safe_reply(message,
-                    "（当场立正敬礼，掏出纯金VIP打卡机录入指纹）\n滴！认主成功！"
-                    f"从今往后{naming.bot_name()}唯您马首是瞻 ——"
-                    "给别人起名、特权指令这些，往后只有您说了算。")
+        # Platform access scope is configured in QQ; the first nonempty C2C claims locally.
+        if runtime.OWNER_OPENID is None:
+            try:
+                runtime.claim_owner(sender_openid)
+            except (OSError, UnicodeError) as error:
+                logger.error("自动认主保存失败: %s", type(error).__name__)
+                await safe_reply(message, "刚才没能保存认领信息，请稍后再发一条私聊。")
                 return
-            if runtime.OWNER_OPENID == sender_openid:
-                await safe_reply(message,
-                    "您早就认领过了 —— 您的 OpenID 已经焊死在我的系统核心里，不用再对一次。")
-                return
-            # 已经有主了。**不透露是谁**：只报「有人认领过」，一个字都不多说。
-            await safe_reply(message, "（礼貌地鞠了个躬）这边已经有人认领过我了，就不另立山头了。")
-            return
-
-        # 说了句「像是要认领」的话但没对上暗号。**静默失效正是这个功能最大的坑**，所以明说，
-        # 而且这句是本地固定话术：0 token，也不占每日额度。
-        if runtime.OWNER_OPENID is None and looks_like_claim_attempt(user_input):
-            if config.OWNER_CLAIM_PHRASE:
-                await safe_reply(message,
-                    "这是想认领我？那得说对暗号才行 —— 暗号是部署的时候在 `OWNER_CLAIM_PHRASE` "
-                    "里配的那一句。")
-            else:
-                await safe_reply(message,
-                    "想认领我？这台机器的私聊认主通道是关着的 —— 部署的人没有配 "
-                    "`OWNER_CLAIM_PHRASE`。")
-            return
 
         is_owner = runtime.OWNER_OPENID is not None and sender_openid == runtime.OWNER_OPENID
 

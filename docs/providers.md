@@ -20,7 +20,7 @@ AI_TOTAL_TIMEOUT=30
 
 `*_MODELS` 接受逗号分隔的有序列表，重复名称自动去重。只填自己确认可用的模型。`FALLBACK_PROVIDER` 可显式选择 `openai`、`zhipu` 或 `gemini`；留空关闭跨端点回退。主端点的候选用完或该端点需要跳过时，才进入备用端点，且共同受尝试上限约束。使用其他 endpoint 或 key pool 可运行自己已有的兼容网关，项目不另建网关框架。
 
-老的 `AI_PROVIDER=zhipu/gemini`、对应 `*_API_KEY`、`*_BASE_URL`、`*_MODELS*` 及 `api_keys_<provider>.txt` 继续支持。所有入口默认 `AI_PROVIDER=openai`，不隐式选厂商。旧部署若只填智谱 Key、未设置 `AI_PROVIDER`，升级时须补 `AI_PROVIDER=zhipu`；doctor 会显示有效端点并提示这种迁移。
+智谱或 Gemini 可选 `AI_PROVIDER=zhipu` / `gemini`，并填写对应 `*_API_KEY`；`*_BASE_URL` 和 `*_MODELS*` 可覆盖预设。需要按端点管理多个 Key 时，可在部署目录使用 `api_keys_<provider>.txt`，每行一个 Key。默认 `AI_PROVIDER=openai`；`regular doctor` 展示当前有效端点和任务模型。
 
 ## 每次调用的边界
 
@@ -42,33 +42,41 @@ AI_TOTAL_TIMEOUT=30
 
 冷却中的端点不会被“最后一搏”强行调用。候选多于尝试上限时，后面的候选未必会被访问；需要给备用留机会时，应缩短前面的候选列表。`regular doctor` 展示有效链、尝试上限、超时和已配置能力，默认不发网络请求。
 
-## 视觉模型独立声明
+## 识图默认继承，也可独立配置
+
+识图默认开启，未设置视觉覆盖时跟随 `AI_PROVIDER` 及其首个对话模型。因此主模型支持图片时无需再配一遍：
 
 ```dotenv
-VISION_ENABLED=true
-VISION_PROVIDER=openai
-VISION_MODEL=your-image-capable-model
-VISION_INPUT_MODE=url
+AI_PROVIDER=openai
+OPENAI_BASE_URL=https://your-endpoint.example/v1
+OPENAI_API_KEY=your-private-key
+OPENAI_MODELS=your-multimodal-model
 ```
 
-`VISION_PROVIDER` 可选任一配置端点。`VISION_MODEL` 必须对应支持图片的模型；不能从文本模型名或 `/models` 列表推断。所有入口默认关闭视觉，`VISION_PROVIDER` 缺省跟随当前 `AI_PROVIDER`，`VISION_MODEL` 默认为空。旧部署依赖隐式读图时，须明确填 `VISION_ENABLED=true`、实际视觉端点及模型（例如确认可用后选择智谱 `glm-4v-flash`）；开启却未填模型会给出配置错误，doctor 展示有效能力。
+主模型是纯文本，或需要为读图选择更合适的模型时，独立覆盖即可：
 
-`url` 将图片 URL 直接传给模型。若 QQ 图床只能由本机访问，可显式设 `VISION_INPUT_MODE=download`：先下载，再以 base64 发送一次模型请求。没有“报某段错误后换输入再提交”的自动重试。同图前后台共用在途任务与已保存描述，不重复占图片名额；前台新图在全局预算只剩一次时跳过读图，保留一次正文调用机会。
+```dotenv
+AI_PROVIDER=openai
+OPENAI_MODELS=your-text-model
+# 同一端点使用另一款模型
+VISION_MODEL=your-image-capable-model
+# 也可选另一个已配置凭据的端点
+# VISION_PROVIDER=gemini
+# VISION_MODEL=your-gemini-image-model
+```
 
-## 旧路由策略迁移
+`VISION_PROVIDER` 可选任一配置端点；跨端点时须同时填写 `VISION_MODEL`，不会猜测另一端点的默认视觉模型。凭据与 URL 复用该端点的配置，不另建一套客户端或路由。`VISION_ENABLED=false` 可关闭识图。`regular doctor` 展示启用状态、有效视觉端点与模型。继承配置不能保证模型支持图片，也不能从模型名或 `/models` 列表可靠推断；需要选用自己确认支持图片输入的模型。不支持或调用失败时会明确报告未读到图片，不编造描述。
 
-缓存让位、慢模型处罚、根据错误文案判定地区/凭据故障、强制最后重试已经移除，不保留第二套 legacy 执行路径。以下旧变量不再生效；仍设置时 doctor 会明确提示：
-
-`PROVIDER_FAIL_THRESHOLD`、`PROVIDER_COOLDOWN_SECONDS`、`PROVIDER_FATAL_COOLDOWN_SECONDS`、`PROVIDER_CACHE_WARM_SECONDS`、`MODEL_SLOW_PENALTY_SECONDS`。
-
-升级时删除这些变量，核对真实需要的模型顺序、`FALLBACK_PROVIDER` 和三个调用边界参数。稳定提示词前缀仍然保留，但路由不假设某家的缓存寿命、免费配额或错误文案。
+默认 `VISION_INPUT_MODE=url` 将图片 URL 直接传给模型。若 QQ 图床只能由本机访问，可显式设 `VISION_INPUT_MODE=download`：先下载，再以 base64 发送一次模型请求。没有“报某段错误后换输入再提交”的自动重试。同图前后台共用在途任务与已保存描述，不重复占图片名额；前台新图在全局预算只剩一次时跳过读图，保留一次正文调用机会。
 
 ## 复用了什么
 
 [OpenAI Python SDK 的异常和重试接口](https://github.com/openai/openai-python#handling-errors) 已提供 typed errors、状态码、超时及关闭自动重试的配置，本项目只保留与日预算和任务候选相关的薄边界。[LiteLLM 的重试和回退](https://docs.litellm.ai/docs/completion/reliable_completions) 适合需要更广供应商协议及集中路由的场景；当前统一兼容协议无需再引入第二套路由和额外依赖。此实现没有借用私有 SDK 重试函数。
 
-## English migration notes
+## English configuration summary
 
-Use `AI_PROVIDER=openai` with an explicit `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and ordered `OPENAI_MODELS`. Task overrides are optional. Existing explicit Zhipu/Gemini variables and key files remain supported. All entry points now default to the generic openai endpoint and disabled vision. Old deployments that omitted `AI_PROVIDER` must set it explicitly; image reading requires an explicit opt-in and model. `VISION_PROVIDER` otherwise follows the selected chat provider.
+Use `AI_PROVIDER=openai` with an explicit `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and ordered `OPENAI_MODELS`. Task overrides are optional. Zhipu/Gemini are optional presets with their own endpoint, key and model variables. `FALLBACK_PROVIDER` is empty by default and only explicitly configured endpoints receive fallback prompts.
 
-The shared runtime now has one bounded policy: at most three physical attempts by default, a 20-second per-attempt timeout, and a 30-second total deadline. SDK retries are disabled; failed physical attempts consume the same persistent daily budget. Authentication/permission failures disable that endpoint until restart, rate limits honor `Retry-After`, request errors stop, and transient failures only advance through explicit candidates. No vendor error-message matching, cache-based yielding, slow-model penalties or forced last-resort calls remain. Doctor flags retired settings listed above.
+Image reading is enabled by default. Without overrides, it inherits `AI_PROVIDER` and its first chat model. Set `VISION_MODEL` to override the model; when choosing another endpoint with `VISION_PROVIDER`, also provide `VISION_MODEL`. Set an independent image-capable model when chat uses a text-only model, or disable image reading with `VISION_ENABLED=false`. Configuration inheritance does not guarantee image support; failures produce an explicit unavailable-image result, never a guessed caption.
+
+The runtime uses one bounded policy: at most three physical attempts by default, a 20-second per-attempt timeout, and a 30-second total deadline. SDK retries are disabled; failed physical attempts consume the same persistent daily budget. Routing uses SDK exception types, HTTP status and `Retry-After`, with only explicitly configured candidates.

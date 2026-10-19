@@ -32,21 +32,20 @@ def config_json(directory, *fields, env=None):
 class ProductConfigTest(unittest.TestCase):
     def test_safe_defaults_and_central_data_directory(self):
         with tempfile.TemporaryDirectory() as directory:
-            data = config_json(directory, "OWNER_CLAIM_PHRASE", "SSL_VERIFY", "STATE_FILE", "ARCHIVE_DIR", "AI_PROVIDER", "VISION_ENABLED", "VISION_MODEL", "VISION_PROVIDER")
-            self.assertEqual(data["OWNER_CLAIM_PHRASE"], "")
+            data = config_json(directory, "SSL_VERIFY", "STATE_FILE", "ARCHIVE_DIR", "AI_PROVIDER", "VISION_ENABLED", "VISION_MODEL", "VISION_PROVIDER")
             self.assertTrue(data["SSL_VERIFY"])
             self.assertEqual(data["AI_PROVIDER"], "openai")
-            self.assertFalse(data["VISION_ENABLED"])
+            self.assertTrue(data["VISION_ENABLED"])
             self.assertEqual(data["VISION_PROVIDER"], "openai")
             self.assertEqual(data["VISION_MODEL"], "")
             self.assertEqual(data["STATE_FILE"], str((Path(directory) / "data/state.json").resolve()))
             self.assertEqual(data["ARCHIVE_DIR"], str((Path(directory) / "data/archive").resolve()))
             self.assertFalse((Path(directory) / "data").exists())
 
-    def test_blank_disables_claim_and_provider_fallback(self):
+    def test_blank_disables_provider_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
-            data = config_json(directory, "OWNER_CLAIM_PHRASE", "FALLBACK_PROVIDER", env={"OWNER_CLAIM_PHRASE": "", "FALLBACK_PROVIDER": ""})
-            self.assertEqual(data, {"OWNER_CLAIM_PHRASE": "", "FALLBACK_PROVIDER": ""})
+            data = config_json(directory, "FALLBACK_PROVIDER", env={"FALLBACK_PROVIDER": ""})
+            self.assertEqual(data, {"FALLBACK_PROVIDER": ""})
 
     def test_old_layout_is_retained_without_moving_data(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -118,25 +117,33 @@ class InitializationTest(unittest.TestCase):
 
     def test_generic_init_asks_for_explicit_endpoint_and_models(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()) as output:
-            with patch("builtins.input", side_effect=["123", "老群友", "", "https://gateway.example/v1", "first,second"]), patch("getpass.getpass", side_effect=["qq-secret", "model-secret", ""]):
+            with patch("builtins.input", side_effect=["123", "老群友", "", "https://gateway.example/v1", "first,second"]), patch("getpass.getpass", side_effect=["qq-secret", "model-secret"]) as secrets:
                 cli.initialize(directory, interactive=True)
             from dotenv import dotenv_values
             values = dotenv_values(Path(directory) / ".env")
             self.assertEqual(values["AI_PROVIDER"], "openai")
             self.assertEqual(values["OPENAI_BASE_URL"], "https://gateway.example/v1")
             self.assertEqual(values["OPENAI_MODELS"], "first,second")
-            self.assertEqual(values["VISION_ENABLED"], "false")
+            self.assertEqual(values["VISION_ENABLED"], "true")
+            self.assertNotIn("VISION_PROVIDER", values)
+            self.assertNotIn("VISION_MODEL", values)
+            self.assertNotIn("OWNER_CLAIM_PHRASE", values)
+            self.assertEqual(secrets.call_count, 2)
+            actual = config_json(directory, "VISION_PROVIDER", "VISION_MODEL")
+            self.assertEqual(actual, {"VISION_PROVIDER": "openai", "VISION_MODEL": "first"})
             self.assertNotIn("model-secret", output.getvalue())
 
     def test_interactive_secret_roundtrip_without_echo(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()) as output:
             secret = 'private #value with "quote" and \\ path'
-            with patch("builtins.input", side_effect=["123", "阿王", "zhipu"]), patch("getpass.getpass", side_effect=[secret, secret, secret]):
+            with patch("builtins.input", side_effect=["123", "阿王", "zhipu"]), patch("getpass.getpass", side_effect=[secret, secret]):
                 cli.initialize(directory, interactive=True)
             self.assertNotIn(secret, output.getvalue())
-            actual = config_json(directory, "QQ_APP_SECRET", "OWNER_CLAIM_PHRASE")
+            actual = config_json(directory, "QQ_APP_SECRET", "PROVIDER_PRESETS", "VISION_PROVIDER", "VISION_MODEL")
             self.assertEqual(actual["QQ_APP_SECRET"], secret)
-            self.assertEqual(actual["OWNER_CLAIM_PHRASE"], secret)
+            self.assertEqual(actual["PROVIDER_PRESETS"]["zhipu"]["api_key"], secret)
+            self.assertEqual(actual["VISION_PROVIDER"], "zhipu")
+            self.assertEqual(actual["VISION_MODEL"], "glm-4.7")
 
 
 class ServiceTest(unittest.TestCase):
@@ -194,6 +201,56 @@ class StatusTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse(json.loads(result.stdout)["network"])
             self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_doctor_explains_private_claim_and_inherited_vision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(ROOT),
+                   "QQ_APP_ID": "fake", "QQ_APP_SECRET": "fake", "AI_PROVIDER": "openai",
+                   "OPENAI_BASE_URL": "https://model.invalid/v1", "OPENAI_API_KEY": "fake-secret",
+                   "OPENAI_MODELS": "chat-model,backup-model"}
+            result = subprocess.run([sys.executable, "-m", "regular", "--directory", directory,
+                                     "doctor", "--json"], env=env, cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = {row["check"]: row for row in json.loads(result.stdout)["checks"]}
+            self.assertIn("first non-empty private message", rows["owner_claim"]["detail"])
+            self.assertIn("usage scope", rows["qq_permissions"]["detail"])
+            self.assertEqual(rows["qq_permissions"]["state"], "manual")
+            self.assertIn("openai/chat-model", rows["vision"]["detail"])
+            self.assertIn("inherited", rows["vision"]["detail"])
+            self.assertIn("unverified", rows["vision"]["detail"])
+            self.assertNotIn("fake-secret", result.stdout)
+
+    def test_doctor_network_includes_the_separate_vision_endpoint_without_inference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(ROOT),
+                   "QQ_APP_ID": "fake", "QQ_APP_SECRET": "fake", "AI_PROVIDER": "openai",
+                   "OPENAI_BASE_URL": "https://chat.invalid/v1", "OPENAI_API_KEY": "fake-chat",
+                   "OPENAI_MODELS": "text-model", "VISION_PROVIDER": "gemini",
+                   "VISION_MODEL": "image-model", "GEMINI_API_KEY": "fake-vision"}
+            code = """from unittest.mock import patch
+from types import SimpleNamespace
+from regular.cli import main
+urls=[]
+class MetadataClient:
+    def __init__(self, **kwargs): pass
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def get(self, url, **kwargs):
+        urls.append(url)
+        return SimpleNamespace(is_success=True, status_code=200)
+with patch('httpx.Client', MetadataClient):
+    assert main(['--directory', DIRECTORY, 'doctor', '--network', '--json']) == 0
+assert urls == ['https://chat.invalid/v1/models', 'https://generativelanguage.googleapis.com/v1beta/openai/models'], urls
+""".replace("DIRECTORY", repr(directory))
+            result = subprocess.run([sys.executable, "-c", code], env=env, cwd=ROOT,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertTrue(report["network"])
+            rows = {row["check"]: row for row in report["checks"]}
+            self.assertEqual(rows["network.gemini"]["state"], "ok")
+            self.assertIn("gemini/image-model", rows["vision"]["detail"])
+            self.assertIn("explicit", rows["vision"]["detail"])
 
     def test_doctor_missing_provider_dependency_keeps_json_and_skips_import(self):
         with tempfile.TemporaryDirectory() as directory:

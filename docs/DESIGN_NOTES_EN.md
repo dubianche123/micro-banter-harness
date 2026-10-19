@@ -1,20 +1,20 @@
 # micro-banter-harness
 
-> Historical deployment notes: provider measurements, cache routing and troubleshooting below describe older versions, not current shared defaults. Use the [README](../README_EN.md) and [provider migration guide](providers.md) for current behavior.
+> Historical design and experiment notes: these measurements, failures and trade-offs describe an early deployment, not current setup instructions or a guarantee for other accounts/models. Use the [README](../README_EN.md) for installation, automatic private-chat ownership and services, and [provider configuration](providers.md) for model/image setup.
 
 
-**English** · [中文](README.md)
+**English** · [中文](DESIGN_NOTES.md)
 
 ## The Regular — a resident AI member of your group chat, not an assistant
 
 **Version**: 1.1 · **Author**: Leo (dubianche123) · **Runtime**: Python 3.10+ / [qq-botpy](https://github.com/tencent-connect/botpy) · **License**: MIT
 **Where it runs**: one real QQ group, 7×24 — every number below was measured there, not benchmarked
 
-It does exactly one thing: **it hangs out in the group like a member**. It does not race to answer, does not summarize, never says "how may I help you". Most of the time it lurks, occasionally it jumps in with one line; it remembers who is who, who it is close to, who still owes someone a bubble tea. When a model provider drops, it switches to another — and when to switch back is decided by the cache.
+It does exactly one thing: **it hangs out in the group like a member**. It does not race to answer, does not summarize, never says "how may I help you". Most of the time it lurks, occasionally it jumps in with one line; it remembers who is who, who it is close to, who still owes someone a bubble tea. Model calls follow explicit candidates, timeout and daily-budget boundaries.
 
 **Code holds the state. The model only puts the state into words.**
 
-> It is, in essence, a **micro harness**. The hard parts of a real agent harness — deterministic state, a stable prefix, predictable degradation — compressed to the size of one group member: no framework, no database, five dependencies, a few thousand lines. What is borrowed is not code, it is the trade-offs.
+> It is, in essence, a **micro harness**. The hard parts of a real agent harness — deterministic state, a stable prefix, predictable degradation — compressed to the size of one group member: no framework, no database, and a small dependency and code footprint. What is borrowed is not code, it is the trade-offs.
 
 Affinity is an integer. The ledger lives in `state.json`; grading, decay and ranking are all computed by local code — the model never touches the number, so it cannot invent a past that never happened. Names work the same way: who is called what comes from the archive, and once someone renames themselves **the old name never appears in any text handed to the model again**.
 
@@ -28,165 +28,23 @@ Affinity is an integer. The ledger lives in `state.json`; grading, decay and ran
 | Feed it a week of chat logs as memory | Rolling compression: new summary = f(old summary, today's delta) | Constant cost regardless of how busy the group gets; also dodges mid-context forgetting |
 | Rely on prompts to block sensitive words | Code wordlist + a model review pass | Controlled test: prompt-only left the count of leaked words **unchanged** (2 vs 2) |
 | Let the model remember who is called what | Names are archive state, refreshed before injection | A stale name makes it call people by old names, or treat the old and new name as two different people |
-| Switch providers when one drops | When to switch back is decided by **cache TTL** | Switching means recomputing the whole prefix; hit the cache while you can |
+| Switch providers when one drops | Fall back within explicit candidates and shared request bounds | Attempts, timeout and budget remain predictable without assuming a vendor cache TTL |
 | Hardcode the **trigger word** (what the bot is called) / the owner's nickname | Resolved at runtime (`naming.py`); the trigger word comes from `BOT_NAMES` | Move to another group, hand it to someone else, or the owner renames — no code edits |
 | Regex-enumerate message formats | Placeholders go through a renderer registry (`qqtext.py`) | A new platform format means adding one render function, not touching the parser |
 
 ---
 
-## Running it in five minutes
+## Current setup
 
-### 1. Set the trigger word first (without it, it does not know you are calling)
+The [README](../README_EN.md) is the single setup guide for installation, configuration, QQ permissions and automatic ownership. The first nonempty C2C message persistently claims an unowned bot without a phrase; group messages cannot claim ownership. Configure QQ message-list access for the intended owner or test members before first use.
 
-The **trigger word** is the name the bot answers to in the group. It drives three things: detecting "is this message addressed to me", stripping the call-out prefix (「阿黄, name him 小满」 → 「name him 小满」), and the bot's self-reference inside prompts.
-
-**This is the first thing to change on a deployment** — and the thing most likely to have been hardcoded: once a name is sprinkled through prompts, regexes, easter-egg lines and logs, moving to another person's machine or another group means going back into the code. So there is not a single concrete name in the source; it is all resolved at runtime.
-
-There is **exactly one** authoritative source for the trigger word — `BOT_NAMES` in `.env`:
-
-```env
-# .env — multiple aliases, comma-separated
-BOT_NAMES=the name you give it,alias1,alias2
-```
-
-Aliases are a genuine need: some people say the name, some @ it — both mean the same bot, hence the comma-separated list.
-
-> ⚠️ **Renaming the bot on the QQ side is not how you set the trigger word.** The platform nickname (the bot's QQ username) is only a **supplement**: it is read once at startup and appended as one extra alias — it can only **add** a name, it will **never replace or override** what you wrote in `BOT_NAMES`. So renaming on QQ does not change the trigger word and the old names keep working; to change the trigger word, change `BOT_NAMES`. The nickname is also read at login, so **a rename needs a restart to take effect**.
->
-> Only when both are unavailable (`BOT_NAMES` empty and no nickname) does it fall back to the generic word 「机器人」.
-
-> ⚠️ Do not confuse the **trigger word** with an **address term**: the trigger word is "what this bot is called in your group" (this section); an address term is "what it calls members / the owner" (step 2's claim, `relations.py`). Both are configured, neither is hardcoded, but **if the trigger word is not set, every feature downstream simply cannot fire**.
-
-#### It only supports the "receive all messages" kind of bot (and you switch it on by hand)
-
-**Once you pull the bot into a group and set the group message scope to 「获取群内全部消息」 (obtain all messages), what it receives is every message in that group — not just the ones that @ it.** That is the premise of this project: it needs the surrounding context to decide whether to speak up and to remember what happened. Seeing only the @-mentions leaves it blind.
-
-Mind the difference between **receiving** everything and **replying** to everything: it receives all messages, but whether it answers is a separate matter — it always answers when @-mentioned or called by its trigger word, chimes in probabilistically the rest of the time, and stays quiet for most messages (otherwise it would be a spam bot).
-
-The platform offers **three scopes** for what a bot may see in a group. This project **is written for the third** (the platform's wording drifts between versions — you can tell them apart by asking "can it see chatter that does not @ it?"):
-
-| Scope the platform offers | What it sees | How it fits this project |
-|:--|:--|:--|
-| Only when @-mentioned | Just the messages that mention it | ⚠️ Answers @-mentions, and **only** @-mentions |
-| The @ message + a bit before it | The message that @-ed it, plus the few immediately preceding ones (10 in our testing) | ⚠️ Same, except it also carries that little stretch around the @ |
-| All messages | Every message in the group | ✅ **This is what the project is written for** — and this scope is **not the default; you have to switch it manually** |
-
-**First, separate "does not reply" from "cannot reply": on either of the first two scopes it still answers @-mentions normally and still responds to its trigger word — the wiring works.** What you lose is **context management only** — it cannot see what the group was talking about, so it remembers nothing and never chimes in on its own. In other words, on the first two scopes it degrades into a "answers only when @-ed" Q&A bot, and everything this project is after — behaving like a regular member of the group — stops being true. And **nothing errors**; it just silently gets dumber.
-
-⚠️ That switch is **not in the QQ Open Platform — it lives in the QQ group itself**, and **only the group owner can change it, once per group**:
-group settings → find the bot attached to the group → set 「机器人可获取的群聊消息范围」 (the range of group messages the bot may obtain) to 「获取群内全部消息」 (obtain all messages in the group).
-
-On the code side there is a matching layer of event parsing — `botpy` only dispatches mention events by default, and `bot.py` dispatches `GROUP_MESSAGE_CREATE` into the main flow as well.
-
-### 2. Claim the owner role (do not skip this)
-
-Claiming happens **in a private chat (C2C), not in the group**. Send the passphrase to the bot in a private message; the first person to get it right is permanently written to `owner.txt` — from then on only they can name other members and use owner commands.
-
-The default passphrase is 「认主」. **Change it to something only you know before deploying** (`.env`):
-
-```env
-OWNER_CLAIM_PHRASE=whatever you pick
-```
-
-> ⚠️ **Why not in the group**: group chat is a loudspeaker. Saying the passphrase there is saying it to everyone, on a first-come-first-served basis — any passing member, or even someone not in the group at all, can walk off with the role. So shouting it in the group **grants nothing**: the bot replies 「认领得私聊办」 (claim it in a private chat), at most once per group. Go ahead and try it.
->
-> ⚠️ Claiming is **one-shot and non-transferable**: once claimed, anyone else who says the right passphrase just gets "someone already claimed this". So even if the passphrase leaks later, the seat cannot be taken over.
->
-> ⚠️ This is the easiest step to miss and the hardest to self-diagnose: with nobody claimed, the bot chats normally and everything looks fine — except **every owner-only feature fails silently**. So it warns you on its own: the startup log states that no owner has been claimed, its first reply in the group carries a one-line how-to (once per group), and a private message that looks like a claim attempt but gets the passphrase wrong tells you so plainly.
->
-> Changing the owner later: stop → delete `owner.txt` → restart, and let the new owner claim it.
-
-One extra detail: the passphrase is registered as a runtime sensitive word. If anyone does say it in the group, the summary output scrubs it on the spot, so it never flows back through long-term memory into every prompt round (which would be pasting the passphrase into the model context).
-
-### 3. Install dependencies
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-Five dependencies: `qq-botpy` / `openai` / `httpx` / `aiohttp` / `certifi`. **No database** (a single group's data fits in `json`), no web framework, no ORM.
-
-### 4. Fill in `.env`
-
-```bash
-cp .env.example .env
-```
-
-Four values are enough to start:
-
-| Variable | Meaning |
-|:--|:--|
-| `QQ_APP_ID` | AppID from the QQ Open Platform developer settings |
-| `QQ_APP_SECRET` | Same page |
-| `AI_PROVIDER` | `gemini` (fast, needs a proxy) or `zhipu` (direct, slower) |
-| `GEMINI_API_KEY` / `ZHIPU_API_KEY` | The key for whichever provider you chose |
-
-Everything else has a default and can be left out (full list in `.env.example` and `config.py`).
-Two exceptions, both covered in the earlier steps: **`BOT_NAMES` (the trigger word, step 1) ships with no default name**, and `OWNER_CLAIM_PHRASE` (the claim passphrase, step 2) defaults to the publicly-known 「认主」.
-Both providers speak the OpenAI-compatible protocol, so **the calling code is shared** — switching providers is one line.
-
-### 5. Platform-side setup
-
-- Create a bot on the QQ Open Platform and invite it to the group.
-- **Set the group message scope to 「获取群内全部消息」** (the third of the three scopes in step 1). ⚠️ This switch lives in the **QQ group settings**, **only the group owner can change it, and it is per group** — it is not the event subscription on the Open Platform.
-- **Claiming goes through a private chat, so enable the C2C (single-chat) message permission** — without it, the claim in step 2 gets no response at all, and silently so.
-- Still in the sandbox? Add the test group to the sandbox list, or messages will never be pushed to you. Same for private chat: in the sandbox the other party must be on the test-member list.
-
-### 6. Start it
-
-```bash
-./.venv/bin/python -u bot.py
-```
-
-As a long-running process:
-
-```bash
-nohup ./.venv/bin/python -u bot.py >> bot.log 2>&1 &
-```
-
-A proxy is required to reach Gemini from some networks (zhipu is direct and must be excluded, otherwise its traffic goes through the proxy too):
-
-```bash
-HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 \
-NO_PROXY=bigmodel.cn,open.bigmodel.cn ./.venv/bin/python -u bot.py
-```
-
-Missing credentials make it **fail at startup and tell you which one is missing** — it never runs with a half-valid config.
+Use the README for macOS, Linux and Docker services as well. Deployment commands are not repeated here, so research notes do not become a second configuration guide.
 
 ---
 
-## Staying resident: something restarts it, and the Mac must not sleep
+## Early feature and parameter snapshot
 
-It is a **resident**, not a script you run by hand. Two lines hold uptime:
-
-| Line | Owner | What it covers |
-|:--|:--|:--|
-| Come back if the process dies | `com.qqbot.xiaowang` (launchd, `KeepAlive`, 10s throttle) | crashes, stray kills, dead process after wake |
-| Never let the machine sleep | `sudo pmset -a disablesleep 1` (system-wide) + `com.qqbot.keepawake` (5-min patrol) | macOS idles into sleep after 1 minute, and it goes offline |
-
-```bash
-sudo pmset -a disablesleep 1          # one-time hard line: survives a closed lid too
-bash tools/launchd/install.sh          # install and start both agents
-bash tools/launchd/install.sh status   # check
-bash tools/launchd/install.sh stop     # unload (taking the Mac away, or want sleep back)
-```
-
-⚠️ Three limits, all learned the hard way:
-
-- **A launchd process inherits no shell environment** — the proxy has to be written into
-  the plist's `EnvironmentVariables`, or the outbound route simply cannot connect
-  (the fallback provider goes direct through `NO_PROXY` and keeps talking fine,
-  but the primary route is dead).
-- LaunchAgents belong to the **login session**: after a reboot with nobody logged in,
-  nothing loads. Turn on automatic login for unattended runs.
-- `disablesleep` needs admin rights, so the script can only **check** it, never
-  fix it; if it goes missing, the patrol writes a warning line. What it still
-  cannot beat is a power cut — for long unattended stretches, use a UPS.
-
----
-
-## What the group can do with it
+This table records early deployment parameters as design background. See the [README](../README_EN.md) for current defaults and commands.
 
 | Feature | How to trigger | Cost |
 |:--|:--|:--|
@@ -267,9 +125,9 @@ Why keep the raw logs at all: summaries are lossy and the model occasionally mix
 
 ---
 
-## Model routing: when to yield, when to come back
+## Historical model and routing observations
 
-### Tiers are split by task, not by speed
+### Models selected by task at the time
 
 | Task | Gemini | Zhipu | Why this one |
 |:--|:--|:--|:--|
@@ -277,27 +135,9 @@ Why keep the raw logs at all: summaries are lossy and the model occasionally mix
 | Compression | 3.5-flash-lite | 4.5-air → 4-flash | Compression does not share the chat prefix (switching models costs no cache), runs in the background, is not part of the persona — and **the stronger tier is more likely to be rejected by content filters**: same transcript, 4.7 returns error 1301, 4.5-air produces results |
 | Name review | 3.5-flash-lite | 4.7 | Only the strong tier catches homophones, split characters and hints (4.5-air misses them and false-positives on legitimate nicknames) |
 
-The `tier` argument in `call_model(messages, max_tokens, tier="chat")` is the switch; adding a new tier is one line in `_TIER_CHAINS`.
+The table records observations from that group, not current defaults or capability guarantees. Early cache-based yielding, vendor-message matching and slow-model penalties have been replaced by explicit candidates, bounded attempts, timeout and daily budget. See [provider configuration](providers.md) for current behavior.
 
-### Yielding: cache first
-
-When the primary provider (Gemini) hiccups, it yields to the fallback (Zhipu). But **when it comes back** is not decided by a cooldown — it is decided by the cache:
-
-```
-available = circuit-breaker cooldown elapsed  AND  group idle for ≥ PROVIDER_CACHE_WARM_SECONDS (default 600s)
-```
-
-As long as the group keeps chatting, it stays on whoever is serving — the warm prefix on the yielded provider would be thrown away by switching back, and every message in a group chat directly follows the previous one, so a single cache hit pays for itself. Once the group goes quiet past the cache TTL, switching back is free, and only then does it retry.
-
-Two companion rules:
-
-- **Hard failures** (proxy down, region unsupported, invalid key) are not counted: one occurrence yields immediately. No model or key swap rescues those, and retrying only makes the group wait ten-plus seconds. The check must look at **the exception class name as well as the message**: when the proxy dies, `str(e)` is just `Connection error.` and contains none of the keywords.
-- **Only yield if somebody else can serve.** If the fallback is down too, the primary must step up — otherwise one tripped breaker plus one dead provider takes the whole chain offline.
-- **Structural failures are isolated separately** (`_is_fatal_fail` / `PROVIDER_FATAL_COOLDOWN_SECONDS`, default 30 minutes). Region blocks and revoked keys differ from network jitter not in severity but in **whether they can recover on their own** — the former is decided by the egress IP or the credential, so retrying two minutes later returns the exact same error. Measured across 2026-09-17~18: Gemini sat on `User location is not supported` for a day and a half and hit that 400 **39 times** (every 120-second cooldown released another round, each round trying three model tiers), and during full-blown cooldown it was even picked as the last resort because it "had the shortest cooldown left". Now one hit quarantines it for a long window, and it may not take the last-resort slot unless nobody else is left.
-
-The log distinguishes the two: "cooling down, Xs left" is worth waiting for; "structural failure (region/credentials), isolated" is not.
-
-One companion rule about how hard to kick (**do not bench a whole provider when nobody else is backing it up**): a single model timing out does not mean the provider's link is gone — 4.7 being slow says nothing about whether 4.5-air can answer. So **when somebody else can serve**, one hard failure benches the provider immediately (don't make the group wait through every tier); **when nobody else can serve**, it is downgraded to an ordinary failure (recorded, and only benched once the threshold is reached), so the cheaper tiers left in the ladder still get their shot. Measured incident (2026-09-18 16:11): Gemini was structurally isolated, one 20-second timeout on Zhipu 4.7 benched the entire provider for 120s, and 4.5-air / 4-flash never got a single attempt — the group ate a fallback line. `AI_TOTAL_TIMEOUT` (30s) still bounds the worst case.
+Historical failures illustrate the cost of those policies: a region restriction triggered 39 repeated errors over 2026-09-17–18; on 2026-09-18, one 20-second model timeout paused an entire endpoint for 120 seconds, denying its other candidates a chance. These are failures of the early implementation, not current operating rules.
 
 ### Measured: how long does the cache actually live
 
@@ -310,9 +150,9 @@ One companion rule about how hard to kick (**do not bench a whole provider when 
 | 60s / 120s / 240s | 98% – 99% ✅ | 0% ❌ |
 | 420s | **99%** (bound never reached) | 0% ❌ |
 
-Two conclusions: Zhipu's cache lives at least 7 minutes, so the window is set to 600s for margin; and **Gemini never hit once**, not even on immediate reuse — at 1090 tokens the request is already above the documented 1024 floor, so the issue is not "too small", it is that this tier simply does not get implicit caching at this size. In other words, "cache first" only means something on the Zhipu side; switching back to Gemini throws away no cache at all.
+In this sample, Zhipu's cache lasted at least 7 minutes; **Gemini never hit once**, even on immediate reuse. The original interpretation was that this model tier received no implicit caching for the approximately 1090-token request. This is an observation tied to the time, account, model and request size; it does not set generic routing policy or predict cache support elsewhere.
 
-> To reproduce: `cd tests && ../.venv/bin/python probe_cache_ttl.py --gemini` (~21 minutes, negligible token cost).
+> The original script was `tests/probe_cache_ttl.py`, running for about 21 minutes. Real-model probes require your own credentials and consume quota; see [CONTRIBUTING](../CONTRIBUTING.md).
 
 ---
 
@@ -327,7 +167,7 @@ flowchart TD
     D -->|needs a reply| F[Two gates: per-group token bucket + global daily budget]
     F --> G[Assemble prompt: stable head → daily memory → session history → turn context]
     G --> G2[Name refresh: old names → current names]
-    G2 --> H[Model tiers: primary → fallback, with a circuit breaker]
+    G2 --> H[Explicit candidates: bounded attempts/time, optional fallback endpoint]
     H --> I[Egress scrub → send]
 ```
 
@@ -356,7 +196,7 @@ This bot was written from day one for the assumption that it would be open-sourc
 |:--|:--|:--|
 | **Trigger word (what the bot is called in the group)** ← highest priority | `BOT_NAMES` in `.env` (multiple aliases) is authoritative; the platform nickname is only a bonus alias and cannot override it; no default name is baked in | `naming.py` |
 | How it refers to itself | The first entry of that same list, substituted through the `{bot}` placeholder | `naming.py` + `prompts.py` |
-| How the owner is addressed | Whatever they claim (claim the role in a private chat, then say 「我是XX」 in the group); falls back to the generic 「群主」 | `naming.py` + `relations.py` |
+| How the owner is addressed | Whatever they claim (automatic ownership from the first nonempty private message, then say 「我是XX」 in the group); falls back to the generic 「群主」 | `naming.py` + `relations.py` |
 | Names inside prompts/scripts | Always `{bot}` / `{owner}` placeholders, substituted by `naming.render` before sending | `prompts.py`, `bot.py` |
 | Detecting "is it being called" / stripping the call-out prefix | Regexes built on the fly from that same trigger-word list; no literal hardcoded | `relations.py` |
 | Owner nicknames hardcoded in the blocklist | Replaced by generic role words + **resolved from whoever currently holds the name** | `relations.py` |
@@ -371,7 +211,9 @@ This bot was written from day one for the assumption that it would be open-sourc
 
 ---
 
-## Measured numbers
+## Historical measurements
+
+The original measurement scope is retained below. Test counts, parameters and provider behavior are snapshots from that deployment.
 
 | Metric | Result | Note |
 |:--|:--|:--|
@@ -393,11 +235,11 @@ This bot was written from day one for the assumption that it would be open-sourc
 
 | Not done | Reason |
 |:--|:--|
-| Letting a temporarily slow tier hold the front of the ladder | Once the head tier slows down (measured: glm-4.7 timing out repeatedly at peak hours), **every** round pays a full timeout (20s) before trying anything else, while the whole-round budget `AI_TOTAL_TIMEOUT` is only 30s — often too little left for a second tier, which the group experiences as several "I spaced out" replies in a row. A tier that timed out gets a 10-minute flag (`MODEL_SLOW_PENALTY_SECONDS`) and the ladder skips it. ⚠️ What is recorded is an **expiry timestamp**, not a new order: the ladder list is a shared reference, so sinking a model to the tail means it never comes back — yet a model that is slow at rush hour is often fast again an hour later |
+| Letting a temporarily slow tier hold the front of the ladder | Historical observation: a 20-second first-tier timeout often left too little of a 30-second total deadline for the next tier. Current calls use explicit candidates, attempt bounds and timeout without a separate slow-model penalty policy. |
 | Per-user quotas | In a group everyone is an equal member; throttling per person feels wrong. A per-group bucket plus a global daily budget keeps the bill predictable |
 | Leaking machine ids into chat | openids, their last-four tails and group ids stay in the logs. Once one reaches the prompt — chat context, the relation note, the mention fallback, even the rename confirmation — the model reads it as somebody's name and repeats it, and the group sees an unreadable string. Related: when harvesting plain-text @-nicknames, **strip `<@!openid>` first** — measured, it gets cut by the length cap into a fragment that is then learned as "this person is called 01234567…" and sent straight back to the group, so the `DisplayNames.learn` write gate blocks it too |
 | Resending expired messages | Tencent's passive replies expire (5 minutes for groups) and resending one is always rejected. Messages buffered during a disconnect are mostly expired by the time they are replayed, so it checks `message.timestamp` first and just logs the skip — firing a request that cannot succeed is worse than not firing at all |
-| Letting "cache first" deadlock the providers | "Don't switch back while the cache is warm" can self-lock: A yields because B looks able, B yields because A looks able, and neither one works. The symptom is deceptive — the process is alive, messages arrive, it even replies, but every reply is the same "sorry, spaced out" fallback, **so it looks like an outage**. So it first asks "can anyone actually take over?", and if not it drops the yield rule and picks on circuit-breaker state alone — one extra prefill beats staying silent |
+| Letting "cache first" deadlock the providers | Historical observation: A and B could each assume the other could take over, leaving both yielding and producing only fallback text. Cache-based yielding has been removed in favor of the shared request boundary. |
 | Letting a command that did nothing look like it worked | "No permission", "didn't parse" and "did nothing" all read as "the bot ignores me", but the worst one is **looking like it worked**: a non-owner's rename intent is swallowed by the parser on permission grounds, the request falls through to chat, and the bot answers with something like "no way, that messes up the family tree" — which reads as negotiating, or even as done, while the archive is untouched. So a strong verb-based probe catches it and refuses out loud; when it does not match ("@Wang hello") the bot stays quiet |
 | Applying the group's joke register to private chat | Putting someone down in a group is a joke *with an audience* — people egg it on, someone tops it, it bounces off. One-to-one there is no audience and nothing to bounce off, so the same line lands as a one-sided attack you cannot walk away from. Private chat gets its own register: aim at the situation, not the person; meet a complaint before joking about it; no "well you should have" style rub-ins |
 | Letting the snark run past a stop signal | Escalating after someone says "stop mocking me" is the one that actually hurts. This **cannot be left to the model** — by then it is already several turns down the wrong track. A local regex spots it and issues a hard override that outranks every "feel free to tease" instruction. Judged wide, not narrow — but "knock it off" is deliberately *not* a stop signal, it is too common in groups and would flatten the voice |
@@ -419,26 +261,11 @@ This bot was written from day one for the assumption that it would be open-sourc
 
 ---
 
-## Troubleshooting
+## Diagnostics and a historical observation
 
-| Symptom | Likely cause |
-|:--|:--|
-| It never responds in the group | ①Check the **trigger word**: if `BOT_NAMES` is unset and the platform nickname is unavailable, it only answers to the generic 「机器人」; ②the group message scope is still on one of the first two levels (the group owner changes it to 「获取群内全部消息」 in the QQ group settings); ③the group is not in the sandbox list |
-| A few messages got no reply at all, yet the log says `⏳ …超过被动回复时效` | Not broken — **deliberately skipped**. Messages that piled up while the connection was down get replayed on reconnect, by which time they are past Tencent's passive-reply window (5 minutes for groups). Sending anyway is rejected (`40034005`), so it logs one line and moves on instead of firing a request that is certain to fail |
-| It answers @-mentions but never chimes in or remembers context | The group message scope is stuck on one of the first two levels (only @ / @ + the previous 10). It cannot see the whole conversation, so it cannot judge whether to speak up or remember anything. **The group owner** changes 「机器人可获取的群聊消息范围」 to 「获取群内全部消息」 in the QQ group settings, once per group. See the table in step 1 |
-| Calling its name does nothing, but @ works | The trigger word does not match what people actually say: add it to `BOT_NAMES`. Renaming it on QQ will not help — a nickname only adds an alias, it never overrides what `BOT_NAMES` already has |
-| The first reply after startup is slow | Cold start, not yet warmed; startup performs one 0-token connectivity probe (measured 0.35s) |
-| Owner commands do nothing / cannot name others | No owner has claimed the role: have them send the passphrase from `OWNER_CLAIM_PHRASE` to the bot in a **private chat**; to change owners, delete `owner.txt` first. Shouting it in the group does nothing, deliberately |
-| Log says "no owner claimed yet" | Same as above. That log line exists so this problem stops being silent |
-| Sent the passphrase in private chat, no response | Most likely the QQ Open Platform never enabled the **C2C (single-chat) message permission**; or `OWNER_CLAIM_PHRASE` was left empty (which closes the private-chat claim channel) |
-| Log says "yielding (cache still warm)" | Normal — cache-first at work; it switches back once the group goes quiet |
-| It stays on Zhipu and never returns to Gemini | Same as above. Lower `PROVIDER_CACHE_WARM_SECONDS` if that bothers you |
-| A name was rejected | Three gates: local wordlist (role words / honorifics / `sensitive_nicks.txt`) → model review → rename throttle. If the review service is down it lets names through, the wordlist still holds. Get rejected too often in a short window and renaming freezes group-wide for 20 minutes (log: `🧊 …进入冷静期`) — that is anti-flooding, not a failure |
-| Log says `🧊 …改名进入冷静期` | Somebody was hammering the rename endpoint. It clears after a while; the owner is exempt |
-| It still calls someone by an old name | Should no longer happen: names are refreshed before injection and scrubbed from history on rename. If it does, check whether the old name is registered in `renames` in `state.json`. ⚠️ Exception: **single-character names** are never recorded — replacing one would rewrite half the dictionary, so pick a name of two characters or more |
-| It keeps reusing the same metaphor or catchphrase | Check whether the prompt hard-codes an example (`tests/test_digest_names.py` guards this); a prop written into the prompt gets reused forever. It takes a restart to take effect, and the lines still sitting in the history window linger a turn or two |
-| It treats two people as one / invents a relationship | First check whether the old name reached `renames`; relationships come only from the `relations` archive — anything beyond that is the model improvising, so check whether 群史记 has been polluted |
-| Start completely over | Stop → delete `state.json` (memory / affinity / modes / ledger), `archive/`, `memory/` (raw logs and summaries) and `owner.txt` (re-claim the owner) |
+Start with `regular doctor` and `regular status`, then use the [README troubleshooting table](../README_EN.md#understand-a-quiet-or-half-working-bot) to check QQ permissions, message scope and local state. See [provider configuration](providers.md) for request errors and fallback behavior.
+
+One platform-connection observation is retained: at 2026-09-19 13:15, a gateway disconnect was followed by 18 minutes of silence while the process remained alive. That incident motivated the gateway watchdog and background-task status. These mechanisms do not replace live QQ verification.
 
 ---
 
@@ -456,27 +283,14 @@ This bot was written from day one for the assumption that it would be open-sourc
 | `storage.py` | State persistence, session context, token bucket, daily budget |
 | `qqtext.py` | Message normalisation: turn "human text + machine placeholders" into readable text |
 | `wordfilter.py` | Sensitive words: one wordlist shared by the naming entry point and the summary exit |
-| `tools/launchd/` | macOS residency: keep-alive agent + anti-sleep patroller (`install.sh`) |
-| `tests/` | 474 regression tests + a few one-off probe scripts |
+| `tools/launchd/` | macOS service generation and explicit install/start commands |
+| `tests/` | Offline regression tests and explicit model probes |
 
 Run the tests (fully offline, no network or keys):
 
 ```bash
-cd tests && for f in test_*.py; do ../.venv/bin/python "$f"; done
+.venv/bin/python tools/test_offline.py
 ```
-
----
-
-## Moving groups / switching providers
-
-| Goal | Change |
-|:--|:--|
-| Move to another group | Just change the **trigger word**: set `BOT_NAMES` to whatever your group calls it, then let it learn address terms on its own; not a line of code changes |
-| Change its trigger word / what it is called | `BOT_NAMES` (`.env`, comma-separated aliases) — the only entry point; see step 1 of "Running it in five minutes" |
-| Switch the primary provider | `AI_PROVIDER` (both are OpenAI-compatible; the calling code is shared) |
-| Rotate multiple keys | Create `api_keys_gemini.txt` / `api_keys_zhipu.txt` next to the code, one key per line, `#` starts a comment |
-| Tune the banter rate | `BANTER_PROBABILITY` (0.08), `OWNER_MENTION_PROBABILITY` (0.25), `BANTER_COOLDOWN_SECONDS` |
-| Change the local memes | `LOCAL_MEMES` in `bot.py` — one dict, zero cost |
 
 ---
 
