@@ -385,6 +385,28 @@ def looks_like_back_off(text):
 CMD_TAG = re.compile(r"<CMD>(.*?)</CMD>", re.S)
 
 
+# 采样乱码特征（2026-10-15 <CMD! 残片、2026-10-19 0A9F%F5，均出自 glm-4.7）：
+# 中文闲聊回复里出现**连续 4+ 个无小写、无空格**的大写/数字/符号串。闸门放行正常
+# 缩写（CPU/KKP/GG/1080P），只拦带 %、密集符号或「3+ 大写夹数字」的——后一类会
+# 误伤 RTX4090 这类长型号，但只重试一次不吞回复，代价可忽略。
+_GARBAGE_RUN = re.compile(r"[0-9A-Z%&#*\"@$]{4,}")
+
+
+def _garbage_run(text):
+    """返回正文里的疑似采样乱码段；没有则 None。"""
+    for run in _GARBAGE_RUN.findall(text or ""):
+        symbols = sum(1 for c in run if c in "%&#*\"@$")
+        uppers = sum(1 for c in run if c.isupper())
+        digits = sum(1 for c in run if c.isdigit())
+        if symbols >= 2:
+            return run
+        if symbols >= 1 and uppers >= 1 and digits >= 1:
+            return run
+        if uppers >= 3 and digits >= 1:
+            return run
+    return None
+
+
 def split_cmd(raw):
     """把模型输出拆成「正文」和「记账标签」。
 
@@ -483,6 +505,17 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
             if not raw:
                 return _pick_fallback(), None
             body, payload = split_cmd(raw)
+            # 采样乱码闸（2026-10-15 <CMD! 残片 / 10-19 0A9F%F5，均智谱 glm-4.7）：
+            # 命中就重生成一次；两次都乱就照发并留痕——不在这里和模型无限拉扯。
+            glitch = _garbage_run(body)
+            if glitch:
+                logger.warning("🧯 模型输出疑似采样乱码（%s…），重生成一次。原文: %s",
+                               glitch[:10], raw[:140])
+                raw = await call_model(messages, max_tokens)
+                body, payload = split_cmd(raw)
+                glitch = _garbage_run(body)
+                if glitch:
+                    logger.warning("🧯 重生成仍含乱码（%s…），按原样发送", glitch[:10])
             # 标签解析失败时退化：拿主干文本，不计分
             if not body:
                 return _pick_fallback(), None

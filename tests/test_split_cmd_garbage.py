@@ -35,5 +35,26 @@ class SplitCmdGarbageTest(unittest.TestCase):
         self.assertIsNone(payload)
 
 
+class GarbageRunDetectorTest(unittest.TestCase):
+    """采样乱码检测器：两个历史形态都命中，正常缩写不误伤。"""
+
+    def test_hex_percent_shape_is_caught(self):
+        run = bot._garbage_run("哥哥0A9F%F5块钱的那个瀑布过滤算不算")
+        self.assertIsNotNone(run)
+        self.assertIn("%", run)
+
+    def test_symbol_run_shape_is_caught(self):
+        self.assertIsNotNone(bot._garbage_run("想卖&*%#想说话"))
+
+    def test_normal_abbreviations_pass(self):
+        for text in ("你这话把我 CPU 干烧了", "我加92的", "这开关带1080P吗",
+                     "boss真难打", "GG了兄弟们", "问个正经问题"):
+            self.assertIsNone(bot._garbage_run(text), text)
+
+    def test_long_model_numbers_are_accepted_false_positive(self):
+        """RTX4090 这类长型号会误报——设计上只重试一次不吞回复，如实钉住。"""
+        self.assertIsNotNone(bot._garbage_run("你这卡是RTX4090吧"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
