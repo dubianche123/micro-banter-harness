@@ -4,81 +4,62 @@
 
 # The Regular
 
-**Code keeps the social state. The model finds the words.**
+**A resident group-chat companion with code-owned relationships and memory.**
 
-[![License](https://img.shields.io/badge/License-MIT-3A9F82)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-5375B5)](requirements.txt) [![QQ](https://img.shields.io/badge/QQ-Group%20%2B%20C2C-B48543)](bot.py) [![License](https://img.shields.io/badge/License-MIT-3A9F82)](LICENSE)
 
 [中文](README.md) · **English**
 
-[Quick start](#-quick-start-in-5-minutes) · [Commands](#-cheatsheet-commands--interactions) · [Design notes](docs/DESIGN_NOTES_EN.md)
+[Run it](#quick-start) · [Message routes](#one-message-three-possible-routes) · [Context design](#the-context-has-an-order) · [Commands](#-cheatsheet-commands--interactions)
 
 </div>
 
-> **A resident AI buddy living in your group chat — not a robotic assistant.**
+The Regular lives in a QQ group as a recurring character: usually quiet, occasionally opinionated, and increasingly familiar with the people around it. It has nicknames, relationship tiers, personality modes, a rolling group chronicle and a promise ledger.
 
-It does not race to answer, does not act like a corporate bot, and certainly never says *"How may I assist you today?"*. Most of the time it lurks quietly, occasionally chiming in with a sharp, witty one-liner when the vibe is right. It knows who its close buddies are, keeps its distance from strangers, and secretly jots down in a ledger who owes the group a cup of milk tea...
+Under that social surface is a small agent harness: **code holds durable state, an activation policy decides when to speak, and models generate language inside a deliberately ordered context**. Local commands and configured provider fallbacks keep every interaction from depending on one large model call.
 
-**Code holds the state. The model only puts the state into words.**
+## What you can try
 
----
+| Interaction | What is implemented |
+| --- | --- |
+| A familiar voice | Eight relationship tiers influence tone and activation; code applies scores, decay and limits. |
+| A character that can stay quiet | Mention/name triggers, probability, cooldown, quiet hours and activation state control replies. |
+| Local games and lookups | Dice, relationship queries, rankings and ledger lookup have local handlers. |
+| Rename a group member | Per-group identity, owner permissions, name checks and rename cooldowns. |
+| Change the atmosphere | Shared personality modes; eligibility is resolved from local state. |
+| Remember without replaying everything | Local raw-message archive plus a rolling digest assembled from the old digest and new messages. |
+| Keep a provider failure visible and bounded | Configured task tiers, provider fallback, connection recovery and recorded design probes. |
 
-## From an event to a reply
+## One message, three possible routes
 
-![How it works](docs/readme/flow.svg)
+![Routing, code-owned state and generated replies](docs/readme/flow.svg)
 
-QQ events enter local state and message routing. Local commands can complete without a model call; generated replies use the configured provider path. Affinity, names and the ledger are maintained by code, while the model supplies language.
+| Example input | Route | What changes |
+| --- | --- | --- |
+| `查好感` | Local relationship lookup | Reads the current state; it does not ask a model to invent a score. |
+| `掷骰子` | Local game handler | Produces a game result and applies the coded relationship effect. |
+| `叫我小林` | Naming flow | Checks permissions/name policy, optionally reviews the name, then updates the per-group name record. |
+| `@<bot> 今天吃什么` | Generated reply | Builds ordered context, calls the configured provider, checks/records the reply. |
+| Ordinary unmentioned chatter | Activation gate | May stay quiet; qualifying messages may trigger a generated interjection. |
 
-## ✨ Why It's Fun
+These examples describe routes, not exact model replies. A code-owned score prevents the language model from directly rewriting the relationship counter; it does not make every sentence factually reliable.
 
-### 🎭 1. Hangs Out Like a Real Group Member
-* **Contextual Banter**: It lurks most of the time. Default 8% chance to drop a comment into ongoing chatter; bumps to 25% when the group owner is mentioned.
-* **Reads the Room & Reads the Person**: The closer you are, the more eager it is to banter with you (1.6× affinity weight). It stays polite with strangers (0.7×), and goes to sleep during quiet hours (23:00–08:00).
-* **Knows When to Chill**: If someone says "stop roasting me" or "chill out", it immediately dials back. No relentless arguing.
+## The context has an order
 
-### 💖 2. 8-Tier Affinity & Bond System
-Affinity is an integer score (-100 to +100), calculated, classified, and persisted by local code. Generated replies do not directly rewrite these scores:
-* `💀 Blacklist` $\to$ `❄️ Cold` $\to$ `😐 Distant` $\to$ `👀 Familiar`
-* `🙂 Acquaintance` $\to$ `😎 Friend` $\to$ `🍻 Buddy` $\to$ `💖 Soulmate`
+The ordering in [get_ai_reply()](bot.py) keeps stable material ahead of changing material:
 
-*Close friends get teasing and loyal backup; strangers get polite distance. To a stranger it might say "Understood, take care", while to a buddy it says "Not this again... fine, I got your back this time."*
+| Layer | Contents | Why it sits here |
+| --- | --- | --- |
+| 1 · Stable head | Persona, shared rules, output rules, optional protocol | Shared within the same group/persona configuration. |
+| 2 · Group memory | The current rolling digest | Changes when compression refreshes it. |
+| 3 · Session history | Accepted conversation turns | Extends the existing prefix. |
+| 4 · This turn | Speaker relationship, nearby chatter, owner/private/back-off notes, activation state | Changes by speaker and turn, so it belongs last. |
 
-### 🎪 3. 5 Personality Modes on the Fly
-A shared group state switchable with a single command (only close friends and the owner can command it!):
-* 🐱 **Catgirl Mode**: Tsundere feline begging for treats.
-* 👮 **Hall Monitor Mode**: Strict disciplinarian busting slackers.
-* 💼 **Crazy / Burnt-out Mode**: Late-night overtime worker venting corporate rage.
-* 🔮 **Fortune Teller Mode**: Mystical charlatan reading your horoscope.
-* 🏎️ **Night Driver Mode**: Easygoing veteran highway cruiser.
+Session access is locked while a reply is built and recorded. Names are rendered from the current archive rather than left to free-form model memory. Digest extraction can suggest relationship changes; local code still owns validation, caps and persistence.
 
-### 🧾 4. Group Chronicles & Promise Nagging
-* **Rolling Group Memory**: Automatically compresses chat logs daily into a hilarious 《Group Chronicles》 digest. It injects a stable member roster to reduce stale catchphrase loops.
-* **Promise Ledger**: Did someone brag about "treating everyone to drinks tomorrow"? It logs the promise into its ledger and periodically nags them in the group until they say "settled".
+This layout creates opportunities for prefix caching. Actual cache behavior depends on the provider and task tier: the [design notes](docs/DESIGN_NOTES_EN.md) distinguish live group observations, controlled probes and regressions. Their measurements are evidence for those conditions, not a universal cache-hit or monthly-cost promise.
 
-### 🎲 5. 0-Token Instant Local Easter Eggs
-Local commands and preset interactions **can respond without a model request**:
-* **Cyber Duel**: Roll dice against each other — winning or losing actually shifts your affinity score!
-* **Local In-Jokes**: Triggers preset memes instantly on keyword matches.
-* **Status Lookups**: Check affinity level, view relationship leaderboard, inspect name aliases, or search raw quote archives.
-
----
-
-## 🛠️ Secret Sauce Under the Hood
-
-Persistent operation relies on state management, usage limits, output checks and gateway reconnection. Availability still depends on the runtime and providers:
-
-| Mechanism | Implementation | Benefit |
-| :--- | :--- | :--- |
-| **Code-Held State** | Affinity, nicknames, and promise ledgers live in code/JSON | Affinity scores and current names are maintained locally; state calculation is separate from language generation |
-| **Layered Prompt Cache** | Physical prompt ordering (Static rules $\to$ Daily memory $\to$ History $\to$ Turn context) | Cache hits and cost depend on the provider; measured probes are recorded in the design notes |
-| **Task-Tier Routing** | Chat uses strong models, compression uses weak models, safety uses strict models | Separate task configurations and Gemini/GLM fallback paths; behavior depends on provider availability |
-| **Anti-Griefing Armor** | Dual-tier word filter + model judge + rename rate-limiter | Resists malicious naming attacks; group owner claimed via private secret phrase |
-| **24/7 Gateway Watchdog** | Monkey-patches WS downlinks to kick stale silent connections | Detects stale connections and attempts reconnection after network interruptions |
-
-> 💡 *Interested in the deep architecture, benchmark probes, and 474 offline regression tests? Check out [Architecture & Design Notes](docs/DESIGN_NOTES_EN.md).*
-
----
-
-## 🚀 Quick Start in 5 Minutes
+## Quick start
 
 ### 1. Clone & Install Dependencies
 
@@ -182,3 +163,29 @@ Tweak bot behavior and budget guardrails in `.env`:
 
 Open-sourced under the [MIT License](LICENSE).
 Pull requests and stars are welcome! Bring a true companion to your chat group.
+
+## Understand a quiet or half-working bot
+
+| Symptom | Check first |
+| --- | --- |
+| The process starts but group chatter never arrives | QQ sandbox membership and the group's **获取群内全部消息** setting. |
+| It never reacts to its spoken name | `BOT_NAMES`; the trigger words must match your deployment. |
+| Chat works but owner commands do not | C2C permission and the private ownership-claim step. |
+| A nickname appears to be missing in private chat | Nicknames are scoped to a group; C2C has no group identity. |
+| Cache cost differs from the notes | Provider, model/task tier, prefix stability and the observed cache TTL. |
+
+## Explore the harness
+
+| File | Responsibility |
+| --- | --- |
+| [bot.py](bot.py) | QQ event routing, local commands, prompt assembly, output and send handling |
+| [activation.py](activation.py) | Activity state, time-of-day and reply policy inputs |
+| [affinity.py](affinity.py), [relations.py](relations.py) | Relationship updates, tiers, budgets and ranking |
+| [naming.py](naming.py), [nicking.py](nicking.py) | Runtime identity rendering and per-group nicknames |
+| [runtime.py](runtime.py), [storage.py](storage.py) | Shared runtime objects, sessions and persistence |
+| [archive.py](archive.py), [digest.py](digest.py) | Raw message archive, rolling memory and extracted structured updates |
+| [providers.py](providers.py) | Provider routing and fallback |
+| [wordfilter.py](wordfilter.py), [qqtext.py](qqtext.py) | Text checks and QQ message rendering |
+| [tests/](tests/) | Regression cases and separate provider probes |
+
+Live operation needs your QQ application and model credentials. Message archives and generated content are deployment data; the repository contains the code and example configuration. Network availability, QQ platform limits and model behavior remain external dependencies.

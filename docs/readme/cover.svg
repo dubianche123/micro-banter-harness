@@ -1,22 +1,34 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="430" viewBox="0 0 1280 430" role="img" aria-labelledby="t d">
-<title id="t">The Regular</title><desc id="d">Local state. A familiar voice.</desc>
-<rect width="1280" height="430" rx="22" fill="#30251D"/>
-<path d="M1030 0 1280 250M1155 0l125 125" stroke="#FFFFFF" stroke-opacity=".035" stroke-width="65"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="520" viewBox="0 0 1280 520" role="img" aria-labelledby="title desc">
+<title id="title">The Regular</title><desc id="desc">The Regular. Repository-specific technical illustration.</desc>
+<defs><linearGradient id="project-bg" x2="1" y2="1"><stop stop-color="#241D1C"/><stop offset="1" stop-color="#35291F"/></linearGradient><pattern id="texture" width="28" height="28" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#FFFFFF" fill-opacity=".035"/></pattern></defs>
 <g font-family="Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif">
-<text x="48" y="48" font-size="13" fill="#E6B66B" font-weight="650" text-anchor="start">A RESIDENT QQ GROUP COMPANION</text>
-<text x="48" y="122" font-size="48" fill="#F5F8FF" font-weight="700" text-anchor="start">The Regular</text>
-<text x="50" y="164" font-size="21" fill="#C1CFDF" font-weight="400" text-anchor="start">Local state. A familiar voice.</text>
-<rect x="48" y="210" width="352" height="122" rx="14" fill="#FFFFFF" fill-opacity=".055" stroke="#FFFFFF" stroke-opacity=".14"/>
-<text x="68" y="244" font-size="13" fill="#E6B66B" font-weight="650" text-anchor="start">01 / LISTEN</text>
-<text x="68" y="291" font-size="17" fill="#EDF3FA" font-weight="500" text-anchor="start">Group events + activation gates</text>
-<path d="M413 271h25m-7-5 7 5-7 5" fill="none" stroke="#9DAFC4" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<rect x="456" y="210" width="352" height="122" rx="14" fill="#FFFFFF" fill-opacity=".055" stroke="#FFFFFF" stroke-opacity=".14"/>
-<text x="476" y="244" font-size="13" fill="#E6B66B" font-weight="650" text-anchor="start">02 / REMEMBER</text>
-<text x="476" y="291" font-size="17" fill="#EDF3FA" font-weight="500" text-anchor="start">Affinity, names + local ledger</text>
-<path d="M821 271h25m-7-5 7 5-7 5" fill="none" stroke="#9DAFC4" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<rect x="864" y="210" width="352" height="122" rx="14" fill="#FFFFFF" fill-opacity=".055" stroke="#FFFFFF" stroke-opacity=".14"/>
-<text x="884" y="244" font-size="13" fill="#E6B66B" font-weight="650" text-anchor="start">03 / REPLY</text>
-<text x="884" y="291" font-size="17" fill="#EDF3FA" font-weight="500" text-anchor="start">Local commands or model replies</text>
-<path d="M48 369h1184" stroke="#FFFFFF" stroke-opacity=".14"/>
-<text x="50" y="400" font-size="14" fill="#AFC0D4" font-weight="400" text-anchor="start">QQ bot · Code-owned social state · Configurable model providers</text>
+<rect x="1" y="1" width="1278" height="518" rx="20" fill="url(#project-bg)" stroke="#283951" />
+<rect x="1" y="1" width="1278" height="518" rx="20" fill="url(#texture)"/>
+<path d="M53 31h25v18H65l-8 6v-6h-4zM59 38h13M59 43h9" fill="none" stroke="#F1C383" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M0 430H1280M640 0V520" fill="none" stroke="#25354F" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="88" y="49" font-size="13" fill="#F1C383" font-weight="700" text-anchor="start">A RESIDENT QQ GROUP COMPANION</text>
+<text x="50" y="132" font-size="45" fill="#F7FAFF" font-weight="700" text-anchor="start">The Regular</text>
+<text x="52" y="190" font-size="22" fill="#C2CFE1" font-weight="400" text-anchor="start">A familiar voice,</text>
+<text x="52" y="223" font-size="22" fill="#C2CFE1" font-weight="400" text-anchor="start">with its social state held in code.</text>
+<text x="52" y="350" font-size="17" fill="#8EA4BF" font-weight="400" text-anchor="start">— Activation decides when to speak.</text>
+<text x="52" y="379" font-size="17" fill="#8EA4BF" font-weight="400" text-anchor="start">— Local commands avoid unnecessary calls.</text>
+<text x="52" y="408" font-size="17" fill="#8EA4BF" font-weight="400" text-anchor="start">— Stable context supports provider caching.</text>
+<text x="52" y="486" font-size="12" fill="#6F86A4" font-weight="700" text-anchor="start">PROJECT OVERVIEW  /  SCHEMATIC</text>
+<rect x="699" y="68" width="524" height="100" rx="14" fill="#17263D" stroke="#364A66" />
+<text x="717" y="99" font-size="17" fill="#F1C383" font-weight="700" text-anchor="start">CODE-OWNED SOCIAL STATE</text>
+<text x="717" y="129" font-size="16" fill="#DFE8F5" font-weight="400" text-anchor="start">names  ·  affinity  ·  modes  ·  promise ledger</text>
+<path d="M959 168V200H820V225" fill="none" stroke="#F1C383" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M959 200H1095V225" fill="none" stroke="#F1C383" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M815 218l5 7 5-7M1090 218l5 7 5-7" fill="none" stroke="#F1C383" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="699" y="225" width="242" height="142" rx="14" fill="#17263D" stroke="#364A66" />
+<text x="717" y="256" font-size="17" fill="#F1C383" font-weight="700" text-anchor="start">LOCAL ROUTE</text>
+<text x="717" y="286" font-size="16" fill="#DFE8F5" font-weight="400" text-anchor="start">Dice / lookups</text>
+<text x="717" y="310" font-size="16" fill="#DFE8F5" font-weight="400" text-anchor="start">No model request</text>
+<rect x="967" y="225" width="256" height="142" rx="14" fill="#17263D" stroke="#364A66" />
+<text x="985" y="256" font-size="17" fill="#F1C383" font-weight="700" text-anchor="start">GENERATED REPLY</text>
+<text x="985" y="286" font-size="16" fill="#DFE8F5" font-weight="400" text-anchor="start">Layered context</text>
+<text x="985" y="310" font-size="16" fill="#DFE8F5" font-weight="400" text-anchor="start">Provider fallback</text>
+<text x="699" y="411" font-size="17" fill="#D7E2F1" font-weight="400" text-anchor="start">One message can end in silence, a local command,</text>
+<text x="699" y="438" font-size="17" fill="#D7E2F1" font-weight="400" text-anchor="start">or a checked model reply. The state stays in code.</text>
+<text x="699" y="482" font-size="12" fill="#8FA4C0" font-weight="400" text-anchor="start">QQ EVENTS   /   LOCAL JSON STATE   /   CONFIGURABLE LLM</text>
 </g></svg>
