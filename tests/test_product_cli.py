@@ -146,6 +146,170 @@ class InitializationTest(unittest.TestCase):
             self.assertEqual(actual["VISION_MODEL"], "glm-4.7")
 
 
+class SetupTest(unittest.TestCase):
+    def test_fresh_setup_uses_init_questions_then_checks_once(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True), \
+             patch("sys.stdin.isatty", return_value=True), \
+             patch("builtins.input", side_effect=["123", "", "", "https://gateway.invalid/v1", "chat-model"]), \
+             patch("getpass.getpass", side_effect=["qq-secret", "model-secret"]), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            target = Path(directory) / ".env"
+            def load(path):
+                self.assertEqual(path, Path(directory).resolve())
+                self.assertIn("chat-model", target.read_text())
+                return "written-config"
+            with patch("regular.cli.load_config", side_effect=load) as config, \
+                 patch("regular.cli.doctor", return_value=0) as check:
+                self.assertEqual(cli.main(["--directory", directory, "setup"]), 0)
+            config.assert_called_once()
+            check.assert_called_once_with("written-config")
+            from dotenv import dotenv_values
+            values = dotenv_values(target, interpolate=False)
+            self.assertEqual(values["VISION_ENABLED"], "true")
+            self.assertNotIn("VISION_MODEL", values)
+            self.assertNotIn("OWNER_CLAIM_PHRASE", values)
+            self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+            self.assertIn("ownership binds silently", output.getvalue())
+            self.assertIn(cli._command(Path(directory).resolve(), "run"), output.getvalue())
+            self.assertNotIn("qq-secret", output.getvalue())
+            self.assertNotIn("model-secret", output.getvalue())
+
+    def test_existing_setup_only_fills_missing_values_and_preserves_comments(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True), \
+             patch("sys.stdin.isatty", return_value=True), patch("builtins.input") as question, \
+             patch("getpass.getpass", return_value="new-qq-secret") as secret, \
+             patch("regular.cli.load_config", return_value=object()), \
+             patch("regular.cli.doctor", return_value=0), contextlib.redirect_stdout(io.StringIO()):
+            target = Path(directory) / ".env"
+            retained = '# Keep my settings\nQQ_APP_ID="123" # keep ID comment\nAI_PROVIDER=zhipu\nZHIPU_API_KEY="existing-model-secret"\nBOT_NAMES="老群友"\nVISION_MODEL="custom-vision"\n'
+            target.write_text(retained + "QQ_APP_SECRET=\n")
+            self.assertEqual(cli.setup(directory), 0)
+            self.assertTrue(target.read_text().startswith(retained))
+            question.assert_not_called()
+            secret.assert_called_once()
+            from dotenv import dotenv_values
+            values = dotenv_values(target, interpolate=False)
+            self.assertEqual(values["QQ_APP_SECRET"], "new-qq-secret")
+            self.assertEqual(values["VISION_MODEL"], "custom-vision")
+            self.assertNotIn("VISION_ENABLED", values)
+
+    def test_empty_existing_template_is_completed_without_provider_or_optional_questions(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True), \
+             patch("sys.stdin.isatty", return_value=True), \
+             patch("builtins.input", side_effect=["123", "https://gateway.invalid/v1", "chat-model"]) as question, \
+             patch("getpass.getpass", side_effect=["qq-secret", "model-secret"]), \
+             patch("regular.cli.load_config", return_value=object()), \
+             patch("regular.cli.doctor", return_value=0), contextlib.redirect_stdout(io.StringIO()):
+            target = Path(directory) / ".env"
+            target.write_text("# An empty starter is still an existing config.\n")
+            self.assertEqual(cli.setup(directory), 0)
+            self.assertIn("# An empty starter", target.read_text())
+            self.assertEqual(question.call_count, 3)
+            from dotenv import dotenv_values
+            values = dotenv_values(target, interpolate=False)
+            self.assertEqual(values["OPENAI_MODELS"], "chat-model")
+            self.assertNotIn("AI_PROVIDER", values)
+            self.assertNotIn("BOT_NAMES", values)
+
+    def test_environment_has_priority_even_when_empty_and_is_never_rewritten(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"QQ_APP_ID": "env-id", "QQ_APP_SECRET": "", "AI_PROVIDER": "zhipu"}, clear=True), \
+             patch("sys.stdin.isatty", return_value=True), patch("builtins.input") as question, \
+             patch("getpass.getpass") as secret, patch("regular.cli.load_config", return_value=object()), \
+             patch("regular.cli.doctor", return_value=1), contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()) as errors:
+            target = Path(directory) / ".env"
+            original = 'QQ_APP_ID=file-id\nQQ_APP_SECRET="retained-file-secret"\nAI_PROVIDER=gemini\nZHIPU_API_KEY=model-key\n'
+            target.write_text(original)
+            self.assertEqual(cli.setup(directory), 1)
+            self.assertEqual(target.read_text(), original)
+            self.assertEqual(os.environ["QQ_APP_SECRET"], "")
+            question.assert_not_called()
+            secret.assert_not_called()
+            self.assertIn("QQ_APP_SECRET is empty and overrides .env", errors.getvalue())
+            self.assertNotIn("retained-file-secret", errors.getvalue())
+
+    def test_usable_keyfile_does_not_prompt_for_another_api_key(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"ZHIPU_API_KEY": ""}, clear=True), \
+             patch("sys.stdin.isatty", return_value=True), patch("builtins.input") as question, \
+             patch("getpass.getpass") as secret, patch("regular.cli.load_config", return_value=object()), \
+             patch("regular.cli.doctor", return_value=0), contextlib.redirect_stdout(io.StringIO()):
+            (Path(directory) / ".env").write_text("QQ_APP_ID=123\nQQ_APP_SECRET=qq-secret\nAI_PROVIDER=zhipu\n")
+            (Path(directory) / "api_keys_zhipu.txt").write_text("# private keys\n\nusable-key\n")
+            self.assertEqual(cli.setup(directory), 0)
+            question.assert_not_called()
+            secret.assert_not_called()
+
+    def test_nonterminal_setup_returns_instructions_without_prompting_or_importing_config(self):
+        with tempfile.TemporaryDirectory(prefix="regular setup ") as directory, patch("sys.stdin.isatty", return_value=False), \
+             patch("builtins.input") as question, patch("getpass.getpass") as secret, \
+             patch("regular.cli.load_config") as config, contextlib.redirect_stderr(io.StringIO()) as output:
+            self.assertEqual(cli.main(["--directory", directory, "setup"]), 1)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+            question.assert_not_called()
+            secret.assert_not_called()
+            config.assert_not_called()
+            for command in ("init", "doctor"):
+                self.assertIn(cli._command(Path(directory).resolve(), command), output.getvalue())
+
+    def test_cancel_keeps_existing_configuration_and_does_not_load_it(self):
+        for cancellation in (EOFError, KeyboardInterrupt):
+            with self.subTest(cancellation=cancellation), tempfile.TemporaryDirectory() as directory, \
+                 patch.dict(os.environ, {}, clear=True), patch("sys.stdin.isatty", return_value=True), \
+                 patch("builtins.input", side_effect=["123"]), patch("getpass.getpass", side_effect=cancellation), \
+                 patch("regular.cli.load_config") as config, contextlib.redirect_stderr(io.StringIO()) as output:
+                target = Path(directory) / ".env"
+                target.write_text("# still mine\n")
+                self.assertEqual(cli.setup(directory), 1)
+                self.assertEqual(target.read_text(), "# still mine\n")
+                config.assert_not_called()
+                self.assertIn("cancelled", output.getvalue())
+
+    def test_failed_run_recommends_setup_with_the_same_directory(self):
+        with tempfile.TemporaryDirectory(prefix="regular instance ") as directory, \
+             patch("regular.cli.load_config", return_value=SimpleNamespace(validate=lambda: ["missing setting"])), \
+             contextlib.redirect_stderr(io.StringIO()) as output:
+            self.assertEqual(cli.main(["--directory", directory, "run"]), 1)
+            self.assertIn(cli._command(Path(directory).resolve(), "setup"), output.getvalue())
+
+    def test_setup_does_not_create_clients_or_import_the_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / ".env").write_text("QQ_APP_ID=123\nQQ_APP_SECRET=fake-qq\nAI_PROVIDER=zhipu\nZHIPU_API_KEY=fake-model\n")
+            code = """from unittest.mock import patch
+import sys
+from regular.cli import main
+with patch('sys.stdin.isatty', return_value=True), patch('builtins.input', side_effect=AssertionError('no prompt')), patch('getpass.getpass', side_effect=AssertionError('no secret prompt')), patch('httpx.Client', side_effect=AssertionError('no client')), patch('httpx.AsyncClient', side_effect=AssertionError('no async client')):
+    assert main(['--directory', DIRECTORY, 'setup']) == 0
+assert 'bot' not in sys.modules and 'runtime' not in sys.modules
+""".replace("DIRECTORY", repr(directory))
+            env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(ROOT)}
+            result = subprocess.run([sys.executable, "-c", code], env=env, cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Ready to start:", result.stdout)
+            self.assertNotIn("fake-qq", result.stdout)
+            self.assertNotIn("fake-model", result.stdout)
+
+
+class KeyFileTest(unittest.TestCase):
+    def test_shared_reader_preserves_keyfile_and_default_semantics(self):
+        from regular.keys import read_api_keys
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "api_keys_zhipu.txt"
+            self.assertEqual(read_api_keys(target, "fallback"), ["fallback"])
+            target.write_text("# comment\n\n first \nsecond\n")
+            self.assertEqual(read_api_keys(target, "fallback"), ["first", "second"])
+            target.write_text("# comments only\n")
+            self.assertEqual(read_api_keys(target), [])
+            self.assertEqual(read_api_keys(target, "fallback"), ["fallback"])
+            with patch("pathlib.Path.open", side_effect=PermissionError), self.assertLogs("regular.config", level="WARNING"):
+                self.assertEqual(read_api_keys(target, "fallback"), ["fallback"])
+
+    def test_config_uses_shared_keyfile_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "api_keys_zhipu.txt").write_text("# private keys\nfirst-key\nsecond-key\n")
+            actual = config_json(directory, "AI_KEYS", env={"AI_PROVIDER": "zhipu", "ZHIPU_API_KEY": "fallback"})
+            self.assertEqual(actual["AI_KEYS"], ["first-key", "second-key"])
+
+
 class ServiceTest(unittest.TestCase):
     def test_plist_roundtrip_arbitrary_directory_and_venv(self):
         directory = '/tmp/a user/Code & <friends> "好"'

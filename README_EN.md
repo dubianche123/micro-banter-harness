@@ -18,6 +18,8 @@ The Regular lives in a QQ group as a recurring character: usually quiet, occasio
 
 Under that social surface is a small agent harness: **code holds durable state, an activation policy decides when to speak, and models generate language inside a deliberately ordered context**. Local commands and configured provider fallbacks keep every interaction from depending on one large model call.
 
+**First use:** [Install](#quick-start), run `regular setup` and `regular run`, then send one private message to claim ownership. To try it without credentials, use `regular demo`.
+
 ## What you can try
 
 | Interaction | What is implemented |
@@ -63,7 +65,7 @@ This layout creates opportunities for prefix caching. Actual cache behavior depe
 
 ## Quick start
 
-### 1. Install and try the local demo
+### 1. Install
 
 Python 3.10+ is required; Python 3.12 is recommended. No database is needed.
 
@@ -73,89 +75,73 @@ cd micro-banter-harness
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-regular demo
-regular demo 查好感 掷骰子 群史记
 ```
 
-In the interactive demo, `/user NAME` switches speakers, `/group ID` switches groups,
-and `/help` lists controls.
+To try it first, run `regular demo`. No account or API key is needed; it uses
+temporary state and a fixed fake model, with no QQ connection or model requests.
+Try `查好感`, `掷骰子`, or `群史记`; `/help` lists demo controls.
 
-The demo uses the production message handler, temporary state and a fixed fake model.
-It never connects to QQ or real models; the temporary data is removed on exit.
-It demonstrates local commands and relationship handling, not model quality or QQ permissions.
+### 2. Configure once with the wizard
 
-### 2. Initialize and check configuration
+Have your QQ AppID/AppSecret and model endpoint URL, API key and model ID ready:
 
 ```bash
-regular init --interactive
-regular doctor
+regular setup
 ```
 
-Secret prompts are hidden. Initialization creates a private `0600` `.env` and never
-overwrites an existing file. For noninteractive setup, use `regular init` and edit
-the blank credentials. See [.env.example](.env.example); real environment variables
-have precedence over the file.
+The wizard hides secret input, creates a private `.env`, and runs local checks.
+If `.env` already exists, it fills missing values while keeping existing settings.
+Zhipu/Gemini presets only need their corresponding key. Successful setup gives
+you the launch command. No database, retry policy or separate image configuration
+is required.
 
-Set `QQ_APP_ID` and `QQ_APP_SECRET`. All entry points default to `AI_PROVIDER=openai`:
-explicitly provide `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `OPENAI_MODELS`.
-Zhipu/Gemini remain optional presets. Set `BOT_NAMES` to the actual group aliases;
-blank `FALLBACK_PROVIDER` disables cross-endpoint fallback.
+Image reading follows the main model by default. For a text-only chat model, set
+`VISION_MODEL`; set `VISION_PROVIDER` too for another provider. Optional
+`BOT_NAMES` adds group aliases; platform nicknames and mentions still work when
+it is blank. [Model configuration](docs/providers.md) · [All example settings](.env.example)
 
-All endpoints share one bounded policy: explicit candidates, up to 3 attempts,
-20 seconds per attempt and 30 seconds total by default. Every physical attempt
-consumes the same daily budget. Routing uses SDK error types and HTTP status,
-without vendor-message matching, cache yielding or slow-model special cases.
-See [provider configuration](docs/providers.md) for task chains and independent
-image-model configuration.
+### 3. Start and send one private message to claim ownership
 
-An unowned bot automatically records the first user who sends a nonempty C2C
-private message as its owner in `owner.txt`, silently and without a phrase or
-extra claim notification. That message still runs its normal command or chat
-handling. Later messages do not replace a saved owner; group messages cannot claim ownership. Before first
-use, restrict QQ message-list access to the intended owner or test members, then
-have the owner send a private message first. QQ supports full or allowlist access;
-see the [official scope documentation](https://bot.q.qq.com/wiki/#_10-%E4%BD%BF%E7%94%A8%E8%8C%83%E5%9B%B4%E4%B8%8E%E4%BA%BA%E5%91%98%E9%85%8D%E7%BD%AE).
-TLS verification is on by default.
-
-New groups get 10 minutes from joining or first observation. If still unowned,
-the next normal chat reply includes one brief reminder; confirmed delivery stops
-repeats. No separate scheduled message is sent. An explicit ownership question in
-a group receives the private-chat instructions immediately.
-
-Image reading is on by default and inherits the main provider and its first chat
-model. Set `VISION_PROVIDER` / `VISION_MODEL` for a separate image-capable model,
-or `VISION_ENABLED=false` to disable it. Inheriting a configuration does not prove
-image support: unsupported image input produces an explicit failure rather than
-a guessed description.
-
-`regular doctor` checks local configuration, dependencies, resolved paths, saved
-JSON and configured capabilities. It does not connect or infer. Explicit
-`regular doctor --network` permits provider `/models` metadata checks; success
-does not prove model access/quota. `--json` provides structured diagnostics without
-credentials; review local paths and bot aliases before sharing them.
-
-### 3. Configure QQ and run
-
-1. Configure your QQ application, sandbox members and C2C permissions; restrict
-   message-list access to the intended owner or test members.
-2. After startup, have the owner send one nonempty private message. Ownership is
-   saved silently while that message is handled normally.
-3. In group settings → the bot → message scope, select **获取群内全部消息**.
-4. These switches require live verification; local diagnostics cannot confirm them.
+In QQ, enable C2C and the required group events, and restrict usage scope to the
+intended owner or test members. Then start:
 
 ```bash
 regular run
-# In a second terminal, inspect gateway/budget/providers/background-task status:
-regular status
-regular status --json
 ```
 
-Use `regular --directory /path/to/instance doctor` for a separate deployment
-working directory. `.env` and relative runtime paths are resolved there.
-`python bot.py` remains supported. Stop foreground execution with Ctrl+C. Run one
-instance per deployment.
+**The intended owner's first private message automatically claims the bot.**
+No phrase or extra confirmation is needed; that message receives its normal
+reply. Ownership persists across restarts and later private messages cannot
+replace it. QQ supports full or allowlist access, so check the
+[usage scope](https://bot.q.qq.com/wiki/#_10-%E4%BD%BF%E7%94%A8%E8%8C%83%E5%9B%B4%E4%B8%8E%E4%BA%BA%E5%91%98%E9%85%8D%E7%BD%AE)
+before first use.
 
-### 4. Choose a process supervisor
+After adding the bot to a group, choose **获取群内全部消息** in its message scope
+under group settings, then mention it. If still unowned after 10 minutes, its
+next normal reply includes one reminder. Group messages cannot claim ownership.
+
+Use `regular doctor` for local diagnostics and `regular status` in another
+terminal for connection and budget status. For a separate instance, use
+`regular --directory /path/to/instance setup`; its configuration and data live
+there. Stop foreground execution with Ctrl+C. Run one process per instance.
+
+<details>
+<summary>Optional: scripted configuration and diagnostics</summary>
+
+For noninteractive installation, `regular init` creates a blank credentials
+template; fill it and run `regular doctor`. `init` never overwrites a file; use
+`regular setup` to fill missing settings. Real environment variables take
+precedence over `.env`, including explicitly empty values.
+
+`regular doctor --json` produces structured local checks. Explicit
+`regular doctor --network` also checks provider `/models` metadata without
+inference; success does not prove model quota or image support.
+`regular status --json` reads the running instance's status snapshot.
+
+</details>
+
+<details>
+<summary>Optional: process supervision and Docker</summary>
 
 The macOS helper generates a plist using your actual paths. It never starts a
 service by default, kills processes, injects a proxy or changes power settings:
@@ -197,6 +183,8 @@ before backing up the data directory and `.env`. See [CHANGELOG](CHANGELOG.md)
 for version changes.
 
 
+</details>
+
 ---
 
 ## 🎮 Cheatsheet: Commands & Interactions
@@ -207,7 +195,7 @@ for version changes.
 | **Random Banter** | Talk normally in the group; it chimes in based on probability | 1 call |
 | **Send an image** | `@bot` with a picture (it reads it once and remembers) | 1 chat + up to 1 vision call (provider pricing applies) |
 | **Cyber Duel** | `roll dice` / `duel` / `掷骰子` / `比大小` | **0** |
-| **Claim / Rename** | `call me Alex` / `叫我阿强` / `别叫我了` | 0~1 call |
+| **Nicknames / Rename** | `call me Alex` / `叫我阿强` / `别叫我了` | 0~1 call |
 | **Switch Mode** | `catgirl mode` / `crazy mode` / `discipline mode` / `fortune mode` | **0** |
 | **Reset Mode** | `return to normal` / `恢复正常` / `冷静点` | **0** |
 | **Check Affinity**| `check affinity` / `查好感` / `我跟你多熟` | **0** |

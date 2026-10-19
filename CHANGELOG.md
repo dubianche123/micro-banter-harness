@@ -4,7 +4,9 @@
 
 - Use one bounded provider request policy and explicit OpenAI-compatible endpoints/model chains; keep vendor presets as optional setup shortcuts. Image reading inherits the main provider and first chat model by default, with optional independent provider/model overrides.
 - Add installable `regular` CLI: offline demo, private configuration initialization,
-  local diagnostics, explicit metadata checks, foreground run and structured status.
+  guided setup that fills missing settings and runs local checks, explicit metadata
+  checks, foreground run and structured status. Keep configured values and hidden
+  secret input; show actionable next steps for the selected instance directory.
 - Generate portable macOS/Linux service definitions. No automatic process killing,
   power-policy changes or service startup. Add a single-container Compose path.
 - Default to TLS verification. Silently save the first nonempty C2C sender as

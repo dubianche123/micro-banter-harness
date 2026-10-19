@@ -10,8 +10,10 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shlex
 import sys
 import time
+import warnings
 
 from . import __version__
 
@@ -21,30 +23,58 @@ def load_config(directory):
     return importlib.import_module("config")
 
 
-def initialize(directory, *, interactive=False):
-    """Create a private config once. Never overwrite it or display its secrets."""
-    directory = Path(directory).expanduser().resolve()
+def _initial_values():
+    return {"QQ_APP_ID": "", "QQ_APP_SECRET": "", "BOT_NAMES": "",
+            "AI_PROVIDER": "openai", "OPENAI_BASE_URL": "", "OPENAI_API_KEY": "",
+            "OPENAI_MODELS": "", "ZHIPU_API_KEY": "", "GEMINI_API_KEY": "",
+            "FALLBACK_PROVIDER": "", "SSL_VERIFY": "true", "VISION_ENABLED": "true"}
+
+
+def _prompt_configuration(values, directory, *, missing_only=False, fresh=True):
+    """Share init's small question flow; setup fills only absent effective values."""
+    from regular.keys import read_api_keys
+
+    blocked = []
+    def effective(name):
+        value = os.environ.get(name, values.get(name)) if missing_only else values.get(name)
+        return value or ""
+
+    def ask(name, label, *, secret=False):
+        if missing_only and effective(name).strip():
+            return
+        if missing_only and name in os.environ:
+            blocked.append(name)
+            return
+        if secret:
+            # Refuse getpass's echoing fallback if a terminal becomes unavailable.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                values[name] = getpass.getpass(label)
+        else:
+            values[name] = input(label).strip()
+
+    ask("QQ_APP_ID", "QQ App ID: ")
+    ask("QQ_APP_SECRET", "QQ App secret (hidden): ", secret=True)
+    if fresh and (not missing_only or not effective("BOT_NAMES")):
+        if not missing_only or "BOT_NAMES" not in os.environ:
+            values["BOT_NAMES"] = input("Bot names (optional, comma separated): ").strip()
+    if not missing_only or (fresh and "AI_PROVIDER" not in os.environ):
+        values["AI_PROVIDER"] = input("Provider [openai/zhipu/gemini, default openai]: ").strip().lower() or "openai"
+    provider = effective("AI_PROVIDER").strip().lower() or "openai"
+    if provider not in ("openai", "zhipu", "gemini"):
+        raise ValueError("Provider must be openai, zhipu or gemini")
+    if provider == "openai":
+        ask("OPENAI_BASE_URL", "OpenAI-compatible base URL (include /v1 if required): ")
+        ask("OPENAI_MODELS", "Chat model IDs (ordered, comma separated): ")
+    key_name = f"{provider.upper()}_API_KEY"
+    if not missing_only or not read_api_keys(directory / f"api_keys_{provider}.txt", effective(key_name).strip()):
+        ask(key_name, "Provider API key (hidden): ", secret=True)
+    return blocked
+
+
+def _create_configuration(directory, values):
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / ".env"
-    values = {"QQ_APP_ID": "", "QQ_APP_SECRET": "", "BOT_NAMES": "",
-              "AI_PROVIDER": "openai", "OPENAI_BASE_URL": "", "OPENAI_API_KEY": "",
-              "OPENAI_MODELS": "", "ZHIPU_API_KEY": "", "GEMINI_API_KEY": "",
-              "FALLBACK_PROVIDER": "", "SSL_VERIFY": "true", "VISION_ENABLED": "true"}
-    if target.exists():
-        print(f"Config already exists; kept unchanged: {target}")
-        return 0
-    if interactive:
-        values["QQ_APP_ID"] = input("QQ App ID: ").strip()
-        values["QQ_APP_SECRET"] = getpass.getpass("QQ App secret (hidden): ")
-        values["BOT_NAMES"] = input("Bot names (comma separated): ").strip()
-        provider = input("Provider [openai/zhipu/gemini, default openai]: ").strip().lower() or "openai"
-        if provider not in ("openai", "zhipu", "gemini"):
-            raise ValueError("Provider must be openai, zhipu or gemini")
-        values["AI_PROVIDER"] = provider
-        if provider == "openai":
-            values["OPENAI_BASE_URL"] = input("OpenAI-compatible base URL (include /v1 if required): ").strip()
-            values["OPENAI_MODELS"] = input("Chat model IDs (ordered, comma separated): ").strip()
-        values[f"{provider.upper()}_API_KEY"] = getpass.getpass("Provider API key (hidden): ")
     # JSON double-quoted strings are valid dotenv values, including escaped newlines.
     text = "# Created by regular init. Keep this file private.\n"
     text += "\n".join(f"{key}={json.dumps(value, ensure_ascii=False)}" for key, value in values.items()) + "\n"
@@ -55,13 +85,72 @@ def initialize(directory, *, interactive=False):
     try:
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        print(f"Config already exists; kept unchanged: {target}")
-        return 0
+        print(f"Config already exists; kept unchanged: {target}. Complete missing settings with {_command(directory, 'setup')}.")
+        return False
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
         stream.write(text)
     (directory / "data").mkdir(exist_ok=True, mode=0o700)
-    print(f"Created {target} (0600). Fill credentials, then run regular doctor.")
+    print(f"Created {target} (0600).")
+    return True
+
+
+def initialize(directory, *, interactive=False):
+    """Create a private config once. Never overwrite it or display its secrets."""
+    directory = Path(directory).expanduser().resolve()
+    target = directory / ".env"
+    if target.exists():
+        print(f"Config already exists; kept unchanged: {target}. Complete missing settings with {_command(directory, 'setup')}.")
+        return 0
+    values = _initial_values()
+    if interactive:
+        _prompt_configuration(values, directory)
+    if _create_configuration(directory, values):
+        if interactive:
+            print(f"Check configuration: {_command(directory, 'doctor')}.")
+        else:
+            print(f"Fill credentials in {target}, then run {_command(directory, 'doctor')}; or use {_command(directory, 'setup')}.")
     return 0
+
+
+def _command(directory, command):
+    return shlex.join(["regular", "--directory", str(directory), command])
+
+
+def setup(directory):
+    """Guide local configuration, then use the existing offline diagnostics."""
+    from dotenv import dotenv_values, set_key
+
+    directory = Path(directory).expanduser().resolve()
+    target = directory / ".env"
+    if not sys.stdin.isatty():
+        print("Setup needs an interactive terminal; no credentials were read or changed.", file=sys.stderr)
+        print(f"Create a template with {_command(directory, 'init')}, edit {target}, then run {_command(directory, 'doctor')}.", file=sys.stderr)
+        return 1
+    fresh = not target.exists()
+    previous = _initial_values() if fresh else dict(dotenv_values(target, interpolate=False))
+    values = dict(previous)
+    try:
+        blocked = _prompt_configuration(values, directory, missing_only=True, fresh=fresh)
+    except (EOFError, KeyboardInterrupt, getpass.GetPassWarning):
+        print("\nSetup cancelled; no configuration changes were saved.", file=sys.stderr)
+        return 1
+    if fresh:
+        _create_configuration(directory, values)
+    else:
+        for name, value in values.items():
+            if value != previous.get(name):
+                set_key(target, name, value, quote_mode="always")
+    for name in blocked:
+        print(f"External environment variable {name} is empty and overrides .env; set it or unset it before retrying.", file=sys.stderr)
+    config = load_config(directory)
+    result = doctor(config)
+    if result == 0:
+        print(f"Ready to start: {_command(directory, 'run')}")
+        print("Send the bot one private message first: ownership binds silently and that message is handled normally.")
+        print("In the QQ console, enable C2C and the required group-message events for your bot.")
+    else:
+        print(f"Fix the reported settings, then retry {_command(directory, 'setup')}.", file=sys.stderr)
+    return result
 
 
 def _path_writable(path):
@@ -248,6 +337,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init", help="create a private .env without overwriting existing config")
     init.add_argument("--interactive", action="store_true", help="prompt for credentials with hidden secret input")
+    sub.add_parser("setup", help="guide configuration and run local checks; no network or inference")
     diag = sub.add_parser("doctor", help="check local configuration; no network by default")
     diag.add_argument("--network", action="store_true", help="GET provider metadata, never generate model output")
     diag.add_argument("--json", action="store_true")
@@ -263,6 +353,8 @@ def main(argv=None):
     try:
         if args.command == "init":
             return initialize(args.directory, interactive=args.interactive)
+        if args.command == "setup":
+            return setup(args.directory)
         if args.command == "demo":
             return asyncio.run(demo(args.messages))
         try:
@@ -280,7 +372,7 @@ def main(argv=None):
             if errors:
                 for error in errors:
                     print(error, file=sys.stderr)
-                print("Run regular init --interactive and regular doctor.", file=sys.stderr)
+                print(f"Run {_command(Path(args.directory).expanduser().resolve(), 'setup')}.", file=sys.stderr)
                 return 1
             import bot
             bot.run_bot()
@@ -300,6 +392,9 @@ def main(argv=None):
         finally:
             sys.argv = previous_argv
         return 0
+    except (EOFError, KeyboardInterrupt, getpass.GetPassWarning):
+        print("\nConfiguration cancelled; retry in an interactive terminal.", file=sys.stderr)
+        return 1
     except (OSError, ValueError) as error:
-        print(f"{type(error).__name__}: command failed; check paths/configuration with regular doctor", file=sys.stderr)
+        print(f"{type(error).__name__}: command failed; check paths/configuration with {_command(Path(args.directory).expanduser().resolve(), 'doctor')}", file=sys.stderr)
         return 1
