@@ -298,6 +298,15 @@ OWNER_MENTION_PROBABILITY = _env_float("OWNER_MENTION_PROBABILITY", 0.30)
 # 心情/作息/群温的闸门全过时，自己照着最近的话题开个话头。所有闸门见 activation.proactive_ok：
 # 4 小时间隔 / 群静默 10min~6h / 只在白天 / 心情不差。巡检每 30 分钟一次，纯检查零成本。
 PROACTIVE_CHECK_SECONDS = _env_float("PROACTIVE_CHECK_SECONDS", 1800.0)
+
+# ── 读图（2026-10-19，克制版）──
+# 群友发图 → glm-4v-flash（这把 key 上免费，实测可用）一句话客观描述 → 描述替换 [图片]
+# 标记进背景缓存，**读一次永久复用**（QQ 图床 URL 有时效，描述文本才是能存的）。
+# 克制三闸：60s 冷却 / 每日 30 张 / 只在「要回复这张图」或闸门放行时读。
+VISION_ENABLED = _env_bool("VISION_ENABLED", True)
+VISION_MODEL = os.environ.get("VISION_MODEL", "glm-4v-flash")
+VISION_COOLDOWN_SECONDS = _env_float("VISION_COOLDOWN_SECONDS", 60.0)
+VISION_DAILY_CAP = _env_int("VISION_DAILY_CAP", 30)
 BANTER_CHANCE_MAX = _env_float("BANTER_CHANCE_MAX", 0.5)
 
 MEME_COOLDOWN_SECONDS = _env_float("MEME_COOLDOWN_SECONDS", 60.0)

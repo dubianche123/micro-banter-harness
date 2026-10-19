@@ -3,6 +3,7 @@
 本模块自包含：只依赖 config 与自己的状态表，不引用任何运行时单例。
 """
 import asyncio
+import base64
 import time
 
 import httpx
@@ -318,6 +319,56 @@ def _note_provider_ok(name):
         st["fails"] = 0
         st["cooldown_until"] = 0.0
         st["fatal_until"] = 0.0
+
+
+async def describe_image(image_url):
+    """读一张图（2026-10-19，克制版读图）：glm-4v-flash 一句话客观描述。
+
+    先让智谱直接拉 URL；QQ 图床有防盗链拉不动时，本地下载转 base64 再试一次。
+    调用方负责闸门（冷却/每日上限）——这里只管把图读出来。失败返回 None。
+    """
+    clients = AI_CLIENTS.get("zhipu") or []
+    if not clients:
+        return None
+    ask = ("用不超过 25 字的中文客观描述这张图片的内容。若是表情包或梗图，"
+           "说它大概在表达什么情绪。若无法理解或不宜描述，只输出：无法描述")
+
+    def _messages(u):
+        return [{"role": "user", "content": [
+            {"type": "text", "text": ask},
+            {"type": "image_url", "image_url": {"url": u}},
+        ]}]
+
+    data_url = None
+    for attempt, u in enumerate((image_url, None)):
+        if u is None:
+            # URL 通路失败过一次：本地下载转 base64 再试（QQ 图床本机直连可达）
+            try:
+                async with httpx.AsyncClient(timeout=8.0) as hc:
+                    resp = await hc.get(image_url)
+                data_url = ("data:image/jpeg;base64,"
+                            + base64.b64encode(resp.content).decode())
+            except Exception as e:
+                logger.warning("🖼 图片下载失败: %s", str(e)[:100])
+                return None
+        else:
+            data_url = u
+        try:
+            r = await clients[0].chat.completions.create(
+                model=config.VISION_MODEL, messages=_messages(data_url),
+                max_tokens=80, temperature=0.3,
+            )
+            text = (r.choices[0].message.content or "").strip()
+            if text and "无法描述" not in text:
+                return text[:80]
+            return None
+        except Exception as e:
+            if attempt == 0:
+                logger.info("🖼 直连读图失败（转 base64 重试）: %s", str(e)[:100])
+                continue
+            logger.warning("🖼 读图失败: %s", str(e)[:120])
+            return None
+    return None
 
 
 async def call_model(messages, max_tokens, tier="chat", temperature=None):

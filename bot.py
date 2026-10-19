@@ -166,6 +166,7 @@ async def ws_watchdog_loop():
 # bot.py 本体只留「消息流 + 指令路由 + 组装」。别名让既有引用与测试完全兼容。
 import runtime
 import activation
+import providers
 from runtime import hits, owner_label, load_owner, save_owner, _all_named
 from providers import (PROVIDER_CHAIN, AI_CLIENTS, MODEL_CHAINS, MODEL_CHAINS_DIGEST,
                        MODEL_CHAINS_JUDGE, _TIER_CHAINS, _provider_state, _key_idx,
@@ -1435,6 +1436,63 @@ async def proactive_loop():
             logger.error("❌ 主动巡检异常（不影响主流程）: %s", e)
 
 
+# ── 读图（2026-10-19，克制版）──
+# 群友发图 → glm-4v-flash（这把 key 上免费，实测可用）一句话客观描述 → 描述替换 [图片]
+# 标记进背景缓存，**读一次永久复用**（QQ 图床 URL 有时效，描述文本才是能存的）。
+# 克制三闸：60s 冷却 / 每日 30 张 / 只在「要回复这张图」或闸门放行时读。
+_vision_state = {"last": 0.0, "day": "", "count": 0}
+_caption_cache = {}
+
+
+def _vision_gate(now):
+    """异步预读的闸门（克制）：开关 + 冷却 + 每日上限。返回 True 并**消耗**一次名额。"""
+    if not config.VISION_ENABLED:
+        return False
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    if _vision_state["day"] != today:
+        _vision_state["day"], _vision_state["count"] = today, 0
+    if _vision_state["count"] >= config.VISION_DAILY_CAP:
+        return False
+    if now - _vision_state["last"] < config.VISION_COOLDOWN_SECONDS:
+        return False
+    _vision_state["last"] = now
+    _vision_state["count"] += 1
+    return True
+
+
+def _vision_budget_ok(now):
+    """回复路径的同步读图只受每日上限约束（回复需要它，不吃冷却）。"""
+    if not config.VISION_ENABLED:
+        return False
+    today = time.strftime("%Y-%m-%d", time.localtime(now))
+    if _vision_state["day"] != today:
+        _vision_state["day"], _vision_state["count"] = today, 0
+    return _vision_state["count"] < config.VISION_DAILY_CAP
+
+
+async def _caption_into_buffer(group_id, image_url, entry_time):
+    """异步读一张图，把一句话描述替换进背景缓存。失败就保持裸 [图片]。"""
+    try:
+        caption = _caption_cache.get(image_url)
+        if caption is None:
+            caption = await providers.describe_image(image_url)
+    except Exception as e:
+        logger.warning("🖼 读图异常: %s", str(e)[:100])
+        return
+    if not caption:
+        return
+    _caption_cache[image_url] = caption
+    if len(_caption_cache) > 300:
+        _caption_cache.clear()      # 简单防膨胀：清了也无所谓，大不了重新读
+    for entry in group_buffers.get(group_id) or []:
+        if entry.get("text") == "[图片]" and abs(float(entry.get("time") or 0) - entry_time) < 5:
+            entry["text"] = f"[图片：{caption}]"
+            runtime.STATE.mark_dirty()
+            logger.info("🖼 [图片已描述] %s", caption[:70])
+            return
+    logger.info("🖼 [图片描述已入缓存] %s", caption[:70])
+
+
 # ── 承诺催债 ──
 
 def quiet_hour():
@@ -1595,6 +1653,19 @@ class GroupBot(botpy.Client):
         group_id = message.group_openid
         sender_openid = message.author.member_openid
 
+        # 图片（2026-10-19，克制版读图）：群消息的图走 attachments 字段，content 往往是
+        # 空的——以前纯图消息在下面的「读不出人话」闸被整条丢弃，群友发的图它连看都没看过。
+        # 现在标记为 [图片] 进背景缓存，闸门放行时异步读一次图（glm-4v-flash，免费），
+        # 一句话描述替换标记——**读一次永久复用**（QQ 图床 URL 有时效，描述文本才是能存的）。
+        image_url = None
+        for att in (getattr(message, "attachments", None) or []):
+            if str(getattr(att, "content_type", "") or "").startswith("image") \
+                    and getattr(att, "url", None):
+                image_url = att.url
+                break
+        if image_url and not raw_content.strip():
+            raw_content = "[图片]"
+
         # 2. 识别 @机器人 或直接喊它的名字
         #    「要不要理这条」必须看**原始 content**：判定要趁 <@!openid> 还在的时候做。
         #    被 @ 的其他群友优先信事件体的 mentions。
@@ -1618,11 +1689,15 @@ class GroupBot(botpy.Client):
         if is_at:
             user_input = _strip_call(user_input)
 
-        # 读不出人话的消息（纯表情/纯图片/纯链接）到这里就没了。整条丢弃：
+        # 读不出人话的消息（纯表情/纯链接）到这里就没了。整条丢弃：
         # 不入库、不进背景缓存、不回复。只有「@了机器人却一个字没说」例外，
         # 那还欠他一句「找我啥事」。
-        if not user_input and not is_at:
+        # 图片例外（2026-10-19）：纯图消息标记为 [图片] 照常进背景——闸门放行会异步补描述，
+        # 群友发的图从「整条蒸发」变成「至少留了个存在感」。
+        if not user_input and not is_at and not image_url:
             return
+        if not user_input and image_url:
+            user_input = "[图片]"
 
         logger.info("📩 [%s] %s | %s", "@艾特" if is_at else "群消息", sender_openid, user_input)
 
@@ -1647,6 +1722,11 @@ class GroupBot(botpy.Client):
         if not buf or buf[-1]["sender"] != sender_openid or buf[-1]["text"] != user_input:
             buf.append({"sender": sender_openid, "text": user_input, "time": time.time()})
             runtime.STATE.data["buffers"][group_id] = list(buf)
+
+        # 读图（克制版）：闸门放行就异步读——描述落进背景缓存，**读一次永久复用**
+        # （QQ 图床 URL 有时效，描述文本才是能存的）。不挡主流程：描述慢一拍，下一轮就看得见。
+        if image_url and "[图片]" in user_input and _vision_gate(time.time()):
+            asyncio.create_task(_caption_into_buffer(group_id, image_url, time.time()))
 
         # 4. 群主认领 —— **群里永远不授权**，这里只负责把人指到私聊去。
         #    以前这段真的会在群里认主（谁先喊谁得），等于把身份挂在大喇叭上招领；
@@ -1860,6 +1940,17 @@ class GroupBot(botpy.Client):
 
         if not should_reply:
             return
+
+        # 回复要引用图片时同步读一张（绕过冷却、只吃每日上限）——回复等得起这一两秒。
+        # 异步预读可能已经把描述放进缓存了，命中就不重复调。
+        if image_url and config.VISION_ENABLED and "[图片]" in user_input:
+            caption = _caption_cache.get(image_url)
+            if caption is None and _vision_budget_ok(time.time()):
+                caption = await providers.describe_image(image_url)
+                if caption:
+                    _caption_cache[image_url] = caption
+            if caption:
+                user_input = f"{user_input}\n[图片：{caption}]"
 
         if is_at and not user_input:
             me = naming.bot_name()
