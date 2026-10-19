@@ -81,6 +81,12 @@ PROMISES.hydrate(STATE.data.get("promises", {}),
                  finished=STATE.data.get("promises_finished", {}))
 STATE.register_collector(PROMISES.dump_into)
 
+# 心情（2026-10-19，激活度系统的一部分，见 activation.py）：全局一个情绪值，
+# 跟随每轮好感度结算漂移、按半衰期回中。落 state.json 的 mood 键，重启不丢。
+import activation
+activation.hydrate_mood(STATE.data.get("mood", {}))
+STATE.register_collector(activation.dump_mood_into)
+
 # 群级令牌桶 + 全局日预算。按需求刻意【不做】per-user 额度限制。
 GROUP_BUCKET = storage.TokenBucket(config.GROUP_RATE_CAPACITY, config.GROUP_RATE_REFILL_SECONDS)
 BUDGET = storage.DailyBudget(config.DAILY_BUDGET, STATE.data.setdefault("usage", {}))

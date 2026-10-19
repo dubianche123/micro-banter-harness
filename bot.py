@@ -165,6 +165,7 @@ async def ws_watchdog_loop():
 # 运行时单例：runtime.py │ 供应商容错：providers.py │ 好感度结算：affinity.py │ 昵称域：nicking.py
 # bot.py 本体只留「消息流 + 指令路由 + 组装」。别名让既有引用与测试完全兼容。
 import runtime
+import activation
 from runtime import hits, owner_label, load_owner, save_owner, _all_named
 from providers import (PROVIDER_CHAIN, AI_CLIENTS, MODEL_CHAINS, MODEL_CHAINS_DIGEST,
                        MODEL_CHAINS_JUDGE, _TIER_CHAINS, _provider_state, _key_idx,
@@ -439,7 +440,7 @@ def resolve_mode(mode):
 
 async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
                        context_hint="", is_random_banter=False, relation_note="",
-                       group_memory="", owner_label="", private=False):
+                       group_memory="", owner_label="", private=False, state_note=""):
     """根据当前模式生成回复。整段持session锁，保证上下文读写不会被并发请求撕裂。
 
     返回 (正文, 情感分值或 None)。分值为 None 表示这次没拿到模型给的记账标签
@@ -479,6 +480,10 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
             bits.append(prompts.PROMPT_BANTER_NOTE.strip())
         if context_hint:
             bits.append("【群聊最近背景】\n" + context_hint)
+        if state_note:
+            # 激活度（2026-10-19）：作息 + 心情的实时状态自述——深夜被吵醒/有点烦，
+            # 模型顺着这个体感说话。放最后一段，随轮次变化的内容一律压末尾。
+            bits.append(state_note)
         if config.AFFINITY_ENABLED and relation_note:
             # 关系档案：这条回复最该参考的「对具体某个人的长期印象」
             bits.append(relation_note)
@@ -1376,6 +1381,55 @@ async def digest_loop():
             logger.error("⚠️ 群记忆调度异常: %s", str(e)[:200])
 
 
+# ── 主动性（2026-10-19，麦麦/Agent Mind 式轻量版）──
+# 心情、作息、群温都合适时自己开个话头。话头取自最近的群聊背景——主动不等于凭空造梗。
+# 所有闸门在 activation.proactive_ok（4 小时间隔 / 群静默 10min~6h / 白天 / 心情不差）。
+_last_proactive = {}
+
+
+async def proactive_loop():
+    """主动性巡检：每 30 分钟看一眼，闸门全过就让模型照着最近的话题开个头。"""
+    while True:
+        await asyncio.sleep(config.PROACTIVE_CHECK_SECONDS)
+        try:
+            now = time.time()
+            hour = datetime.now().hour
+            mood_v = activation.current_mood(now)
+            # 挑最近还有活动的群（当前单群为主，结构上支持多群）
+            candidates = [(g, b) for g, b in group_buffers.items() if b]
+            if not candidates:
+                continue
+            gid, buf = max(candidates, key=lambda kv: max(
+                float(x.get("time") or 0) for x in kv[1]))
+            last_msg_ts = max(float(x.get("time") or 0) for x in buf)
+            ok, why = activation.proactive_ok(
+                mood_v, hour, now, _last_proactive.get(gid, 0), last_msg_ts)
+            if not ok:
+                continue
+            fresh = [b for b in buf if now - float(b.get("time") or 0)
+                     <= config.GROUP_BUFFER_TTL_SECONDS]
+            if len(fresh) < 2:
+                continue
+            topics = "\n".join(f"- {b.get('text', '')[:60]}" for b in fresh[-4:])
+            prompt = naming.render(prompts.PROMPT_PROACTIVE, topics=topics)
+            raw = await call_model([{"role": "user", "content": prompt}],
+                                   config.AI_MAX_TOKENS_BANTER)
+            body, _ = split_cmd(raw or "")
+            if not body or body.strip().upper() == "SKIP" or _garbage_run(body):
+                continue    # 模型自己觉得没得接/又抽风了——这轮不说话
+            # 主动发言也吃令牌桶 + 日预算（不弹限流提示，这轮跳过就行）
+            ok, _ = runtime.GROUP_BUCKET.try_acquire(gid)
+            if not ok or not runtime.BUDGET.try_consume():
+                continue
+            if await post_to_group(gid, body.strip()):
+                _last_proactive[gid] = time.time()
+                logger.info("🌙 [自发开口] 距上次群消息 %.0f 分钟", (time.time() - last_msg_ts) / 60)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("❌ 主动巡检异常（不影响主流程）: %s", e)
+
+
 # ── 承诺催债 ──
 
 def quiet_hour():
@@ -1784,11 +1838,17 @@ class GroupBot(botpy.Client):
                 # 权重不是概率 —— 基数不动，熟人 1.6×、生人 0.7×，整体话量不变。
                 rec = runtime.RELATIONS.get(group_id, sender_openid, create=False)
                 chance = banter_chance(chance, rec)
+                # 激活度（2026-10-19）：作息 × 心情折进插嘴意愿——凌晨被吵醒不太想搭话，
+                # 心情好更愿意接梗。这是纯乘数，基数与亲密度权重的语义都不动。
+                tier = relations.level_key((rec or {}).get("score", 0))
+                act_willingness, _act_turns, _act_line = activation.profile(tier)
+                chance = min(chance * act_willingness, config.BANTER_CHANCE_MAX)
                 if random.random() < chance:
                     should_reply = True
                     is_random = True
-                    logger.info("🎲 插嘴命中（亲密度权重 %.2f → 概率 %.3f，%s）",
-                                relations.banter_weight(rec), chance, sender_openid[-4:])
+                    logger.info("🎲 插嘴命中（激活度 %.2f × 亲密度权重 %.2f → 概率 %.3f，%s）",
+                                act_willingness, relations.banter_weight(rec),
+                                chance, sender_openid[-4:])
                     group_last_random_reply[group_id] = now
                     runtime.STATE.data["cooldowns"][group_id] = now
                     runtime.STATE.mark_dirty()
@@ -1807,6 +1867,7 @@ class GroupBot(botpy.Client):
 
         # 11. 组装群聊背景 + session，走 AI
         context_hint = ""
+        state_note = ""
         buf = group_buffers.get(group_id)
         if buf and len(buf) > 1:
             # ⚠️ 必须按时间过滤（2026-10-06 实测）：buffer 是落盘的、跨重启保留，
@@ -1815,7 +1876,12 @@ class GroupBot(botpy.Client):
             now_ts = time.time()
             fresh = [b for b in buf if now_ts - float(b.get("time") or 0)
                      <= config.GROUP_BUFFER_TTL_SECONDS]
-            prev = [b for b in fresh[:-1] if b["text"] != user_input][-3:]
+            # 关注度（2026-10-19）：亲密度决定背景条数——越熟的人它记得越多，
+            # 生人没必要也没资格让它看到太多背景。条数表见 activation.context_turns。
+            _rec = runtime.RELATIONS.get(group_id, sender_openid, create=False)
+            _tier = relations.level_key((_rec or {}).get("score", 0))
+            _willingness, _turns, state_note = activation.profile(_tier)
+            prev = [b for b in fresh[:-1] if b["text"] != user_input][-_turns:]
             if prev:
                 # 必须标出发言人。之前只给一串裸文本，模型分不清哪句是谁说的，
                 # 于是把别人认领的名字安到了当前这位头上 —— 叫错人就是这么来的
@@ -1883,7 +1949,7 @@ class GroupBot(botpy.Client):
             is_owner=is_owner, mode=active_mode,
             context_hint=context_hint, is_random_banter=is_random,
             relation_note=relation_note, group_memory=group_memory,
-            owner_label=owner_label(group_id),
+            owner_label=owner_label(group_id), state_note=state_note,
         )
         if owner_hint_pending(group_id):
             reply_text = f"{reply_text}\n{OWNER_CLAIM_HINT}"
@@ -1902,6 +1968,10 @@ class GroupBot(botpy.Client):
                 # reason 区分开是有用的：跑几天就能从日志里看出「模型判方向」和
                 # 「词表兜底」各自的占比与准头，再决定要不要把权重挪向压缩结算。
                 apply_affinity_delta_capped(group_id, sender_openid, delta, "模型判方向")
+            # 心情（2026-10-19）：跟着每轮结算漂移——被怼多了它会烦，被捧了会顺气。
+            # 零额外模型调用：方向值是现成的，心情只是它的指数移动平均。
+            if delta:
+                activation.note_mood(delta)
 
     async def on_c2c_message_create(self, message: Message):
         """私聊。以前这里连去重都没有，重复投递会重复扣额度。"""
@@ -2053,6 +2123,7 @@ def run_bot():
         loop.create_task(digest_loop())
     if config.PROMISE_ENABLED:
         loop.create_task(promise_loop())
+    loop.create_task(proactive_loop())
     loop.create_task(resend_queue_loop())
 
     attempt = 0
