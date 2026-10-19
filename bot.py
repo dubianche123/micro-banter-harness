@@ -13,6 +13,7 @@ import os
 import random
 import re
 import signal
+import shlex
 import sys
 import time
 import weakref
@@ -22,6 +23,7 @@ import aiohttp
 import certifi
 import botpy
 from botpy.connection import ConnectionState
+from botpy.errors import AuthenticationFailedError, ForbiddenError
 from botpy.message import GroupMessage, C2CMessage, Message
 
 import config
@@ -116,10 +118,15 @@ def install_ws_watchdog():
     async def patched(self, message_event, ws):
         _ws_watch["last_rx"] = time.time()
         _ws_watch["conn"] = ws
-        if STATUS.lifecycle not in {"starting", "stopped"}:
+        handled = await original(self, message_event, ws)
+        # READY is confirmed by on_ready; HELLO/heartbeats are not authentication.
+        if (STATUS.lifecycle not in {"stopped", "error"}
+                and message_event.get("op") == BotWebSocket.WS_DISPATCH_EVENT
+                and message_event.get("t") == "RESUMED"):
             STATUS.gateway_connected = True
             STATUS.lifecycle = "ready"
-        return await original(self, message_event, ws)
+            STATUS.write()
+        return handled
 
     BotWebSocket._is_system_event = patched
     _ws_watch["last_rx"] = time.time()
@@ -1425,12 +1432,49 @@ async def promise_loop():
 # ══════════════════════ 7. 机器人主体 ══════════════════════
 
 
+QQ_STARTUP_TIMEOUT_SECONDS = 60.0
+
+
+class QQStartupTimeout(TimeoutError):
+    """The initial gateway handshake did not confirm READY in time."""
+
+
 class GroupBot(botpy.Client):
+    startup_timeout = QQ_STARTUP_TIMEOUT_SECONDS
+
+    async def start(self, *args, **kwargs):
+        # botpy internally requeues failed WebSocket handshakes without raising.
+        # Its existing ready Event is confirmed in our on_ready callback.
+        runner = asyncio.create_task(super().start(*args, **kwargs))
+        ready = asyncio.create_task(self._ready.wait())
+        try:
+            done, _ = await asyncio.wait((runner, ready), timeout=self.startup_timeout,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                raise QQStartupTimeout()
+            return await runner  # once READY arrives, normal recovery has no deadline
+        finally:
+            ready.cancel()
+            if not runner.done():
+                runner.cancel()
+            await asyncio.gather(runner, ready, return_exceptions=True)
+
+    async def _bot_login(self, token):
+        try:
+            return await super()._bot_login(token)
+        except RuntimeError as error:
+            # botpy 1.2.1 uses a plain RuntimeError for a rejected token payload.
+            # Preserve its typed transport/server errors; never parse vendor text.
+            if type(error) is RuntimeError:
+                raise AuthenticationFailedError("QQ login did not return a usable token") from None
+            raise
+
     async def on_ready(self):
         _bot_ref["client"] = self
         STATUS.lifecycle = "ready"
         STATUS.gateway_connected = True
         STATUS.write()
+        self._ready.set()
         # 平台昵称登记进 naming：它是「附带别名」，不是触发词的权威来源 ——
         # 只会往 bot_names() 里**多加**一个叫法，顶不掉 .env 的 BOT_NAMES；
         # 而且登录时读一次，改了 QQ 昵称要重启进程才会生效。
@@ -2012,6 +2056,9 @@ def _run_bot():
     if runtime.SESSIONS._sessions:
         logger.info("💾 已恢复 %s 个会话上下文", len(runtime.SESSIONS._sessions))
 
+    _bot_ref["client"] = None
+    STATUS.lifecycle = "starting"
+    STATUS.gateway_connected = False
     STATUS.configure(config.STATUS_FILE, lambda: {
         "providers": providers.status(),
         "budget": {"day": runtime.BUDGET.today(), "used": runtime.BUDGET.used,
@@ -2037,41 +2084,68 @@ def _run_bot():
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
 
+    return _connect_bot()
+
+
+def _login_failure(reason):
+    command = shlex.join(["regular", "--directory", config.BASE_DIR, "run"])
+    logger.error("❌ %s。请核对 %s 中的 QQ_APP_ID / QQ_APP_SECRET、QQ 后台权限和网络，"
+                 "修正后运行：%s", reason, os.path.join(config.BASE_DIR, ".env"), command)
+
+
+def _connect_bot():
+    deadline = time.monotonic() + QQ_STARTUP_TIMEOUT_SECONDS
     attempt = 0
     while True:
         started_at = time.time()
         try:
             intents = botpy.Intents(public_messages=True, public_guild_messages=True)
-            # timeout：QQ API 的 HTTP 超时（botpy 默认 5s，见 config.QQ_API_TIMEOUT 的注释）
             client = GroupBot(intents=intents, timeout=int(config.QQ_API_TIMEOUT),
                               ext_handlers=False)
+            client.startup_timeout = (max(0, deadline - time.monotonic())
+                                      if _bot_ref.get("client") is None else None)
+            logger.info("📡 正在连接 QQ；收到鉴权后的 READY 才表示上线成功")
             client.run(appid=config.QQ_APP_ID, secret=config.QQ_APP_SECRET)
-            attempt = 0
+            return 0  # botpy also returns normally when Ctrl+C stops its runner.
+        except QQStartupTimeout:
+            STATUS.lifecycle = "error"
+            _login_failure("首次连接在 %.0f 秒内未收到 QQ READY" % QQ_STARTUP_TIMEOUT_SECONDS)
+            return 1
+        except (AuthenticationFailedError, ForbiddenError) as error:
+            STATUS.lifecycle = "error"
+            _login_failure("QQ 登录或权限检查失败（" + type(error).__name__ + "）")
+            return 1
         except SystemExit:
             raise
-        except Exception as e:
-            attempt += 1
-            logger.error("⚠️ 机器人连接异常中断: %s", str(e)[:200])
         except KeyboardInterrupt:
-            logger.warning("🛑 收到 Ctrl+C")
-            raise
+            logger.info("🛑 已停止")
+            return 0
+        except Exception as error:
+            attempt += 1
+            logger.error("⚠️ QQ 连接失败：%s", type(error).__name__)
+            if _bot_ref.get("client") is None and attempt >= 3:
+                STATUS.lifecycle = "error"
+                _login_failure("首次连接连续 3 次未能上线")
+                return 1
+            STATUS.lifecycle = "reconnecting"
         finally:
             STATUS.gateway_connected = False
-            STATUS.lifecycle = "reconnecting"
             STATUS.write()
             try:
                 runtime.STATE.save_now(force=True)
-            except Exception as e:
-                logger.error("❌ 落盘失败: %s", e)
+            except Exception as error:
+                logger.error("❌ 落盘失败：%s", type(error).__name__)
 
-        # 指数退避 + 抖动：连续失败越拖越长，稳定跑一段就把计数归零
+        # Keep recovery after a successful login; bound failures before first READY.
         uptime = time.time() - started_at
-        if uptime > config.RESET_BACKOFF_AFTER:
+        if uptime > config.RESET_BACKOFF_AFTER and _bot_ref.get("client") is not None:
             attempt = 0
             delay = config.RECONNECT_MIN_DELAY
         else:
             delay = min(config.RECONNECT_MAX_DELAY, config.RECONNECT_MIN_DELAY * (2 ** max(0, attempt - 1)))
             delay *= random.uniform(0.8, 1.2)
+        if _bot_ref.get("client") is None:
+            delay = min(delay, max(0, deadline - time.monotonic()))
         logger.info("🔁 %.1f 秒后重连（第 %d 次尝试）", delay, attempt + 1)
         time.sleep(delay)
 
@@ -2091,19 +2165,24 @@ async def _shutdown(*, cancel_all=False):
 
 
 def run_bot():
+    exit_code = 0
     try:
-        return _run_bot()
+        exit_code = _run_bot()
+        return exit_code
     finally:
-        STATUS.lifecycle = "stopped"
+        STATUS.lifecycle = "error" if exit_code else "stopped"
         STATUS.gateway_connected = False
         STATUS.write()
         try:
-            loop = asyncio.get_event_loop()
-            if not loop.is_closed() and not loop.is_running():
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None and not loop.is_closed() and not loop.is_running():
                 loop.run_until_complete(_shutdown(cancel_all=True))
         finally:
             runtime.STATE.save_now(force=True)
 
 
 if __name__ == "__main__":
-    run_bot()
+    raise SystemExit(run_bot())

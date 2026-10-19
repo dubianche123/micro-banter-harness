@@ -45,13 +45,18 @@ def _prompt_configuration(values, directory, *, missing_only=False, fresh=True):
         if missing_only and name in os.environ:
             blocked.append(name)
             return
-        if secret:
-            # Refuse getpass's echoing fallback if a terminal becomes unavailable.
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", getpass.GetPassWarning)
-                values[name] = getpass.getpass(label)
-        else:
-            values[name] = input(label).strip()
+        while True:
+            if secret:
+                # Refuse getpass's echoing fallback if a terminal becomes unavailable.
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", getpass.GetPassWarning)
+                    value = getpass.getpass(label)
+            else:
+                value = input(label).strip()
+            if value.strip():
+                values[name] = value
+                return
+            print("This setting is required; enter a value or press Ctrl+C to cancel.")
 
     ask("QQ_APP_ID", "QQ App ID: ")
     ask("QQ_APP_SECRET", "QQ App secret (hidden): ", secret=True)
@@ -59,7 +64,12 @@ def _prompt_configuration(values, directory, *, missing_only=False, fresh=True):
         if not missing_only or "BOT_NAMES" not in os.environ:
             values["BOT_NAMES"] = input("Bot names (optional, comma separated): ").strip()
     if not missing_only or (fresh and "AI_PROVIDER" not in os.environ):
-        values["AI_PROVIDER"] = input("Provider [openai/zhipu/gemini, default openai]: ").strip().lower() or "openai"
+        while True:
+            provider = input("Provider [openai/zhipu/gemini, default openai]: ").strip().lower() or "openai"
+            if provider in ("openai", "zhipu", "gemini"):
+                values["AI_PROVIDER"] = provider
+                break
+            print("Choose openai, zhipu or gemini; Enter uses openai.")
     provider = effective("AI_PROVIDER").strip().lower() or "openai"
     if provider not in ("openai", "zhipu", "gemini"):
         raise ValueError("Provider must be openai, zhipu or gemini")
@@ -170,7 +180,7 @@ def _doctor_result(rows, network, as_json):
     else:
         for row in rows:
             print(f"[{row['state'].upper()}] {row['check']}: {row['detail']}")
-        print("No model inference was made. Missing QQ credentials are expected before init/configuration.")
+        print("No model inference was made.")
     return 0 if result["ok"] else 1
 
 
@@ -190,7 +200,7 @@ def doctor(config, *, network=False, as_json=False, dependency_error=None):
         return _doctor_result(rows, False, as_json)
     for error in config.validate():
         add("configuration", "error", error)
-    add("bot_names", "ok" if config.BOT_NAMES else "warning",
+    add("bot_names", "ok",
         ", ".join(config.BOT_NAMES) if config.BOT_NAMES else "No aliases; only platform nickname/mentions will trigger replies")
     add("owner_claim", "ok", "first non-empty private message; existing owner is retained; group messages cannot claim ownership")
     add("tls", "ok" if config.SSL_VERIFY else "warning", "verified" if config.SSL_VERIFY else "verification disabled")
@@ -375,8 +385,7 @@ def main(argv=None):
                 print(f"Run {_command(Path(args.directory).expanduser().resolve(), 'setup')}.", file=sys.stderr)
                 return 1
             import bot
-            bot.run_bot()
-            return 0
+            return bot.run_bot() or 0
         if not args.allow_paid:
             parser.error("probe requires --allow-paid; it makes real model requests")
         source_root = Path(__file__).resolve().parent.parent

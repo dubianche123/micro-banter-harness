@@ -2,6 +2,11 @@
 
 ## 0.2.0 — 2026-10-20 (source update)
 
+- Make first launch actionable: stop rejected QQ authentication, bound failures
+  before first login, retain recovery after login, and confirm readiness only after
+  gateway authentication. Keep rejected token payloads out of error summaries.
+- Validate required setup input immediately and treat optional aliases as optional.
+
 - Use one bounded provider request policy and explicit OpenAI-compatible endpoints/model chains; keep vendor presets as optional setup shortcuts. Image reading inherits the main provider and first chat model by default, with optional independent provider/model overrides.
 - Add installable `regular` CLI: offline demo, private configuration initialization,
   guided setup that fills missing settings and runs local checks, explicit metadata

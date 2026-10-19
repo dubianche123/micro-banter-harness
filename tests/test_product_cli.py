@@ -174,6 +174,30 @@ class SetupTest(unittest.TestCase):
             self.assertNotIn("qq-secret", output.getvalue())
             self.assertNotIn("model-secret", output.getvalue())
 
+    def test_required_inputs_retry_immediately_and_optional_inputs_accept_enter(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True), \
+             patch("sys.stdin.isatty", return_value=True), \
+             patch("builtins.input", side_effect=["", "  ", "123", "", "bogus", "", "", "https://gateway.invalid/v1", " ", "chat-model"]) as question, \
+             patch("getpass.getpass", side_effect=["", "qq-secret", "   ", "model-secret"]) as secret, \
+             patch("regular.cli.load_config", return_value=object()), \
+             patch("regular.cli.doctor", return_value=0), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli.setup(directory), 0)
+            from dotenv import dotenv_values
+            values = dotenv_values(Path(directory) / ".env", interpolate=False)
+            self.assertEqual(values["QQ_APP_ID"], "123")
+            self.assertEqual(values["QQ_APP_SECRET"], "qq-secret")
+            self.assertEqual(values["BOT_NAMES"], "")
+            self.assertEqual(values["AI_PROVIDER"], "openai")
+            self.assertEqual(values["OPENAI_BASE_URL"], "https://gateway.invalid/v1")
+            self.assertEqual(values["OPENAI_MODELS"], "chat-model")
+            self.assertEqual(values["OPENAI_API_KEY"], "model-secret")
+            self.assertEqual(question.call_count, 10)
+            self.assertEqual(secret.call_count, 4)
+            self.assertIn("This setting is required", output.getvalue())
+            self.assertIn("Choose openai, zhipu or gemini", output.getvalue())
+            self.assertNotIn("qq-secret", output.getvalue())
+            self.assertNotIn("model-secret", output.getvalue())
+
     def test_existing_setup_only_fills_missing_values_and_preserves_comments(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True), \
              patch("sys.stdin.isatty", return_value=True), patch("builtins.input") as question, \
@@ -270,6 +294,13 @@ class SetupTest(unittest.TestCase):
              contextlib.redirect_stderr(io.StringIO()) as output:
             self.assertEqual(cli.main(["--directory", directory, "run"]), 1)
             self.assertIn(cli._command(Path(directory).resolve(), "setup"), output.getvalue())
+
+    def test_run_preserves_runtime_exit_status(self):
+        for runtime_result, expected in ((None, 0), (0, 0), (1, 1)):
+            with self.subTest(result=runtime_result), \
+                 patch("regular.cli.load_config", return_value=SimpleNamespace(validate=lambda: [])), \
+                 patch.dict(sys.modules, {"bot": SimpleNamespace(run_bot=lambda: runtime_result)}):
+                self.assertEqual(cli.main(["run"]), expected)
 
     def test_setup_does_not_create_clients_or_import_the_runtime(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -376,6 +407,8 @@ class StatusTest(unittest.TestCase):
                                      "doctor", "--json"], env=env, cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             rows = {row["check"]: row for row in json.loads(result.stdout)["checks"]}
+            self.assertEqual(rows["bot_names"]["state"], "ok")
+            self.assertIn("platform nickname/mentions", rows["bot_names"]["detail"])
             self.assertIn("first non-empty private message", rows["owner_claim"]["detail"])
             self.assertIn("usage scope", rows["qq_permissions"]["detail"])
             self.assertEqual(rows["qq_permissions"]["state"], "manual")
@@ -383,6 +416,12 @@ class StatusTest(unittest.TestCase):
             self.assertIn("inherited", rows["vision"]["detail"])
             self.assertIn("unverified", rows["vision"]["detail"])
             self.assertNotIn("fake-secret", result.stdout)
+
+    def test_successful_local_doctor_does_not_suggest_missing_credentials(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli._doctor_result([], False, False), 0)
+        self.assertIn("No model inference was made", output.getvalue())
+        self.assertNotIn("Missing QQ credentials", output.getvalue())
 
     def test_doctor_network_includes_the_separate_vision_endpoint_without_inference(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -2,7 +2,7 @@
 
 <img src="docs/readme/cover.svg" alt="The Regular project overview" width="100%" />
 
-# The Regular
+# The Regular — QQ AI Group Chat Bot
 
 **A resident group-chat companion with code-owned relationships and memory.**
 
@@ -108,6 +108,10 @@ intended owner or test members. Then start:
 ```bash
 regular run
 ```
+
+Wait for the logged online confirmation before treating QQ as connected. Rejected
+credentials or permissions stop startup. The first login waits at most
+60 seconds, and repeated connection failures can stop earlier with guidance; fix `.env` and rerun `regular run`.
 
 **The intended owner's first private message automatically claims the bot.**
 No phrase or extra confirmation is needed; that message receives its normal
