@@ -176,7 +176,7 @@ from providers import (PROVIDER_CHAIN, AI_CLIENTS, MODEL_CHAINS, MODEL_CHAINS_DI
                        _is_fatal_fail, _note_provider_fail, _note_provider_ok,
                        call_model, probe_provider)
 from affinity import (apply_relation_delta, affinity_budget, apply_affinity_delta_capped,
-                      apply_digest_affinity, _affinity_ledger)
+                      apply_digest_affinity, apply_digest_modes, _affinity_ledger)
 from nicking import (extract_mentions, mention_nicks_from_content, mention_nick_from_content,
                      learn_display_names, mention_label_for, _strip_call, refresh_names,
                      _sync_rename, _sync_clear, _reserved_nick_names, nick_locked,
@@ -1348,6 +1348,11 @@ async def run_digest(group_id, reason=""):
                 logger.info("💗 压缩结算好感度：%d 人（%s）", n_aff, detail)
             else:
                 logger.info("💗 压缩结算好感度：本段时间没有人的态度明显变化")
+            # 相处模式（2026-10-19，硬枚举）：压缩按真实互动提案，代码只认白名单
+            n_mode, mode_detail = apply_digest_modes(
+                group_id, (result.get("data") or {}).get("people"))
+            if n_mode:
+                logger.info("🎭 相处模式更新：%d 人（%s）", n_mode, mode_detail)
 
         # 当天的人话版 MD，平时看这个就够，出错再回 archive/ 查原文
         if config.DIGEST_WRITE_MD:

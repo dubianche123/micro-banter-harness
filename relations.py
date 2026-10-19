@@ -184,6 +184,35 @@ def clamp_score(score):
     return max(SCORE_MIN, min(SCORE_MAX, int(score)))
 
 
+def _growth_scale(score):
+    """正向好感步长的边际递减（2026-10-19 群主要求的非线性）：关系越往上爬越慢。
+
+    30 分以下全额，往上逐档打折——本命档 +3 只算 +1，爬到 100 是真要用心的。
+    **负向不受影响**：信任建立慢、崩起来快，这才是真人关系的形状。
+    （非线性骨架本就有：久不联系衰减 + 台阶间隔不均匀 + 日上限；补的是增长端。）
+    """
+    if score < 30:
+        return 1.0
+    if score < 60:
+        return 0.6
+    if score < 85:
+        return 0.4
+    return 0.3
+
+
+# ── 相处模式（2026-10-19，群主要求「硬的」）──
+# 白名单枚举：压缩可以**提案**，代码只认这几个词——编造的一律丢弃，
+# 漂移在构造上不可能（Mem0 式写入前裁决的姊妹篇：提案自由、词表硬约束）。
+# 渲染进 build_relation_note，与档位提示叠加：模式管「风格倾向」，
+# 档位管「分寸上限」，档位的硬规则（损一句/认怂）永远优先于模式。
+PERSONA_MODES = {
+    "损友": "你们之间的主旋律就是互相开涮，损是常态也是默契——但深度仍按档位分寸来",
+    "知心": "少损多听：他说话你认真接，情绪价值优先，损只是偶尔的点缀",
+    "护短": "你自动站他那边：别人怼他你先不乐意，他错了你也先护一轮再说",
+    "捧场": "更多时候你是他的观众：接他的梗、捧他的场，少主动挑他毛病",
+}
+
+
 def _fmt_span(seconds):
     """把秒数说成人话。"""
     if seconds < 60:
@@ -318,6 +347,11 @@ class RelationStore:
         old_level = level_key(old_score)
         self._settle(rec, now)
         step = clamp_delta(delta) if span is None else max(-span, min(span, int(delta)))
+        # 非线性增长（2026-10-19 群主要求）：亲密度越高，正向步长越小——
+        # 关系越往上爬越慢（本命档 +3 只算 +1）；**下跌不缩水**：信任建立慢、
+        # 崩起来快，这才是真人关系的形状。
+        if step > 0:
+            step = max(1, round(step * _growth_scale(old_score)))
         rec["score"] = clamp_score(rec["score"] + step)
         if pinned:
             rec["score"] = SCORE_MAX      # 顶格：单次 ±3 也动摇不了
@@ -356,6 +390,22 @@ class RelationStore:
         rec = self.get(group_id, member_openid)
         rec["nick"] = nick or None
         return rec.get("nick")
+
+    def set_mode(self, group_id, member_openid, mode, source):
+        """写入相处模式（2026-10-19，硬枚举）。
+
+        source 只有 "digest"（压缩按真实互动提案）和 "owner"（群主钦点）两种，
+        其他一律拒绝——与主名同构：**模式不是模型随口玩的东西**。
+        且 mode 必须在 PERSONA_MODES 白名单里，编造的词直接丢弃。
+        返回写入的 rec，拒绝时返回 None。
+        """
+        if source not in ("digest", "owner"):
+            return None
+        if mode not in PERSONA_MODES:
+            return None
+        rec = self.get(group_id, member_openid)
+        rec["mode"] = mode
+        return rec
 
     def main_names(self, group_id, exclude_openid=None):
         """本群当前所有主名。两个用途，都是「不许碰」的意思：
@@ -452,6 +502,13 @@ def build_relation_note(rec, member_openid, mode="normal", now=None, other_names
         lines.append(f"- TA 让你叫：{nick}（这是 TA 自己认领的称呼，直接用）")
     else:
         lines.append("- TA 没告诉过你名字，不要凭空编称呼，直接用「哥们/这位同学」这类泛称对话")
+
+    # 相处模式（2026-10-19，硬枚举）：模式定「风格倾向」，档位定「分寸上限」——
+    # 分寸的硬规则（损一句/认怂）永远优先于模式。
+    mode = rec.get("mode")
+    if mode in PERSONA_MODES:
+        lines.append(f"- 跟 TA 的相处模式：{PERSONA_MODES[mode]}。"
+                     "模式定风格，档位定分寸——分寸的硬规则永远优先")
 
     # 别人的称呼只属于别人。这一条是治「叫错人」的：背景里出现的名字不等于眼前这位。
     # 只报称呼、不报 openid 尾巴：这段是喂给模型的，它一复读，群里看到的就是乱码。

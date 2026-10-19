@@ -141,6 +141,38 @@ def apply_digest_affinity(group_id, rows):
     return applied, "、".join(notes)
 
 
+def apply_digest_modes(group_id, rows):
+    """把压缩提案的「相处模式」落进关系档案（2026-10-19，硬枚举）。
+
+    白名单硬约束：relations.PERSONA_MODES 里没有的词一律丢弃——提案自由、
+    词表硬约束，漂移在构造上不可能。名字对不上 openid 的同样宁可不设。
+    返回 (生效人数, 明细文本)。
+    """
+    if not config.AFFINITY_ENABLED or not rows:
+        return 0, ""
+    by_nick = {}
+    for oid, rec in _all_named(group_id):
+        nick = (rec.get("nick") or "").strip()
+        if nick:
+            by_nick.setdefault(nick, oid)
+    applied, notes = 0, []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        who = str(row.get("who") or row.get("Who") or "").strip()
+        mode = str(row.get("mode") or "").strip()
+        target = by_nick.get(who)
+        if not target or not mode:
+            continue
+        rec = runtime.RELATIONS.set_mode(group_id, target, mode, source="digest")
+        if rec is not None:
+            applied += 1
+            notes.append(f"{who}={mode}")
+    if applied:
+        runtime.STATE.mark_dirty()
+    return applied, "、".join(notes)
+
+
 def _affinity_ledger(group_id):
     """给压缩结算看的「关系底账」：每个人现在站在哪个交情档位。
 
