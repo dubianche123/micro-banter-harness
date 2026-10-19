@@ -43,6 +43,13 @@ class CloseTierKeepsTeasingInBoundTest(unittest.TestCase):
     def test_top_tier_forbids_roasting_kindness(self):
         self.assertIn("好意", relations.LEVEL_HINTS["soulmate"])
 
+    def test_owner_teasing_you_means_yield_not_counterfire(self):
+        """2026-10-19 群主「有点爱顶嘴了」：他本人连着逗你时，模型回回满力怼回去——
+        「损一句就收」只管一段话内的配比，管不住跨轮次的连续顶嘴。本命档明确：
+        被大哥逗，认怂比赢好笑。"""
+        self.assertIn("认怂", relations.LEVEL_HINTS["soulmate"])
+        self.assertIn("绝不逐句对轰", relations.LEVEL_HINTS["soulmate"])
+
     def test_close_tiers_are_instructed_to_take_his_side(self):
         self.assertIn("站他那边的", relations.LEVEL_HINTS["friend"])
         self.assertIn("站他那边", relations.LEVEL_HINTS["buddy"])
