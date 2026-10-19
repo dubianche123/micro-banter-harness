@@ -1,4 +1,4 @@
-# micro-banter-harness
+# the-regular-qq-bot
 
 > Historical design and experiment notes: these measurements, failures and trade-offs describe an early deployment, not current setup instructions or a guarantee for other accounts/models. Use the [README](../README_EN.md) for installation, automatic private-chat ownership and services, and [provider configuration](providers.md) for model/image setup.
 
@@ -298,4 +298,4 @@ Run the tests (fully offline, no network or keys):
 
 MIT — use it for anything, commercial included. The bot stands behind what it says; I do not.
 
-<p align="center"><sub>micro-banter-harness — The Regular · Code holds the state; the model only puts it into words.</sub></p>
+<p align="center"><sub>the-regular-qq-bot — The Regular · Code holds the state; the model only puts it into words.</sub></p>

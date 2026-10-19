@@ -11,6 +11,11 @@ license = "MIT"
 license-files = ["LICENSE"]
 dynamic = ["version", "dependencies"]
 
+[project.urls]
+Homepage = "https://github.com/dubianche123/the-regular-qq-bot"
+Repository = "https://github.com/dubianche123/the-regular-qq-bot"
+Issues = "https://github.com/dubianche123/the-regular-qq-bot/issues"
+
 [project.scripts]
 regular = "regular.cli:main"
 

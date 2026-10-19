@@ -2,6 +2,9 @@
 
 ## 0.2.0 — 2026-10-20 (source update)
 
+- Rename the GitHub repository to `the-regular-qq-bot` for clearer QQ bot discovery;
+  update source links while keeping the `regular` command and `the-regular` package.
+
 - Make first launch actionable: stop rejected QQ authentication, bound failures
   before first login, retain recovery after login, and confirm readiness only after
   gateway authentication. Keep rejected token payloads out of error summaries.

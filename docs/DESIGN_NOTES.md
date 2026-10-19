@@ -1,4 +1,4 @@
-# micro-banter-harness
+# the-regular-qq-bot
 
 > 历史设计与实验笔记：保留早期群聊运行的测量、失败案例与设计取舍，不作为当前配置指南，也不代表其他账号或模型的表现。当前安装、私聊自动认主和常驻方式见 [README](../README.md)，模型及独立识图配置见[供应商配置](providers.md)。
 
@@ -300,4 +300,4 @@ flowchart TD
 
 MIT —— 随便用，包括商用。机器人说的话它自己负责，出了事别找我。
 
-<p align="center"><sub>micro-banter-harness —— The Regular · 状态由代码持有，模型只负责把状态说成人话。</sub></p>
+<p align="center"><sub>the-regular-qq-bot —— The Regular · 状态由代码持有，模型只负责把状态说成人话。</sub></p>

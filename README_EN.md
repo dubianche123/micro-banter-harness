@@ -6,7 +6,7 @@
 
 **A resident group-chat companion with code-owned relationships and memory.**
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-5375B5)](requirements.txt) [![Offline checks](https://github.com/dubianche123/micro-banter-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/dubianche123/micro-banter-harness/actions/workflows/ci.yml) [![QQ](https://img.shields.io/badge/QQ-Group%20%2B%20C2C-B48543)](bot.py) [![License](https://img.shields.io/badge/License-MIT-3A9F82)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-5375B5)](requirements.txt) [![Offline checks](https://github.com/dubianche123/the-regular-qq-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/dubianche123/the-regular-qq-bot/actions/workflows/ci.yml) [![QQ](https://img.shields.io/badge/QQ-Group%20%2B%20C2C-B48543)](bot.py) [![License](https://img.shields.io/badge/License-MIT-3A9F82)](LICENSE)
 
 [中文](README.md) · **English**
 
@@ -70,8 +70,8 @@ This layout creates opportunities for prefix caching. Actual cache behavior depe
 Python 3.10+ is required; Python 3.12 is recommended. No database is needed.
 
 ```bash
-git clone https://github.com/dubianche123/micro-banter-harness.git
-cd micro-banter-harness
+git clone https://github.com/dubianche123/the-regular-qq-bot.git
+cd the-regular-qq-bot
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
