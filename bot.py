@@ -178,6 +178,16 @@ from providers import (PROVIDER_CHAIN, AI_CLIENTS, MODEL_CHAINS, MODEL_CHAINS_DI
                        call_model, probe_provider)
 from affinity import (apply_relation_delta, affinity_budget, apply_affinity_delta_capped,
                       apply_digest_affinity, apply_digest_modes, _affinity_ledger)
+# 背景前言：每条背景都挂的同一段「读法说明」。[图片：…] 引导是 2026-10-19 补的——
+# 异步描述落在背景里之后，模型面对「这是什么」还会装瞎开玩笑（实测「糊得像马赛克」）。
+_BG_PREAMBLE = ("（注意：下面每一句开头都标了发言人 —— 这些话是「他们」说的，"
+                "不是眼前这位说的。别把别人干的蠢事算到当前说话人头上，"
+                "引用谁的言行就对准谁的名字，拿不准是谁就别点名；"
+                "也别刻意复读这些内容。"
+                "带 [图片：…] 标记的行是机器对那张图的客观描述——"
+                "有人问「这图是什么」，答案就在那里，照着说，别装作没看见）")
+
+
 from nicking import (extract_mentions, mention_nicks_from_content, mention_nick_from_content,
                      learn_display_names, mention_label_for, _strip_call, refresh_names,
                      _sync_rename, _sync_clear, _reserved_nick_names, nick_locked,
@@ -1639,7 +1649,6 @@ class GroupBot(botpy.Client):
         await self.handle_group_msg(message, is_at=True)
 
     async def handle_group_msg(self, message: GroupMessage, is_at: bool = False):
-        
 
         # 1. 去重：同一条消息可能被多个事件重复投递
         if message.id in processed_msg_ids:
@@ -1951,6 +1960,11 @@ class GroupBot(botpy.Client):
                     _caption_cache[image_url] = caption
             if caption:
                 user_input = f"{user_input}\n[图片：{caption}]"
+            elif "[图片]" in user_input:
+                # 读不出来就直说——模型看不见图时会开始瞎编（实测「糊得像马赛克」）
+                user_input = (f"{user_input}\n"
+                              "（这张图你读不出来：别装作看见了，更别评价画质——"
+                              "直接说没看懂，请对方描述一下或重发一张清晰的）")
 
         if is_at and not user_input:
             me = naming.bot_name()
@@ -1994,10 +2008,7 @@ class GroupBot(botpy.Client):
                 # ⚠️ 这行是对着「爱翻旧账的模型」写的（实测 Gemini 会把背景里别人的言行安到
                 # 当前说话人头上，一晚上把「当猫娘」安给了三个人）。所以要点名三件事：
                 # 每句都有主、主语不是眼前这位、引用前先核对名字。
-                context_hint = ("（注意：下面每一句开头都标了发言人 —— 这些话是「他们」说的，"
-                                "不是眼前这位说的。别把别人干的蠢事算到当前说话人头上，"
-                                "引用谁的言行就对准谁的名字，拿不准是谁就别点名；"
-                                "也别刻意复读这些内容）\n" + context_hint)
+                context_hint = _BG_PREAMBLE + "\n" + context_hint
 
         active_mode = current_mode
         if is_fortune and current_mode == "normal":
