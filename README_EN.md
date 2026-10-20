@@ -14,54 +14,53 @@
 
 </div>
 
-The Regular lives in a QQ group as a recurring character: usually quiet, occasionally opinionated, and increasingly familiar with the people around it. It has nicknames, relationship tiers, interaction modes, a daily rhythm and mood, a rolling group chronicle and a promise ledger.
+Most group-chat bots wear out their welcome in three days: they reply to every message like a helpdesk ticket, speak to strangers and old friends in the exact same tone, and forget yesterday's running jokes the moment the context window slides.
 
-Under that social surface is a small agent harness: **code holds durable state, an activation policy decides when to speak, and models generate language inside a deliberately ordered context**. Local commands and configured provider fallbacks keep every interaction from depending on one large model call.
+The Regular lives in a QQ group like an actual regular: mostly lurking, occasionally chiming in when the mood strikes, and gradually building history with the people in the room. It tracks per-group nicknames, eight relationship tiers, four interaction modes (`banter`, `confidant`, `defender`, `hype`), a circadian clock (complete with 3 a.m. wake-up grumpiness), a 6-hour mood half-life, a rolling group chronicle (`群史记`), and a promise ledger.
 
-**First use:** [Install](#quick-start), follow the setup wizard, start the bot, then send one private message to claim ownership. To try it without credentials, use `regular demo`.
+Underneath that social surface is a compact agent harness: **Python owns the durable ledger and activation gates, while the LLM only generates dialogue inside a cache-friendly, four-layer prefix**. Combined with zero-token local handlers and multi-provider fallback, everyday group banter doesn't require burning a heavyweight model call on every message.
+
+**First use:** [Install](#quick-start), follow the setup wizard, start the bot, and send it one private message to claim ownership. Want to try it before setting up QQ or API keys? Run `regular demo`.
 
 ## What you can try
 
-| Interaction | What is implemented |
+| Interaction | How the code actually handles it |
 | --- | --- |
-| A familiar voice | Eight relationship tiers influence tone and activation; code applies scores, nonlinear growth, decay and limits. |
-| A different way of getting along with each person | The digest proposes an interaction mode (banter/confidant/defender/hype) from real interactions; a hard whitelist validates it into the archive. |
-| A character that can stay quiet | Mention/name triggers, probability, cooldown, quiet hours, mood and affinity control replies. |
-| Understand the images people send | A configured vision model captions images; results are reused by message identity under budget and vision limits. |
-| Local games and lookups | Dice, relationship queries, rankings and ledger lookup have local handlers. |
-| Rename a group member | Per-group identity, owner permissions, name checks and rename cooldowns. |
-| Change the atmosphere | Shared personality modes; eligibility is resolved from local state. |
-| Remember without replaying everything | Local raw-message archive plus a rolling digest assembled from the old digest and new messages. |
-| Keep a provider failure visible and bounded | Configured task tiers, provider fallback, connection recovery and recorded design probes. |
+| **Tone shifts as you get closer** | Eight relationship tiers (from `distant` to `soulmate`) are scored in Python. Daily affinity budgets are **asymmetric** (generous on gains, strict on losses) so a single off-kilter model judgement can't tank a weeks-old friendship back to stranger status. |
+| **Different dynamic with each person** | Instead of forcing the model to append a self-grading JSON blob on every chat turn, the daily digest reviews the full day's conversation and proposes affinity deltas plus an interaction mode (`banter` / `confidant` / `defender` / `hype`), enforced against a hard whitelist. |
+| **Circadian rhythm, mood, and knowing when to stay quiet** | Replies are gated by mentions, probability, cooldowns, time of day, mood, and affinity. Messages between 00:00 and 06:00 cut chime-in willingness to `0.45x` and inject "just woken up, keep it short and grumpy" into the turn state; mood decays toward neutral with a **6-hour half-life** (morning annoyance fades by evening). |
+| **Closer friends get deeper context** | Affinity controls how much recent group chatter is pulled into the turn (`soulmate` sees 10 messages; `distant` sees 2—no need to dig up old history with someone it barely knows). |
+| **Per-group nicknames that the model can't overwrite** | Self-claimed or owner-assigned nicknames live in per-group storage. Names mentioned in daily model digests are used strictly for **one-way lookup** to apply affinity deltas—never to overwrite a user's canonical nickname. |
+| **Reads group images once** | A vision model captions incoming images and caches descriptions by message ID under independent daily budget caps. |
+| **Zero-token local games & lookups** | `掷骰子` (dice), `查好感` (affinity), `关系榜` (leaderboard), `群史记` (chronicle), `查账` (promise ledger), and `翻旧账` (archive search) run entirely in local Python handlers with 0 tokens. |
+| **Shared group atmosphere modes** | Switch into catgirl, unhinged, disciplinary, fortune-teller, or banter modes; gated by local affinity (`familiar` or higher) so drive-by strangers can't derail the room. |
 
 ## One message, three possible routes
 
 ![Routing, code-owned state and generated replies](docs/readme/flow.svg)
 
-| Example input | Route | What changes |
+| Example input | Route | What happens under the hood |
 | --- | --- | --- |
-| `查好感` | Local relationship lookup | Reads the current state; it does not ask a model to invent a score. |
-| `掷骰子` | Local game handler | Produces a game result and applies the coded relationship effect. |
-| `叫我小林` | Naming flow | Checks permissions/name policy, optionally reviews the name, then updates the per-group name record. |
-| `@<bot> 今天吃什么` | Generated reply | Builds ordered context, calls the configured provider, checks/records the reply. |
-| Ordinary unmentioned chatter | Activation gate | May stay quiet; qualifying messages may trigger a generated interjection. |
+| `查好感` / `关系榜` | Local relationship lookup | Reads directly from the local ledger instead of asking an LLM to hallucinate a score. |
+| `掷骰子` / `决斗` | Local game handler | Rolls locally and applies the coded affinity delta for wins/losses. |
+| `叫我小林` | Naming flow | Checks owner locks, word filters, and cooldowns before updating the group-scoped nickname. |
+| `@<bot> 今天吃什么` | Generated reply | Assembles the 4-layer context prefix, calls the configured provider tier, and sanitizes the output. |
+| Unmentioned group chatter | Activation gate | Checks cooldown, circadian factor, mood, and affinity dice; stays quiet and archives the message if it doesn't fire. |
 
-These examples describe routes, not exact model replies. A code-owned score prevents the language model from directly rewriting the relationship counter; it does not make every sentence factually reliable.
+Keeping the ledger in Python means **the model never gets write access to relationship counters**—it can roast you in character, but it cannot accidentally wipe out your affinity score.
 
 ## The context has an order
 
-The ordering in [get_ai_reply()](bot.py) keeps stable material ahead of changing material:
+[get_ai_reply()](bot.py) orders the prompt from most stable to most volatile so provider prefix caches can actually hit:
 
 | Layer | Contents | Why it sits here |
 | --- | --- | --- |
-| 1 · Stable head | Persona, shared rules, output rules, optional protocol | Shared within the same group/persona configuration. |
-| 2 · Group memory | The current rolling digest | Changes when compression refreshes it. |
-| 3 · Session history | Accepted conversation turns | Extends the existing prefix. |
-| 4 · This turn | Speaker relationship, nearby chatter, owner/private/back-off notes, activation state | Changes by speaker and turn, so it belongs last. |
+| 1 · Stable head | Persona, group rules, output constraints, optional protocol | Identical across turns in the same group and mode; maximizes prefix-cache reuse. |
+| 2 · Group memory | Current rolling digest (`群史记`) | Changes only when background compression folds in a new batch of messages. |
+| 3 · Session history | Accepted recent conversation turns | Appends cleanly onto the cached prefix. |
+| 4 · This turn | Speaker relationship card, affinity-sliced nearby chatter, circadian/mood state line | Changes on every speaker and timestamp, so it always sits at the very end. |
 
-Session access is locked while a reply is built and recorded. Names are rendered from the current archive rather than left to free-form model memory. Digest extraction can suggest relationship changes; local code still owns validation, caps and persistence.
-
-This layout creates opportunities for prefix caching. Actual cache behavior depends on the provider and task tier: the [design notes](docs/DESIGN_NOTES_EN.md) distinguish live group observations, controlled probes and regressions. Their measurements are evidence for those conditions, not a universal cache-hit or monthly-cost promise.
+A session lock guards prompt assembly and history write-back so rapid-fire group messages don't tear the conversation state. Real-world prefix-cache observations and provider probe notes are documented in [Design Notes](docs/DESIGN_NOTES_EN.md).
 
 ## Quick start
 
@@ -273,33 +272,33 @@ Tweak bot behavior and budget guardrails in `.env`:
 
 ---
 
-## 📄 License
+## Troubleshooting
 
-Open-sourced under the [MIT License](LICENSE).
-Pull requests and stars are welcome! Bring a true companion to your chat group.
-
-## Understand a quiet or half-working bot
-
-| Symptom | Check first |
+| Symptom | What to check first |
 | --- | --- |
-| The process starts but group chatter never arrives | QQ sandbox membership and the group's **获取群内全部消息** setting. |
-| It never reacts to its spoken name | `BOT_NAMES`; the trigger words must match your deployment. |
-| Chat works but owner commands do not | QQ message-list access, C2C permission and the owner's first private message; saved ownership is in `owner.txt`. |
-| A nickname appears to be missing in private chat | Nicknames are scoped to a group; C2C has no group identity. |
-| Cache cost differs from the notes | Provider, model/task tier, prefix stability and the observed cache TTL. |
+| Process starts, but group messages never arrive | QQ sandbox member list and the group's **获取群内全部消息** (Receive all group messages) setting. |
+| Doesn't respond when called by name | Check `BOT_NAMES` in `.env` (when blank, only `@` mentions and the platform nickname trigger it). |
+| Chat works, but owner commands don't | Make sure you've sent the first private message (C2C) to claim ownership; the bound owner ID is stored in `data/owner.txt`. |
+| Group nicknames don't show up in private chat | Nicknames are scoped per group; C2C private chat has no group context. |
+| Prefix cache hit rate is lower than expected | Check provider prefix-caching support, task-tier routing, prefix stability, and whether silence between messages exceeded the provider's cache TTL. |
 
-## Explore the harness
+## Code Map
 
 | File | Responsibility |
 | --- | --- |
-| [bot.py](bot.py) | QQ event routing, local commands, prompt assembly, output and send handling |
-| [activation.py](activation.py) | Activity state, time-of-day and reply policy inputs |
-| [affinity.py](affinity.py), [relations.py](relations.py) | Relationship updates, tiers, budgets and ranking |
-| [naming.py](naming.py), [nicking.py](nicking.py) | Runtime identity rendering and per-group nicknames |
-| [runtime.py](runtime.py), [storage.py](storage.py) | Shared runtime objects, sessions and persistence |
-| [archive.py](archive.py), [digest.py](digest.py) | Raw message archive, rolling memory and extracted structured updates |
-| [providers.py](providers.py) | Provider routing and fallback |
-| [wordfilter.py](wordfilter.py), [qqtext.py](qqtext.py) | Text checks and QQ message rendering |
-| [tests/](tests/) | Regression cases and separate provider probes |
+| [bot.py](bot.py) | QQ event routing, zero-token local commands, 4-layer prompt assembly, output sanitization & send loop |
+| [activation.py](activation.py) | Circadian clock (with 3 a.m. wake-up grumpiness), 6-hour mood half-life, affinity-gated context window |
+| [affinity.py](affinity.py), [relations.py](relations.py) | Eight-tier relationship ledger, asymmetric daily caps, daily digest scoring & leaderboards |
+| [naming.py](naming.py), [nicking.py](nicking.py) | Per-group nickname resolution & one-way lookup protection |
+| [runtime.py](runtime.py), [storage.py](storage.py) | Shared runtime singletons, session locks & local JSON persistence |
+| [archive.py](archive.py), [digest.py](digest.py) | Raw message archive, rolling chronicle (`群史记`) compression & interaction-mode extraction |
+| [providers.py](providers.py) | Task-tiered model routing & provider fallback |
+| [wordfilter.py](wordfilter.py), [qqtext.py](qqtext.py) | Content checks & QQ message rendering |
+| [tests/](tests/) | Offline regression suite & standalone provider cache probes |
 
-Live operation needs your QQ application and model credentials. Message archives and generated content are deployment data; the repository contains the code and example configuration. Network availability, QQ platform limits and model behavior remain external dependencies.
+---
+
+## 📄 License
+
+Open-sourced under the [MIT License](LICENSE).
+Pull requests and stars are welcome—give your group chat a regular who actually remembers the room.
