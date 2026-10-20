@@ -221,8 +221,44 @@ for gid, items in (runtime.STATE.data.get("buffers") or {}).items():
 
 group_last_random_reply = dict(runtime.STATE.data.get("cooldowns") or {})
 processed_msg_ids = collections.deque(maxlen=config.DEDUP_MAX)
+
+
+def _who_label(group_id, oid):
+    """openid → 群里的人话称呼：认领过的称呼 > 群里挂的显示名 > 泛称。
+
+    以前这里拼 openid 后四位，结果模型把它当成名字复读进了回复 —— 群里没人
+    看得懂。聊天背景和读图上下文共用这一份（2026-10-20：两处渲染不许漂移）。
+    """
+    r = runtime.RELATIONS.get(group_id, oid, create=False)
+    return ((r or {}).get("nick")
+            or runtime.DISPLAY_NAMES.of(group_id, oid)
+            or "一位群友")
+
+
+def _vision_context(group_id):
+    """读图要带的群聊上下文（2026-10-20）：最近几条「昵称：文本」。
+
+    多模态模型看图本来就该带着对话看——知道大家在聊什么，才知道这张图是
+    什么语境下发的、值得描述什么。固定最近 6 条（读图是后台工具调用，不按
+    亲密度伸缩）；每条截 60 字防灌屏；必过 _who_label（openid 只许进日志）
+    和 refresh_names（旧称呼改写），与聊天背景同一套渲染，不许漂移。
+    """
+    buf = group_buffers.get(group_id)
+    if not buf:
+        return ""
+    now_ts = time.time()
+    fresh = [b for b in buf if now_ts - float(b.get("time") or 0)
+             <= config.GROUP_BUFFER_TTL_SECONDS]
+    if not fresh:
+        return ""
+    lines = [f"- {_who_label(group_id, b['sender'])}：{str(b.get('text') or '')[:60]}"
+             for b in fresh[-6:]]
+    return refresh_names(group_id, "\n".join(lines))
+
+
 media.initialize(state=runtime.STATE, archive=runtime.ARCHIVE,
-                 buffers=group_buffers, budget=runtime.BUDGET)
+                 buffers=group_buffers, budget=runtime.BUDGET,
+                 context_fn=_vision_context)
 
 
 # 主动发言（催债）需要拿到 client 实例，这里存个引用
@@ -1862,16 +1898,11 @@ class GroupBot(botpy.Client):
             if prev:
                 # 必须标出发言人。之前只给一串裸文本，模型分不清哪句是谁说的，
                 # 于是把别人认领的名字安到了当前这位头上 —— 叫错人就是这么来的
-                def _who(oid):
-                    # 认领过的称呼 > 群里挂的显示名 > 泛称。以前这里拼 openid 后四位，
-                    # 结果模型把它当成名字复读进了回复 —— 群里没人看得懂。
-                    r = runtime.RELATIONS.get(group_id, oid, create=False)
-                    return ((r or {}).get("nick")
-                            or runtime.DISPLAY_NAMES.of(group_id, oid)
-                            or "一位群友")
-
+                # （_who_label 已提为模块级：读图上下文共用，两处渲染不许漂移）
                 context_hint = refresh_names(
-                    group_id, "\n".join(f"- {_who(b['sender'])}：{b['text']}" for b in prev))
+                    group_id,
+                    "\n".join(f"- {_who_label(group_id, b['sender'])}：{b['text']}"
+                              for b in prev))
                 # ⚠️ 这行是对着「爱翻旧账的模型」写的（实测 Gemini 会把背景里别人的言行安到
                 # 当前说话人头上，一晚上把「当猫娘」安给了三个人）。所以要点名三件事：
                 # 每句都有主、主语不是眼前这位、引用前先核对名字。

@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def config_json(directory, *fields, env=None):
-    values = {k: v for k, v in os.environ.items() if not k.startswith(("QQ_", "ZHIPU_", "GEMINI_", "OPENAI_", "VISION_", "OWNER_", "AI_", "FALLBACK_", "DATA_", "SSL_", "STATE_", "ARCHIVE_", "MEMORY_", "LOG_", "STATUS_", "BANTER_"))}
+    values = {k: v for k, v in os.environ.items() if not k.startswith(("QQ_", "ZHIPU_", "GEMINI_", "OPENAI_", "VISION_", "OWNER_", "AI_", "FALLBACK_", "DATA_", "SSL_", "STATE_", "ARCHIVE_", "MEMORY_", "LOG_", "STATUS_", "BANTER_", "BOT_", "PROACTIVE_"))}
     values.update(REGULAR_HOME=str(directory), PYTHONPATH=str(ROOT))
     if env:
         values.update(env)

@@ -298,3 +298,111 @@ class CaptionServiceTest(unittest.IsolatedAsyncioTestCase):
             await waiter
         self.assertEqual(self.service.inflight, {})
         self.assertEqual(self.service.cache, {})
+
+
+class CaptionContextTest(unittest.IsolatedAsyncioTestCase):
+    """读图带群聊上下文（2026-10-20 群主定调）：多模态看图带着对话看才准。"""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.state = StateStore(str(self.root / "state.json"))
+        self.archive = MessageArchive(str(self.root))
+        self.buffers = {"g": deque()}
+        self.budget = DailyBudget(10, self.state.data["usage"])
+        self.now = 1792422000.0
+        self.options = patch.multiple(media.config, VISION_ENABLED=True,
+                                      VISION_PROVIDER="zhipu", VISION_MODEL="vision-test", VISION_INPUT_MODE="url",
+                                      VISION_DAILY_CAP=2, VISION_COOLDOWN_SECONDS=60)
+        self.options.start()
+        self.seen = {}
+        async def describe(url, context_text=""):
+            self.seen["url"] = url
+            self.seen["ctx"] = context_text
+            return "一只猫"
+        self.describe = describe
+
+    async def asyncTearDown(self):
+        self.options.stop()
+        self.archive.close()
+        self.tmp.cleanup()
+
+    def build(self, context_fn=None):
+        return media.CaptionService(self.state, self.archive, self.buffers, self.budget,
+                                    describe=self.describe, available=lambda: True,
+                                    clock=lambda: self.now, context_fn=context_fn)
+
+    def test_context_fn_output_reaches_the_describe_call(self):
+        def context_fn(group_id):
+            self.assertEqual(group_id, "g")
+            return "- 老王：看这个"
+        self.buffers["g"].append({"message_id": "m1", "sender": "alice",
+                                  "text": "[图片]", "time": self.now})
+        self.service = self.build(context_fn=context_fn)
+        asyncio.get_event_loop().run_until_complete(
+            self.service.caption_for("g", "m1", "alice", "https://image.invalid/a"))
+        self.assertEqual(self.seen["url"], "https://image.invalid/a")
+        self.assertEqual(self.seen["ctx"], "- 老王：看这个")
+
+    def test_no_context_fn_keeps_the_bare_call_shape(self):
+        """旧签名 describe（只收 url）在没配 context_fn 时零感知。"""
+        self.buffers["g"].append({"message_id": "m1", "sender": "alice",
+                                  "text": "[图片]", "time": self.now})
+        self.service = self.build()
+        asyncio.get_event_loop().run_until_complete(
+            self.service.caption_for("g", "m1", "alice", "https://image.invalid/b"))
+        self.assertEqual(self.seen["url"], "https://image.invalid/b")
+        self.assertEqual(self.seen["ctx"], "")
+
+    def test_bare_openid_never_reaches_the_model(self):
+        """openid 片段只许进日志：context_fn 产出的文本是调用方的责任，但透传
+        不做二次加工这一行为要固定下来——谁注入谁负责渲染成人话。"""
+        def leaky(group_id):
+            return f"- OPENIDBUTNOID：看这个"
+        self.buffers["g"].append({"message_id": "m1", "sender": "alice",
+                                  "text": "[图片]", "time": self.now})
+        self.service = self.build(context_fn=leaky)
+        asyncio.get_event_loop().run_until_complete(
+            self.service.caption_for("g", "m1", "alice", "https://image.invalid/c"))
+        self.assertIn("看这个", self.seen["ctx"])
+        self.assertNotIn("alice", self.seen["ctx"], "sender 原样 openid 不被 media 层透传")
+
+
+class DescribeImageMessagesTest(unittest.IsolatedAsyncioTestCase):
+    """providers.describe_image 的 messages 组装：上下文在前、指令居中、图在后。"""
+
+    def setUp(self):
+        self.kwargs = {}
+
+    async def _run(self, url, **kw):
+        async def create(**kwargs):
+            self.kwargs = kwargs
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content="一只猫"))])
+        client = SimpleNamespace(chat=SimpleNamespace(
+            completions=SimpleNamespace(create=create)))
+        with patch.dict(media.providers.AI_CLIENTS, {"zhipu": [client]}, clear=True), \
+             patch.object(media.providers, "_budget", DailyBudget(5, {})), \
+             patch.object(media.providers, "_on_usage", None), \
+             patch.object(media.providers, "_initialized", True), \
+             patch.multiple(media.config, VISION_PROVIDER="zhipu", VISION_MODEL="m",
+                            VISION_INPUT_MODE="url", AI_TOTAL_TIMEOUT=20.0):
+            return await media.providers.describe_image(url, **kw)
+
+    async def test_messages_carry_context_then_ask_then_image(self):
+        url = "https://image.invalid/x"
+        await self._run(url, context_text="- 老王：看这个")
+        content = self.kwargs["messages"][0]["content"]
+        texts = [p["text"] for p in content if p["type"] == "text"]
+        images = [p for p in content if p["type"] == "image_url"]
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["image_url"]["url"], url)
+        self.assertEqual(len(texts), 2)
+        self.assertIn("看这个", texts[0], "上下文在前")
+        self.assertIn("25字", texts[1], "描述指令在后")
+
+    async def test_no_context_keeps_single_ask(self):
+        content = self.kwargs and None
+        await self._run("https://image.invalid/y")
+        parts = self.kwargs["messages"][0]["content"]
+        self.assertEqual([p["type"] for p in parts], ["text", "image_url"])

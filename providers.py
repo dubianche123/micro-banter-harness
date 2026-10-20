@@ -217,8 +217,13 @@ async def call_model(messages, max_tokens, tier="chat", temperature=None):
     return await _complete(messages, max_tokens, tier, temperature, PROVIDER_CHAIN, chains)
 
 
-async def describe_image(image_url):
-    """Use one explicit vision model; image transport is configured, never guessed."""
+async def describe_image(image_url, context_text=""):
+    """Use one explicit vision model; image transport is configured, never guessed.
+
+    context_text：图发出前的群聊记录（由 media.CaptionService 经 context_fn 注入）。
+    多模态看图本来就该带着对话看——知道大家在聊什么，才知道这张图值得描述
+    什么（2026-10-20 群主定调）。
+    """
     initialize()
     name, model = config.VISION_PROVIDER, config.VISION_MODEL
     if not model or not AI_CLIENTS.get(name) or not _available(name) or not _bound_budget().can_consume():
@@ -242,7 +247,12 @@ async def describe_image(image_url):
     if remaining <= 0:
         return None
     messages = [{"role": "user", "content": [
-        {"type": "text", "text": "用不超过25字的中文客观描述图片内容或表情包情绪。无法理解时只输出：无法描述"},
+        *( [{"type": "text",
+             "text": "这张图是发在下面这段群聊里的：\n" + context_text}]
+           if context_text else [] ),
+        {"type": "text", "text": "用不超过25字的中文客观描述图片内容或表情包情绪；"
+                                 "图与聊天话题相关时，顺着话题描述大家关心的点。"
+                                 "无法理解时只输出：无法描述"},
         {"type": "image_url", "image_url": {"url": image_url}},
     ]}]
     text = await _complete(messages, 80, "vision", 0.3, [name], {name: [model]},

@@ -15,7 +15,8 @@ CAPTION_CACHE_SIZE = 300
 
 class CaptionService:
     def __init__(self, state, archive, buffers, budget, *, describe=None,
-                 available=None, clock=time.time, cache_size=CAPTION_CACHE_SIZE):
+                 available=None, clock=time.time, cache_size=CAPTION_CACHE_SIZE,
+                 context_fn=None):
         self.state = state
         self.archive = archive
         self.buffers = buffers
@@ -24,6 +25,9 @@ class CaptionService:
         self.available = available
         self.clock = clock
         self.cache_size = max(1, int(cache_size))
+        # context_fn(group_id) -> str：读图时带上群聊上下文（2026-10-20 群主定调，
+        # 多模态看图带着对话看才准）。与 describe/available 同风格的依赖注入。
+        self.context_fn = context_fn
         self.inflight = {}
         self._closing = False
         self._foreground = {}
@@ -65,7 +69,15 @@ class CaptionService:
             return None
         try:
             describe = self.describe or providers.describe_image
-            caption = await describe(image_url)
+            # 上下文按「第一个引用这张图的群」取（QQ 图床 URL 实际不会跨群）；
+            # 缓存命中的旧描述不重读，也就不需要上下文。没配 context_fn 时
+            # 保持旧调用形态——describe 的旧签名调用方零感知。
+            group_id = next((g for g, _mid, _sender
+                             in self._targets.get(image_url, ())), None)
+            if self.context_fn and group_id:
+                caption = await describe(image_url, context_text=self.context_fn(group_id))
+            else:
+                caption = await describe(image_url)
             if not caption or not str(caption).strip():
                 return None
             caption = str(caption).strip()
@@ -148,10 +160,10 @@ class CaptionService:
 _service = None
 
 
-def initialize(*, state, archive, buffers, budget):
+def initialize(*, state, archive, buffers, budget, context_fn=None):
     """由 bot 绑定现有 runtime 单例；不创建额外状态文件。"""
     global _service
-    _service = CaptionService(state, archive, buffers, budget)
+    _service = CaptionService(state, archive, buffers, budget, context_fn=context_fn)
     return _service
 
 
