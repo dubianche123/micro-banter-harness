@@ -10,6 +10,8 @@ botpy.log
 botpy.log.*
 # 任何将来出现的日志变体一律不进库
 *.log.*
+# Docker 部署的运行数据目录（state/archive/memory/owner 全迁进来）
+data/
 owner.txt
 
 # 原始消息归档与每日摘要（含群友聊天内容，不进版本库）

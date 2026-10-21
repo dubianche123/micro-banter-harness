@@ -272,6 +272,20 @@ AFFINITY_BOARD_SIZE = _env_int("AFFINITY_BOARD_SIZE", 5)                  # 排�
 # （不能因为还不熟就被拒，那是把门槛用成排斥）。群主永远豁免。
 MODE_SWITCH_MIN_AFFINITY = _env_int("MODE_SWITCH_MIN_AFFINITY", 0)
 
+# ── 心情闸门（2026-10-22 群主：他说他很烦，一句猫娘模式就进去了，违和）──
+# 元气/玩闹类模式在心情差时演不了：低于门槛的切换被回绝（台词符合心情，不提内部机制）。
+# 消极类（crazy 发疯）不设门槛 —— 烦的时候发疯反而最真，只有「烦+猫娘」才违和。
+MODE_MOOD_FLOOR = _env_float("MODE_MOOD_FLOOR", -0.5)
+
+# ── 自动发疯（给懒得喊口令的群友的自动化路径）──
+# 心情 ≤ AUTO_CRAZY_THRESHOLD 持续 AUTO_CRAZY_ENTER_MINUTES 分钟 → 自动进 crazy；
+# 回升到 AUTO_CRAZY_EXIT 之上 → 自动退。只对**自动进的** crazy 生效，手动进的归手动管。
+# 每天自动进入 AUTO_MODE_DAILY_CAP 次封顶（防抖：心情反复横跳也不能一天发疯八回）。
+AUTO_CRAZY_THRESHOLD = _env_float("AUTO_CRAZY_THRESHOLD", -0.7)
+AUTO_CRAZY_ENTER_MINUTES = _env_float("AUTO_CRAZY_ENTER_MINUTES", 30.0)
+AUTO_CRAZY_EXIT = _env_float("AUTO_CRAZY_EXIT", -0.2)
+AUTO_MODE_DAILY_CAP = _env_int("AUTO_MODE_DAILY_CAP", 2)
+
 # ══════════════════ 群聊长期记忆（每日滚动摘要，见 digest.py）══════════════════
 DIGEST_ENABLED = _env_bool("DIGEST_ENABLED", True)
 DIGEST_INTERVAL_HOURS = _env_float("DIGEST_INTERVAL_HOURS", 24.0)  # 多久压一次

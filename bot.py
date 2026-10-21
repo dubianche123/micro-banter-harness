@@ -748,6 +748,21 @@ MODE_DENIED_LINES = (
     "（假装没听见）嗯？风太大没听清。等你跟我混熟了再说这话，我考虑考虑。",
 )
 
+# 心情门槛（2026-10-22 群主：他说他很烦，一句猫娘模式就进去了，违和）。
+# 心情说「我很烦」、进场台词说「欢天喜地当猫娘」，两个系统互不感知就是这么割裂的。
+# 元气/玩闹类演不了烦；crazy 不设 —— 烦的时候发疯反而最真。门槛只拦**进入**，
+# 退出永远畅通（烦着的人喊「恢复正常」没有不答应的道理）。
+MODE_MOOD_GATE = {
+    "catgirl": config.MODE_MOOD_FLOOR,
+    "driver": config.MODE_MOOD_FLOOR,
+}
+
+MODE_MOOD_DENIED = (
+    "（揉了揉太阳穴）……不是不想配合，是真没那个心情演这个，等我缓过来再说吧。",
+    "（摆手）现在没状态整这些花活……烦着呢，改天，改天。",
+    "（有气无力）喵都喵不动……你这口令等我心血来潮的时候再来喊。",
+)
+
 DICE_TRIGGERS = ["摇骰子", "掷骰子", "掷点", "比大小", "决斗", "扔骰子", "色子"]
 FORTUNE_TRIGGERS = ["算一卦", "算命", "看相", "占卜", "测字"]
 OWNER_COMMANDS = ["办他", "拖出去", "拿下", "拉出去", "掌嘴", "护驾"]
@@ -1083,6 +1098,19 @@ def banter_chance(base, rec):
     return min(base * relations.banter_weight(rec), config.BANTER_CHANCE_MAX)
 
 
+def mood_allows_mode(mode_name, mood_v):
+    """模式进入的心情门槛（2026-10-22 群主：他说他很烦，一句猫娘模式就进去了）。
+
+    只拦**进入**：元气/玩闹类（catgirl/driver）在心情差时演不了；
+    crazy 不设门槛 —— 烦的时候发疯反而最真，只有「烦+猫娘」才违和。
+    没登记门槛的模式一律放行。
+    """
+    floor = MODE_MOOD_GATE.get(mode_name)
+    if floor is None:
+        return True
+    return mood_v >= floor
+
+
 def mode_switch_allowed(group_id, openid, is_owner=False):
     """这个人够不够格点单换模式（好感度门槛，2026-09-21 群主提）。
 
@@ -1336,6 +1364,50 @@ async def digest_loop():
 _last_proactive = {}
 
 
+def _auto_mood_targets(now):
+    """巡检用：按当前心情算出该自动进/退 crazy 的群，返回 [(gid, "enter"|"exit")]。
+
+    自动化路径（2026-10-22 群主：群友懒得主动喊口令）。只对**自己自动进的** crazy
+    负责退出——手动进的归手动管，自动系统不劫持人的决定。防抖三闸：持续时长
+    （烦一阵子才疯，不是一句话就炸）+ 每日进入次数 + 退出线与进入线拉开距离
+    （半衰期心情本来就慢慢爬，来回横跳天然低频）。
+    """
+    v = activation.current_mood(now)
+    day = time.strftime("%Y-%m-%d", time.localtime(now))
+    data = runtime.STATE.data.setdefault("groups", {})
+    actions = []
+    for gid in set(data) | set(group_buffers):
+        slot = data.setdefault(gid, {})
+        if slot.get("auto_mood_day") != day:
+            slot["auto_mood_day"], slot["auto_mood_count"] = day, 0
+            runtime.STATE.mark_dirty()
+        if runtime.STATE.get_mode(gid) == "crazy":
+            if (slot.get("auto_mode_origin") == "auto"
+                    and v >= config.AUTO_CRAZY_EXIT):
+                slot["auto_mode_origin"] = ""
+                runtime.STATE.mark_dirty()
+                actions.append((gid, "exit"))
+            continue
+        if v > config.AUTO_CRAZY_THRESHOLD:
+            if slot.get("low_mood_since"):
+                slot["low_mood_since"] = 0.0
+                runtime.STATE.mark_dirty()
+            continue
+        # 心情已在发疯线下：首次记时间，持续够久才真疯
+        since = float(slot.get("low_mood_since") or 0)
+        if not since:
+            slot["low_mood_since"] = now
+            runtime.STATE.mark_dirty()
+            continue
+        if (now - since >= config.AUTO_CRAZY_ENTER_MINUTES * 60
+                and slot.get("auto_mood_count", 0) < config.AUTO_MODE_DAILY_CAP):
+            slot["low_mood_since"] = 0.0
+            slot["auto_mood_count"] = slot.get("auto_mood_count", 0) + 1
+            runtime.STATE.mark_dirty()
+            actions.append((gid, "enter"))
+    return actions
+
+
 async def proactive_loop():
     """主动性巡检：每 30 分钟看一眼，闸门全过就让模型照着最近的话题开个头。"""
     while True:
@@ -1344,6 +1416,25 @@ async def proactive_loop():
             now = time.time()
             hour = datetime.now().hour
             mood_v = activation.current_mood(now)
+            # 自动发疯/退疯（心情驱动的模式自动化）：切换是本地动作，台词走主动通道
+            for gid, action in _auto_mood_targets(now):
+                old = runtime.STATE.get_mode(gid)
+                if action == "enter":
+                    runtime.STATE.set_mode(gid, "crazy")
+                    _reset_style(gid, old, "crazy")
+                    runtime.STATE.data.setdefault("groups", {}).setdefault(gid, {})["auto_mode_origin"] = "auto"
+                    runtime.STATE.mark_dirty()
+                    entry = next((l for m, _t, l in MODE_ENTRIES if m == "crazy"), "")
+                    if await post_to_group(gid, naming.render(entry, owner=owner_label(gid))):
+                        logger.info("🌋 [自动发疯] 心情 %.2f 压过 %.2f 超过 %.0f 分钟",
+                                    mood_v, config.AUTO_CRAZY_THRESHOLD,
+                                    config.AUTO_CRAZY_ENTER_MINUTES)
+                else:
+                    runtime.STATE.set_mode(gid, "normal")
+                    _reset_style(gid, old, "normal")
+                    line = MODE_EXIT_LINES.get("crazy", "呼——发疯结束，{bot}恢复了")
+                    if await post_to_group(gid, naming.render(line, owner=owner_label(gid))):
+                        logger.info("🌤 [自动退疯] 心情回升到 %.2f", mood_v)
             # 挑最近还有活动的群（当前单群为主，结构上支持多群）
             candidates = [(g, b) for g, b in group_buffers.items() if b]
             if not candidates:
@@ -1734,6 +1825,12 @@ class GroupBot(botpy.Client):
                     logger.info("🚫 模式切换被交情门槛拦下（%s → %s）",
                                 mode_name, sender_openid[-4:])
                     await safe_reply(message, mode_denied_line(group_id))
+                    return
+                # 心情不够也别硬演：他说他很烦，下一句就该是欢天喜地的进场词，割裂
+                _mood_now = activation.current_mood()
+                if not mood_allows_mode(mode_name, _mood_now):
+                    logger.info("🌧 模式切换被心情拦下（%s mood=%.2f）", mode_name, _mood_now)
+                    await safe_reply(message, random.choice(MODE_MOOD_DENIED))
                     return
                 runtime.STATE.set_mode(group_id, mode_name)
                 _reset_style(group_id, current_mode, mode_name)
