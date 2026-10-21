@@ -39,7 +39,13 @@ def initialize(*, budget=None, on_usage=None):
         _on_usage = on_usage
     if _initialized:
         return
-    _llm_http = httpx.AsyncClient(verify=config.SSL_VERIFY)
+    # 本地网关（127.0.0.1:17863，glm-5.3-flash）绝不能被环境代理劫持：
+    # bot 进程带着 HTTP_PROXY 环境变量（launchd 铁律写死的），而 httpx 不像 curl
+    # 有 localhost 内建绕过 —— 不豁免的话 loopback 目标会被塞给透明代理，
+    # 代理不转发 loopback，表现为 ConnectError（2026-10-22 实测）。
+    _llm_http = httpx.AsyncClient(verify=config.SSL_VERIFY,
+                                  mounts={"all://127.0.0.1": None,
+                                          "all://localhost": None})
     selected = list(PROVIDER_CHAIN)
     if config.VISION_ENABLED and config.VISION_PROVIDER not in selected:
         selected.append(config.VISION_PROVIDER)

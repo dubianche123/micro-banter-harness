@@ -8,6 +8,7 @@ import httpx
 from openai import AsyncOpenAI
 
 import providers
+import config  # noqa: E402
 from storage import DailyBudget
 
 
@@ -188,7 +189,9 @@ class RequestsTest(unittest.IsolatedAsyncioTestCase):
              patch.multiple(providers.config, VISION_ENABLED=True, VISION_PROVIDER="gemini", VISION_MODEL="vision-only-model"):
             providers.initialize()
             self.assertEqual(set(providers.AI_CLIENTS), {"zhipu", "gemini"})
-            self.assertIn("bigmodel.cn", str(providers.AI_CLIENTS["zhipu"][0].base_url))
+            # base_url 从 config preset 取预期（.env 可覆盖 ZHIPU_BASE_URL 指向本地网关）
+            self.assertIn(str(config.PROVIDER_PRESETS["zhipu"]["base_url"]),
+                          str(providers.AI_CLIENTS["zhipu"][0].base_url))
             self.assertIn("googleapis.com", str(providers.AI_CLIENTS["gemini"][0].base_url))
             await providers.close()
 

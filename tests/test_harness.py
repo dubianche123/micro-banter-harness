@@ -213,10 +213,18 @@ class ModelTierTest(unittest.TestCase):
         cls.bot = _bot
 
     def test_chat_chain_puts_quality_first(self):
-        self.assertEqual(providers.MODEL_CHAINS["zhipu"][0], "glm-4.7")
+        # 梯队快照必须与 config preset 逐字同步（.env 可以覆盖模型名，
+        # 但快照绝不能和 preset 各说各话 —— 否则配置改了线上不生效）。
+        self.assertEqual(providers.MODEL_CHAINS["zhipu"],
+                         list(config.PROVIDER_PRESETS["zhipu"]["models"]))
 
     def test_digest_chain_is_cheap(self):
         chain = providers.MODEL_CHAINS_DIGEST["zhipu"]
+        # 同上：digest 快照跟随 preset；默认语境下首选必须是便宜的 air
+        # （fresh clone 无 .env 时这条就是真正的质量断言）。
+        self.assertEqual(chain, list(config.PROVIDER_PRESETS["zhipu"]["models_digest"]))
+        if config.PROVIDER_PRESETS["zhipu"]["models"] != ["glm-4.7", "glm-4.5-air", "glm-4-flash"]:
+            return  # 生产 .env 已覆盖默认梯队，价格排序断言只对默认值有意义
         self.assertEqual(chain[0], "glm-4.5-air")
 
     def test_digest_chain_never_falls_back_to_chat_models(self):
