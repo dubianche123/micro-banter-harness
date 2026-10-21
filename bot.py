@@ -498,6 +498,12 @@ def resolve_mode(mode):
     return LEGACY_MODE_ALIAS.get(mode, mode)
 
 
+# 模型自主沉默哨兵（2026-10-22 群主授予的权利）：模型只输出 SKIP = 这轮不接。
+# 提示词给了它「装没看见」的选项（PROMPT_NORMAL「想不说话的时候」），代码只负责
+# 识别与留痕，绝不替它硬憋一句。proactive 路径早有同款（PROMPT_PROACTIVE）。
+MODEL_SKIP = "SKIP"
+
+
 async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
                        context_hint="", is_random_banter=False, relation_note="",
                        group_memory="", owner_label="", private=False, state_note="", allow_fallback=True):
@@ -569,6 +575,11 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
         if not raw:
             return (_pick_fallback() if allow_fallback else None), None
         body, payload = split_cmd(raw)
+        # 模型自主沉默出口：只输出 SKIP = 行使不说话的权利。识别必须先于乱码闸——
+        # 哨兵是纯大写长串，将来乱码规则收紧时不能把沉默出口误炸掉。
+        if body.strip().upper() == MODEL_SKIP:
+            logger.info("🤐 [自主沉默] %s 选择不接这句", session_id[-12:])
+            return MODEL_SKIP, None
         # 采样乱码闸（2026-10-15 <CMD! 残片 / 10-19 0A9F%F5，均智谱 glm-4.7）：
         # 命中就重生成一次；两次都乱就照发并留痕——不在这里和模型无限拉扯。
         glitch = _garbage_run(body)
@@ -622,6 +633,13 @@ async def reply_in_session(message, session_id, user_text, *, on_delivered=None,
     async with runtime.SESSIONS.lock(session_id):
         generation = runtime.SESSIONS.begin_turn(session_id)
         body, delta = await get_ai_reply(session_id, user_text, allow_fallback=False, **context)
+        # 自主沉默：模型行使 SKIP 权 → 不发送、不落会话记录（下一轮它从群聊背景里
+        # 看得出自己刚才没接话）；返回 result=None 让调用方跳过好感度结算——
+        # 没搭话就没印象账可记，词表兜底也不该替一次「装没看见」记账。
+        if body is not None and body.strip().upper() == MODEL_SKIP:
+            logger.info("🤐 [自主沉默生效] %s 这轮不说话（%s）", session_id[-12:],
+                        "插嘴" if context.get("is_random_banter") else "直接对话")
+            return body, None, None
         generated = bool(body)
         body = body or _pick_fallback()
         hinted = f"{body}\n{OWNER_CLAIM_HINT}"
@@ -2053,6 +2071,9 @@ class GroupBot(botpy.Client):
             relation_note=relation_note, group_memory=group_memory,
             owner_label=owner_label(group_id), state_note=state_note,
         )
+        if delivery is None:
+            # 模型行使了不说话的权利：这轮到此为止，好感度/情绪结算全部跳过
+            return
 
         # 日内微调（2026-10-06 改）：
         #   「被 @ 且没扣分就 +1」撤掉了 —— 那等于把好感度变成「被搭理次数」，
