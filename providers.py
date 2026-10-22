@@ -172,6 +172,56 @@ def _failure_action(name, exc):
     return "stop"
 
 
+def _temperature(preset, explicit):
+    if explicit is not None:
+        return explicit
+    if config.AI_TEMPERATURE_EXPLICIT:
+        return config.AI_TEMPERATURE
+    return preset.get("temperature", config.AI_TEMPERATURE)
+
+
+def _reply_metrics(result, choice):
+    """Best-effort usage fields; observability must never break a good reply."""
+    try:
+        usage = getattr(result, "usage", None)
+        if isinstance(usage, dict):
+            data = usage
+        elif usage is not None and hasattr(usage, "model_dump"):
+            data = usage.model_dump()
+        else:
+            data = {}
+    except Exception:
+        data = {}
+    details = data.get("completion_tokens_details") or {}
+    cached = data.get("prompt_cache_hit_tokens")
+    if cached is None:
+        cached = data.get("cached_tokens")
+    if cached is None:
+        cached = (data.get("prompt_tokens_details") or {}).get("cached_tokens")
+    return {
+        "finish": getattr(choice, "finish_reason", None),
+        "prompt": data.get("prompt_tokens"),
+        "completion": data.get("completion_tokens"),
+        "cached": cached,
+        "thinking": details.get("reasoning_tokens"),
+        "reasoning_chars": len(getattr(choice.message, "reasoning_content", None) or ""),
+    }
+
+
+def _log_reply(name, model, tier, attempt, elapsed, result, choice, text):
+    m = _reply_metrics(result, choice)
+    if text:
+        logger.info("✅ [%s] %s 应答 (%s, attempt %d, %.1fs, in=%s out=%s cached=%s thinking=%s finish=%s)",
+                    name, model, tier, attempt, elapsed, m["prompt"], m["completion"],
+                    m["cached"], m["thinking"], m["finish"])
+    else:
+        logger.warning("⚠️ [%s] %s 正文为空（%s, finish=%s, thinking=%s, reasoning_chars=%d）",
+                       name, model, tier, m["finish"], m["thinking"], m["reasoning_chars"])
+    if m["finish"] == "length":
+        logger.warning("⚠️ [%s] %s 输出被 max_tokens 截断（%s）；提高该任务的 token 上限或压缩输入",
+                       name, model, tier)
+
+
 async def _complete(messages, max_tokens, tier, temperature, names, chains, *, total_timeout=None):
     initialize()
     deadline = time.monotonic() + (config.AI_TOTAL_TIMEOUT if total_timeout is None else total_timeout)
@@ -187,18 +237,20 @@ async def _complete(messages, max_tokens, tier, temperature, names, chains, *, t
                 return None
             client = clients[_key_idx.get(name, 0) % len(clients)]
             attempts += 1
+            started = time.monotonic()
             try:
                 result = await asyncio.wait_for(
                     _request_completion(
                         client, model=model, messages=messages, max_tokens=max_tokens,
-                        temperature=(preset.get("temperature", config.AI_TEMPERATURE)
-                                     if temperature is None else temperature),
+                        temperature=_temperature(preset, temperature),
                         extra_body=preset.get("extra_body") or None),
                     timeout=min(left, config.AI_TIMEOUT_SECONDS))
                 if result and result.choices:
-                    text = (getattr(result.choices[0].message, "content", None) or "").strip()
+                    choice = result.choices[0]
+                    text = (getattr(choice.message, "content", None) or "").strip()
+                    _log_reply(name, model, tier, attempts, time.monotonic() - started,
+                               result, choice, text)
                     if text:  # reasoning_content is deliberately not a user answer
-                        logger.info("✅ [%s] %s 应答 (%s, attempt %d)", name, model, tier, attempts)
                         return text
             except _BudgetExhausted:
                 return None
@@ -264,9 +316,10 @@ async def describe_image(image_url, context_text=""):
                                  "无法理解时只输出：无法描述"},
         {"type": "image_url", "image_url": {"url": image_url}},
     ]}]
-    text = await _complete(messages, 200, "vision", 0.3, [name], {name: [model]},
-                           total_timeout=remaining)
-    return text[:80] if text and text != "无法描述" else None
+    text = await _complete(messages, config.VISION_MAX_TOKENS, "vision", 0.3,
+                           [name], {name: [model]}, total_timeout=remaining)
+    # 提示词要 25 字，但模型偶尔超写；80 会从句子中间截断，120 留出余量。
+    return text[:120] if text and text != "无法描述" else None
 
 
 async def probe_provider():

@@ -1,6 +1,8 @@
 # 凭证绝对不能进版本库
 .env
 api_keys_*.txt
+# 本机面板的一次性 token
+panel_token
 
 # 运行时状态 / 日志
 state.json
@@ -17,6 +19,9 @@ owner.txt
 # 原始消息归档与每日摘要（含群友聊天内容，不进版本库）
 archive/
 memory/
+# 可编辑知识库（含群内事实，不进版本库；格式说明见 knowledge/README.md）
+knowledge/*
+!knowledge/README.md
 # 助手的工作区笔记（同样只是本机的项目记录，不进版本库）
 .workbuddy/
 # 清档/迁机前手动留的备份，里面同样是群聊原文

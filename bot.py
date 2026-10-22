@@ -31,7 +31,9 @@ import digest as digest_mod
 import naming
 import prompts
 import qqtext
+import recall as recall_mod
 import relations
+import search as search_mod
 import storage
 import wordfilter
 
@@ -506,7 +508,8 @@ MODEL_SKIP = "SKIP"
 
 async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
                        context_hint="", is_random_banter=False, relation_note="",
-                       group_memory="", owner_label="", private=False, state_note="", allow_fallback=True):
+                       group_memory="", owner_label="", private=False, state_note="",
+                       knowledge_note="", recall_note="", search_note="", allow_fallback=True):
     """生成候选回复；正式消息入口持session锁，并在送达后提交实际正文。
 
     返回 (正文, 情感分值或 None)。分值为 None 表示这次没拿到模型给的记账标签
@@ -519,7 +522,7 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
         1) 稳定头   角色 + 记账口径 + 协议，与「谁在说、说到第几句」全无关 → 全群全天共享
         2) 每日记忆 群长期记忆，一天只变一次（压完才动）
         3) 会话历史 每轮只往后追加，天然前缀稳定
-        4) 本轮动态 群聊背景 + 对说话人的印象 + 插嘴指令，全部塞在最末尾
+        4) 本轮动态 群聊背景 + 知识库/搜索/旧账召回 + 对说话人的印象 + 插嘴指令，全部塞在最末尾
     ⚠️ 任何随「发言人或轮次」变化的内容都不许往 1) 里塞 —— 它之后的一切会跟着一起作废。
        以前群主身份、群聊背景、关系档案全挤在 system 里，等于把缓存全废了。
     """
@@ -546,6 +549,15 @@ async def get_ai_reply(session_id, user_text, is_owner=False, mode="normal",
             bits.append(prompts.PROMPT_BANTER_NOTE.strip())
         if context_hint:
             bits.append("【群聊最近背景】\n" + context_hint)
+        if knowledge_note and not looks_like_back_off(user_text):
+            # 维护者维护的事实优先于摘要；对方喊停时不追加额外材料。
+            bits.append(knowledge_note)
+        if recall_note and not looks_like_back_off(user_text):
+            # 只在对方明确问起往事时才会非空；对方正在喊停时一律不翻旧账。
+            bits.append(recall_note)
+        if search_note:
+            # 搜索结果是用户明确要的，喊停时也保留；它只是资料，不参与玩笑。
+            bits.append(search_note)
         if state_note:
             # 激活度（2026-10-19）：作息 + 心情的实时状态自述——深夜被吵醒/有点烦，
             # 模型顺着这个体感说话。放最后一段，随轮次变化的内容一律压末尾。
@@ -1179,6 +1191,15 @@ def _other_names(group_id, exclude_openid, limit=8):
             if oid != exclude_openid and r.get("nick")][:limit]
 
 
+def _recall_names(group_id):
+    """旧账召回用的「人名词典」：主名、群昵称、群主指称、机器人自称。"""
+    names = {r.get("nick") for _oid, r in named_members(group_id) if r.get("nick")}
+    names.update((runtime.DISPLAY_NAMES.groups.get(group_id) or {}).values())
+    names.update(owner_reference_terms(group_id))
+    names.update(naming.bot_names())
+    return tuple(name for name in names if name and len(name) >= 2)
+
+
 def _resolve_name(group_id):
     """压缩记忆时把一行的发言人写成谁：称呼 → 群昵称 → None（由压缩侧退成通用词）。
 
@@ -1236,9 +1257,10 @@ async def judge_nick(nick):
                 {"role": "system", "content": prompts.PROMPT_NICK_JUDGE},
                 {"role": "user", "content": f"称呼：{nick}"},
             ],
-            # 让它先说一句依据再落结论（思路摊开之后更准，漏判也留得下解释），
-            # 所以这里给到 160 —— 相比一次漏判的代价，这点 token 不值一提。
-            max_tokens=160,
+            # 让它先说一句依据再落结论（思路摊开之后更准，漏判也留得下解释）。
+            # 思考模型光 reasoning 就可能花 90~140 token，160 会把真正承载 OK/NG 的正文
+            # 挤成空串，审核直接 fail-open；给到 400 留足余量。
+            max_tokens=config.JUDGE_MAX_TOKENS,
             tier="judge",
             temperature=0.0,       # 判断类必须冻住随机性，见 call_model 的说明
         )
@@ -1648,6 +1670,15 @@ class GroupBot(botpy.Client):
         arch = runtime.ARCHIVE.stats()
         logger.info("🗄️  原文归档=%s/ （%d 天 / %d 条）| 摘要 MD=%s/",
                     config.ARCHIVE_DIR, arch["days"], arch["lines"], config.MEMORY_DIR)
+        if config.KNOWLEDGE_ENABLED:
+            logger.info("📚 可编辑知识库=%s/（改文件即生效；all.md + 每群文件）",
+                        config.KNOWLEDGE_DIR)
+        if config.SEARCH_ENABLED:
+            logger.info("🌐 按需搜索已启用 | DuckDuckGo | 每群 %.0fs 冷却 / 每日 %d 次 | %s",
+                        config.SEARCH_COOLDOWN_SECONDS, config.SEARCH_DAILY_CAP,
+                        "显式代理" if config.SEARCH_PROXY else "直连")
+        else:
+            logger.info("🌐 按需搜索已关闭（SEARCH_ENABLED=false）")
         if config.DIGEST_ENABLED:
             pending = {g: len(runtime.ARCHIVE.pending(g, runtime.DIGESTS.cursor(g), since_ts=runtime.DIGESTS.last_run(g))[0]) for g in runtime.DIGESTS.groups}
             logger.info("🧠 群聊长期记忆已启用 | 攒够 %d 条或每 %.0f 小时压缩一次 | 待压缩 %s",
@@ -1939,6 +1970,7 @@ class GroupBot(botpy.Client):
 
         should_reply = False
         is_random = False
+        search_note = ""
         if is_at or is_fortune:
             should_reply = True
         else:
@@ -1971,6 +2003,37 @@ class GroupBot(botpy.Client):
                     group_last_random_reply[group_id] = now
                     runtime.STATE.data["cooldowns"][group_id] = now
                     runtime.STATE.mark_dirty()
+
+        # 9.5 显式联网搜索：所有群友可用，按群限流；不自动搜索。
+        search_query = search_mod.extract_query(user_input)
+        if search_query is not None:
+            if not config.SEARCH_ENABLED:
+                await safe_reply(message, "联网搜索没开。")
+                return
+            if not search_query:
+                await safe_reply(message, "搜什么？把关键词带上。")
+                return
+            if wordfilter.has_hit(search_query):
+                await safe_reply(message, "这个我不搜。")
+                return
+            allowed, reason = search_mod.LIMITER.acquire(group_id)
+            if not allowed:
+                await safe_reply(
+                    message,
+                    "（摆摆手）刚搜过，缓一分钟再问。" if reason == "cooldown"
+                    else "（扶额）今天搜得有点多，明天再搜吧。")
+                return
+            results = await search_mod.search_web(search_query)
+            if results is None:
+                await safe_reply(message, "搜索暂时连不上，稍后再试。")
+                return
+            if not results:
+                await safe_reply(message, "（搜了一圈）没找到靠谱的结果，换个说法？")
+                return
+            search_note = search_mod.render_note(results)
+            should_reply = True
+            is_random = False
+            logger.info("🌐 按需搜索：%d 条结果（%s）", len(results), group_id[-6:])
 
         if not should_reply:
             if image_url:
@@ -2057,11 +2120,38 @@ class GroupBot(botpy.Client):
         if config.DIGEST_ENABLED:
             summary = runtime.DIGESTS.get(group_id)
             if summary:
+                parts = []
                 people_block = digest_mod.render_people(summary).strip()
                 if people_block:
-                    group_memory = refresh_names(
-                        group_id,
-                        prompts.PROMPT_MEMORY_HEADER + "\n" + people_block)
+                    parts.extend([prompts.PROMPT_MEMORY_HEADER, people_block])
+                style_block = digest_mod.render_style(summary)
+                if style_block:
+                    parts.append(style_block)
+                if parts:
+                    group_memory = refresh_names(group_id, "\n".join(parts))
+
+        # 可编辑知识库：维护者改文件、下一轮即生效；只按关键词取少量进动态层。
+        knowledge_note = ""
+        if (not is_random and not looks_like_back_off(user_input)
+                and config.KNOWLEDGE_ENABLED):
+            knowledge_note = refresh_names(
+                group_id, runtime.KNOWLEDGE.render(group_id, user_input))
+            if knowledge_note:
+                logger.info("📚 知识库命中：%d 条（%s）",
+                            knowledge_note.count("\n- "), session_id[-12:])
+
+        # 旧账召回：只在对方明确问起往事时查本地归档，0 token；随机插嘴不翻旧账。
+        recall_note = ""
+        if (not is_random and not looks_like_back_off(user_input)
+                and config.MEMORY_RECALL_ENABLED):
+            recall_note = refresh_names(group_id, recall_mod.build_note(
+                group_id, user_input,
+                archive=runtime.ARCHIVE, promises=runtime.PROMISES,
+                names=_recall_names(group_id), name_of=_resolve_name(group_id),
+                exclude_text=user_input))
+            if recall_note:
+                logger.info("🔎 旧账召回：%d 条本地证据（%s）",
+                            recall_note.count("\n- "), session_id[-12:])
 
         reply_text, delta, delivery = await reply_in_session(
             message, session_id, user_input, on_delivered=commit_milestone,
@@ -2070,6 +2160,8 @@ class GroupBot(botpy.Client):
             context_hint=context_hint, is_random_banter=is_random,
             relation_note=relation_note, group_memory=group_memory,
             owner_label=owner_label(group_id), state_note=state_note,
+            knowledge_note=knowledge_note, recall_note=recall_note,
+            search_note=search_note,
         )
         if delivery is None:
             # 模型行使了不说话的权利：这轮到此为止，好感度/情绪结算全部跳过

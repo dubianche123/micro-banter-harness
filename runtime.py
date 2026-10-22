@@ -10,6 +10,7 @@ import os
 import archive as archive_mod
 import config
 import digest as digest_mod
+import knowledge as knowledge_mod
 import naming
 import relations
 import storage
@@ -58,6 +59,9 @@ ARCHIVE = archive_mod.MessageArchive(
     keep_days=config.ARCHIVE_KEEP_DAYS,
     max_text=config.ARCHIVE_MAX_TEXT,
 )
+
+# 可编辑知识库：维护者直接改 Markdown，按关键词命中后才进本轮动态层。
+KNOWLEDGE = knowledge_mod.KnowledgeBase(config.KNOWLEDGE_DIR)
 
 # 群聊长期记忆：每天把当天的新聊天滚动压缩进一份摘要，开销恒定，不随群活跃度膨胀。
 # 待压缩的数据来自 ARCHIVE（按 last_run 水位线切分），这里只存摘要本身。

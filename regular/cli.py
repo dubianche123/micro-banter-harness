@@ -353,6 +353,11 @@ def main(argv=None):
     diag.add_argument("--json", action="store_true")
     stat = sub.add_parser("status", help="read runtime's structured snapshot")
     stat.add_argument("--json", action="store_true")
+    panel = sub.add_parser("panel", help="serve the local maintenance panel on loopback")
+    panel.add_argument("--host", default="127.0.0.1", help="loopback address (default: 127.0.0.1)")
+    panel.add_argument("--port", type=int, default=8765, help="local port (default: 8765)")
+    panel.add_argument("--open", action="store_true", dest="open_browser",
+                       help="open the panel in the default browser")
     sub.add_parser("run", help="validate and connect the QQ runtime")
     svc = sub.add_parser("service", help="generate a launchd or systemd definition; never install or start it")
     svc.add_argument("kind", choices=("launchd", "systemd"))
@@ -383,6 +388,12 @@ def main(argv=None):
             return doctor(config, network=args.network, as_json=args.json)
         if args.command == "status":
             return status(config, as_json=args.json)
+        if args.command == "panel":
+            if args.host not in ("127.0.0.1", "localhost", "::1"):
+                parser.error("panel only binds to loopback; use --host 127.0.0.1")
+            import panel as panel_module
+            return panel_module.run(config, host=args.host, port=args.port,
+                                    open_browser=args.open_browser)
         if args.command == "run":
             errors = config.validate()
             if errors:

@@ -36,6 +36,8 @@ logger = logging.getLogger("qqbot")   # 与 bot.py 同一个命名 logger，共�
 
 import config
 import naming
+import prompts
+import wordfilter
 
 DIGEST_TAG = re.compile(r"<DIGEST>(.*?)</DIGEST>", re.S)
 
@@ -48,6 +50,7 @@ SYSTEM_MAP = """你在为 QQ 群整理聊天记录。下面是一段原始聊天
 只提取【真实出现过】的内容，绝不许脑补或推测。输出 4~8 条要点，每条不超过 25 字，形如：
 - 谁 在聊 什么（一句话说清）
 - 出现了什么好玩的梗/金句（照抄原话）
+- 反复出现的口头禅/语气词/表情（照抄原话；只出现一次的不算）
 - 谁 许下了什么承诺 / 说要做什么事（请客、发资源、还钱等），哪怕只是一句玩笑
 - 谁 对「{bot}」明显热情/示好，或明显在抬杠/阴阳/钓鱼（照抄最能说明态度的那一句）
 
@@ -67,7 +70,7 @@ SYSTEM_REDUCE = """你在为 QQ 群「{bot}」整理长期记忆。你会拿到�
 要求：像群里最八卦的人在做周报，可以有吐槽和调侃，但别伤人；没发生什么就直说这阵子群里安静得离谱。
 
 第 2 段：换行后单独输出一行机器指令，严格形如：
-<DIGEST>{"topics":[{"topic":"话题","who":["阿强"],"heat":3}],"memes":[{"quote":"原话","why":"好笑在哪"}],"promises":[{"who":"阿强","what":"说要请全群喝奶茶","due":""}],"people":[{"who":"阿强","note":"最近在打黑猴","mode":"损友"}],"affinity":[{"who":"阿强","delta":2,"why":"一整天都在捧场接梗"}]}</DIGEST>
+<DIGEST>{"topics":[{"topic":"话题","who":["阿强"],"heat":3}],"memes":[{"quote":"原话","why":"好笑在哪"}],"promises":[{"who":"阿强","what":"说要请全群喝奶茶","due":""}],"people":[{"who":"阿强","note":"最近在打黑猴","mode":"损友"}],"style":[{"phrase":"绷不住了","when":"看到离谱操作"}],"affinity":[{"who":"阿强","delta":2,"why":"一整天都在捧场接梗"}]}</DIGEST>
 
 字段规则：
 - topics：近期话题，heat 用 1~5 表示热度。最多 6 条。
@@ -80,6 +83,11 @@ SYSTEM_REDUCE = """你在为 QQ 群「{bot}」整理长期记忆。你会拿到�
   且能分清谁欠谁、欠的是什么。最多 5 条。
   ⚠️ 邀约（「来玩 / 来吃 / 走啊」）、请求（「你来干嘛」）、起哄和荤梗**都不是承诺**：
   实测把一句「来给我吃鸡吧」记成了对方欠的账，催债等于把荤梗公开复读。拿不准就不进（宁缺勿滥）。
+- style：这段时间群里**反复出现**的口头禅、语气词、表情用法。phrase 照抄原话
+  （2~12 字），when 一句话说明什么场合用。最多 5 条。
+  ⚠️ 只收「大家一起用」的表达，而且每条至少在这段记录里出现过两次；只出现一次的不算。
+  针对某个人的外貌/糗事、平台处置、政治/涉黄涉暴一律不收；也不要收{bot}自己的口癖
+  （那会变成每轮复读）。没有就空数组，不要硬凑。
 - people：对具体某个人的新认知（在玩什么、什么处境）。最多 6 条。
   ⚠️ note 描述的是**这个人平时什么样**，不是他跟{bot}的关系账：不许写成
   「组织大家来拿{bot}寻开心」「拿{bot}当玩具练手」这类把人写成麻烦制造者的措辞 ——
@@ -167,26 +175,97 @@ def split_digest(raw):
     m = DIGEST_TAG.search(raw)
     body = DIGEST_TAG.sub("", raw).strip()
     if not m:
+        # 不阻断正文，但必须留痕：思考模型被 max_tokens 截断时，症状就是结构块整段消失。
+        logger.warning("摘要缺少 <DIGEST> 结构块（正文保留，结构化字段不更新）")
         return body or raw.strip(), None
     try:
         data = json.loads(m.group(1))
-    except Exception:
+    except Exception as exc:
+        logger.warning("摘要 <DIGEST> JSON 解析失败（正文保留）: %s", type(exc).__name__)
         return body, None
-    return body, data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        logger.warning("摘要 <DIGEST> 不是对象（正文保留）: %s", type(data).__name__)
+        return body, None
+    return body, data
 
 
 def normalize(data):
     """保证各字段都是列表，别把脏数据带进状态文件。"""
-    out = {"topics": [], "memes": [], "promises": [], "people": [], "affinity": []}
+    out = {"topics": [], "memes": [], "promises": [], "people": [], "style": [],
+           "affinity": []}
     if not isinstance(data, dict):
         return out
     for key in out:
         val = data.get(key)
         if isinstance(val, list):
             # affinity 是「一批人」，不是「几条事」，上限给宽一点
-            cap = 8 if key == "affinity" else 6
+            cap = {"affinity": 8, "style": config.STYLE_NOTE_MAX_ITEMS}.get(key, 6)
             out[key] = [v for v in val if isinstance(v, dict)][:cap]
     return out
+
+
+def sanitize_style(data, transcript):
+    """表达学习的写入闸：模型提案、代码裁决。
+
+    只保留在**本批原文**里至少出现 STYLE_MIN_REPEATS 次的表达。模型很容易把
+    上一版的口头禅原样抄回来，或者把一次性发言当成群梗；靠计数把「最近还在用」
+    变成硬条件，过期的口头禅不用另做时间戳也会自然掉出去。命中敏感词的整条丢弃。
+    """
+    if not isinstance(data, dict):
+        return 0
+    rows = data.get("style")
+    if not isinstance(rows, list):
+        data["style"] = []
+        return 0
+    kept = []
+    seen = set()
+    limit = max(0, config.STYLE_NOTE_MAX_ITEMS)
+    if not limit:
+        data["style"] = []
+        return 0
+    minimum = max(1, config.STYLE_MIN_REPEATS)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        phrase = str(row.get("phrase") or row.get("Phrase") or "").strip()
+        when = str(row.get("when") or row.get("When") or "").strip()
+        if not (2 <= len(phrase) <= 12) or "\n" in phrase or "\n" in when:
+            continue
+        if phrase in seen or wordfilter.has_hit(phrase):
+            continue
+        if transcript.count(phrase) < minimum:
+            continue
+        seen.add(phrase)
+        kept.append({"phrase": phrase[:12], "when": when[:16]})
+        if len(kept) >= config.STYLE_NOTE_MAX_ITEMS:
+            break
+    data["style"] = kept
+    return len(kept)
+
+
+def render_style(state, limit=None):
+    """把表达学习的结果渲染成每日记忆里的一小块；没有可用条目时返回空串。"""
+    rows = ((state or {}).get("data") or {}).get("style") or []
+    limit = config.STYLE_NOTE_MAX_ITEMS if limit is None else int(limit)
+    limit = max(0, limit)
+    if not limit:
+        return ""
+    lines, seen = [], set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        phrase = str(row.get("phrase") or row.get("Phrase") or "").strip()
+        when = str(row.get("when") or row.get("When") or "").strip()
+        if (not (2 <= len(phrase) <= 12) or phrase in seen
+                or wordfilter.has_hit(phrase)):
+            continue
+        seen.add(phrase)
+        lines.append(f"- {phrase}" + (f"（{when}）" if when else ""))
+        if len(lines) >= limit:
+            break
+    if not lines:
+        return ""
+    return prompts.PROMPT_STYLE_HEADER.strip() + "\n" + "\n".join(lines)
 
 
 def render_summary(state, mode="normal"):
@@ -442,6 +521,10 @@ class GroupDigest:
         if data.get("people"):
             parts.append("[上一版人物] " + "；".join(
                 f"{p.get('who','')}:{p.get('note','')}" for p in data["people"]))
+        if data.get("style"):
+            parts.append("[上一版口头禅] " + "、".join(
+                str(s.get("phrase") or "") for s in data["style"]
+                if isinstance(s, dict) and s.get("phrase")))
         text = "\n".join(p for p in parts if p.strip())
         return refresh(text) if refresh else text
 
@@ -510,6 +593,10 @@ async def compress_group(store, group_id, entries, ask, resolver=None, budget=No
         return None
 
     body, data = split_digest(raw)
+    # 表达学习是摘要的副产品：先按本批原文计数裁决，坏条目只丢自己，不拖垮整次压缩。
+    if isinstance(data, dict):
+        sanitize_style(data, "\n".join(str(entry.get("text") or "")
+                                       for entry in processed))
     # Text alone (including provider refusals) is not a successful state
     # update. Require at least one known list field, and reject malformed rows
     # instead of silently normalizing them into an empty memory.

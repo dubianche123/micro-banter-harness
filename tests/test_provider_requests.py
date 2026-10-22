@@ -133,6 +133,17 @@ class RequestsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await providers.call_model([], 10))
         self.assertEqual(self.budget.used, 1)
 
+    async def test_explicit_temperature_overrides_provider_preset(self):
+        calls = []
+        async def create(**kwargs):
+            calls.append(kwargs)
+            return response()
+        providers.AI_CLIENTS["zhipu"] = [fake_client(create)]
+        with patch.multiple(providers.config, AI_TEMPERATURE=0.95,
+                            AI_TEMPERATURE_EXPLICIT=True):
+            self.assertEqual(await providers.call_model([], 10), "答复")
+        self.assertEqual(calls[0]["temperature"], 0.95)
+
     async def test_explicit_download_input_sends_one_model_request(self):
         calls = []
         async def create(**kwargs):
@@ -147,6 +158,7 @@ class RequestsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await providers.describe_image("https://image.invalid/a"), "一只猫")
         self.assertEqual(self.budget.used, 1)
         self.assertEqual(len(self.dirty), 1)
+        self.assertEqual(calls[0]["max_tokens"], config.VISION_MAX_TOKENS)
         self.assertTrue(calls[0]["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,"))
 
     async def test_vision_cannot_bypass_exhausted_daily_budget(self):

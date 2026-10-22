@@ -18,7 +18,10 @@ import runtime
 
 import config  # noqa: E402
 import digest  # noqa: E402
+import knowledge  # noqa: E402
 import prompts  # noqa: E402
+import recall  # noqa: E402
+import search  # noqa: E402
 
 ENVELOPE_MARK = "（以下是系统给你的即时提示"
 # 插嘴指令的锚点从提示词模块取，不在测试里抄一份文案 —— 改措辞不该让这条测试挂掉
@@ -90,6 +93,32 @@ class HarnessOrderTest(unittest.IsolatedAsyncioTestCase):
         for piece in ("阿强：今天天气不错", "很熟", banter_mark):
             self.assertIn(piece, tail)
         self.assertTrue(tail.rstrip().endswith("老张今天来了吗"))
+
+    async def test_knowledge_and_search_notes_only_in_tail(self):
+        """知识库与联网搜索都是随问题变化的外部材料，只能进本轮信封。"""
+        msgs = await self.grab(
+            "th_local_notes", "群规是什么，帮我搜一下",
+            knowledge_note=knowledge.KNOWLEDGE_MARK + "（测试）】\n- 群规：不发广告",
+            search_note=search.SEARCH_MARK + "（测试）】\n[1] 示例 — 摘要（https://example.com）")
+        head = "\n".join(m["content"] for m in msgs[:-1])
+        tail = msgs[-1]["content"]
+        for mark in (knowledge.KNOWLEDGE_MARK, search.SEARCH_MARK):
+            self.assertNotIn(mark, head)
+            self.assertIn(mark, tail)
+
+    async def test_recall_note_only_in_tail(self):
+        """旧账召回是随轮次变化的内容，只能进本轮信封，绝不能碰稳定头/每日记忆。"""
+        note = recall.RECALL_MARK + "（测试）】\n- 10-01 老王：上次说的奶茶"
+        msgs = await self.grab("th_recall_1", "上次说的奶茶呢", recall_note=note)
+        self.assertNotIn(recall.RECALL_MARK, msgs[0]["content"])
+        self.assertIn(recall.RECALL_MARK, msgs[-1]["content"])
+
+    async def test_recall_is_suppressed_when_user_calls_back_off(self):
+        """对方正在喊停时不许翻旧账，哪怕调用方已经算好了召回块。"""
+        note = recall.RECALL_MARK + "（测试）】\n- 10-01 老王：上次说的奶茶"
+        msgs = await self.grab("th_recall_bo", "别这么损我，上次也这样",
+                               recall_note=note)
+        self.assertNotIn(recall.RECALL_MARK, msgs[-1]["content"])
 
     async def test_output_rules_sit_in_stable_head(self):
         """排版约束要在稳定头里，对所有模式生效。

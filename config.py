@@ -199,9 +199,14 @@ AI_MAX_ATTEMPTS = _env_int("AI_MAX_ATTEMPTS", 3)
 # —— 实测 2026-09-19 13:15 一次 1006 之后整整 18 分钟没有任何重连动作，全靠这个补。
 WS_WATCHDOG_STALE_SECONDS = _env_float("WS_WATCHDOG_STALE_SECONDS", 90.0)
 AI_TOTAL_TIMEOUT = _env_float("AI_TOTAL_TIMEOUT", 30.0)       # 整个模型梯队
-AI_MAX_TOKENS = _env_int("AI_MAX_TOKENS", 512)
-AI_MAX_TOKENS_BANTER = _env_int("AI_MAX_TOKENS_BANTER", 120)
+# 以下是**输出**上限，思考模型的 reasoning token 也占这个额度：
+# 实测 glm-5.3-flash 一句普通回复会先花 90~140 token 思考，上限太小会只拿到空正文。
+AI_MAX_TOKENS = _env_int("AI_MAX_TOKENS", 768)
+AI_MAX_TOKENS_BANTER = _env_int("AI_MAX_TOKENS_BANTER", 320)
+JUDGE_MAX_TOKENS = _env_int("JUDGE_MAX_TOKENS", 400)   # 称呼审核：要容纳“依据 + OK/NG”
 AI_TEMPERATURE = _env_float("AI_TEMPERATURE", 0.9)
+# 显式设置 AI_TEMPERATURE 时覆盖供应商预设；不设则沿用预设（智谱 0.7）。
+AI_TEMPERATURE_EXPLICIT = "AI_TEMPERATURE" in os.environ
 
 # ══════════════════ 主动插嘴 / 彩蛋频率 ══════════════════
 # 刻意不设文字长度门槛：群里一句「？」「太蠢了」就是真实的接话信号，拿字数当尺子
@@ -241,6 +246,8 @@ if VISION_INPUT_MODE not in ("url", "download"):
     CONFIG_ERRORS.append("VISION_INPUT_MODE 必须是 url 或 download")
 VISION_COOLDOWN_SECONDS = _env_float("VISION_COOLDOWN_SECONDS", 60.0)
 VISION_DAILY_CAP = _env_int("VISION_DAILY_CAP", 30)
+# 读图输出上限同样包含思考 token；25 字描述 + 思考需要 300 左右，80 会整轮空正文。
+VISION_MAX_TOKENS = _env_int("VISION_MAX_TOKENS", 300)
 BANTER_CHANCE_MAX = _env_float("BANTER_CHANCE_MAX", 0.5)
 
 MEME_COOLDOWN_SECONDS = _env_float("MEME_COOLDOWN_SECONDS", 60.0)
@@ -297,7 +304,7 @@ DIGEST_CHUNK_CHARS = _env_int("DIGEST_CHUNK_CHARS", 6000)          # 单块字�
 DIGEST_MAX_BLOCKS = _env_int("DIGEST_MAX_BLOCKS", 10)              # 一次最多分几块
 DIGEST_MAX_PENDING = _env_int("DIGEST_MAX_PENDING", 2000)          # 单次最多喂给模型多少条
 DIGEST_CHECK_INTERVAL = _env_float("DIGEST_CHECK_INTERVAL", 1800.0)  # 后台检查间隔（秒）
-DIGEST_MAX_TOKENS = _env_int("DIGEST_MAX_TOKENS", 800)
+DIGEST_MAX_TOKENS = _env_int("DIGEST_MAX_TOKENS", 1200)   # 摘要正文 + <DIGEST> JSON + 思考 token
 # 人物名册里一条「近况」能喂给模型多少天（见 digest.stamp_people / render_people）。
 # 名册的定位本来就是「最近在干什么」，不是永久档案；模型每次压缩又习惯把旧条目原样抄回，
 # 所以靠时间戳让它自然过期 —— 实测「号刚解封」这条标签挂了五天，天天被拿来说。
@@ -306,6 +313,14 @@ PEOPLE_NOTE_MAX_AGE_DAYS = _env_float("PEOPLE_NOTE_MAX_AGE_DAYS", 2.0)
 # 原先只喂列表里第一条、且不限时，于是排到首位的那条梗天天在模型眼前 ——
 # 收录进去的偏偏是「你死了十二天」这种针对它自己的吐槽。
 MEME_NOTE_MAX_AGE_DAYS = _env_float("MEME_NOTE_MAX_AGE_DAYS", 3.0)
+# 按需旧账召回（见 recall.py）：只有明确问起往事时才查本地归档，0 token。
+# 条数上限故意很小——它是「核对事实」的补丁，不是把旧事重新灌回上下文。
+MEMORY_RECALL_ENABLED = _env_bool("MEMORY_RECALL_ENABLED", True)
+MEMORY_RECALL_MAX_ITEMS = _env_int("MEMORY_RECALL_MAX_ITEMS", 2)
+MEMORY_RECALL_LOOKBACK_DAYS = _env_int("MEMORY_RECALL_LOOKBACK_DAYS", 30)
+# 表达学习（压缩时顺带提取，不额外调用模型）：只保留本批至少出现 N 次的口头禅。
+STYLE_NOTE_MAX_ITEMS = _env_int("STYLE_NOTE_MAX_ITEMS", 5)
+STYLE_MIN_REPEATS = _env_int("STYLE_MIN_REPEATS", 2)
 # 群聊背景（【群聊最近背景】）最多回看多久。buffer 会落盘、跨重启保留，
 # 不用时间过滤的话，安静半天后的第一条消息配到的还是半天前的话。
 GROUP_BUFFER_TTL_SECONDS = _env_float("GROUP_BUFFER_TTL_SECONDS", 1800.0)
@@ -320,6 +335,22 @@ DIGEST_WRITE_MD = _env_bool("DIGEST_WRITE_MD", True)
 # 摘要是有损压缩，出错时得有地方回查，所以原文单独按天留存。
 ARCHIVE_DIR = data_path("ARCHIVE_DIR", "archive")
 MEMORY_DIR = data_path("MEMORY_DIR", "memory")
+# 可编辑知识库：all.md 全群共享，<group_id>.md 只管一个群；维护者直接改文件。
+KNOWLEDGE_ENABLED = _env_bool("KNOWLEDGE_ENABLED", True)
+KNOWLEDGE_DIR = data_path("KNOWLEDGE_DIR", "knowledge")
+KNOWLEDGE_MAX_ITEMS = _env_int("KNOWLEDGE_MAX_ITEMS", 2)
+KNOWLEDGE_MAX_CHARS = _env_int("KNOWLEDGE_MAX_CHARS", 360)
+
+# 按需联网搜索（见 search.py）：只有明确的「搜索 关键词」命令才查 DuckDuckGo，所有群友可用但按群限流。
+SEARCH_ENABLED = _env_bool("SEARCH_ENABLED", True)
+SEARCH_MAX_RESULTS = _env_int("SEARCH_MAX_RESULTS", 3)
+SEARCH_TIMEOUT_SECONDS = _env_float("SEARCH_TIMEOUT_SECONDS", 8.0)
+SEARCH_COOLDOWN_SECONDS = _env_float("SEARCH_COOLDOWN_SECONDS", 60.0)
+SEARCH_DAILY_CAP = _env_int("SEARCH_DAILY_CAP", 20)
+# 搜索默认直连，刻意不继承部署环境里的 HTTP(S)_PROXY：模型网关的代理未必
+# 转发公网 HTTPS，实测会让 DuckDuckGo 直接连不上。需要代理时显式填写。
+SEARCH_PROXY = _env_str("SEARCH_PROXY")
+SEARCH_USE_ENV_PROXY = _env_bool("SEARCH_USE_ENV_PROXY", False)
 ARCHIVE_KEEP_DAYS = _env_int("ARCHIVE_KEEP_DAYS", 90)   # 原始消息保留天数，0 = 永不清理
 ARCHIVE_MAX_TEXT = _env_int("ARCHIVE_MAX_TEXT", 500)    # 单条消息存多少字
 
