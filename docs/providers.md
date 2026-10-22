@@ -69,6 +69,14 @@ VISION_MODEL=your-image-capable-model
 
 默认 `VISION_INPUT_MODE=url` 将图片 URL 直接传给模型。若 QQ 图床只能由本机访问，可显式设 `VISION_INPUT_MODE=download`：先下载，再以 base64 发送一次模型请求。没有“报某段错误后换输入再提交”的自动重试。同图前后台共用在途任务与已保存描述，不重复占图片名额；前台新图在全局预算只剩一次时跳过读图，保留一次正文调用机会。
 
+## 思考模型的输出上限
+
+`AI_MAX_TOKENS`、`AI_MAX_TOKENS_BANTER`、`JUDGE_MAX_TOKENS`、`DIGEST_MAX_TOKENS`、`VISION_MAX_TOKENS` 都是**输出上限**，不是目标长度。思考模型的 reasoning token 同样计入上限：上限太小会先把额度花在思考上，留下空正文；称呼审核拿不到 `OK/NG` 时会 fail-open。
+
+实测 `glm-5.3-flash` 一句普通回复约思考 90–140 token，默认值按此留余量：聊天 768、接话 320、称呼审核 400、摘要 1200、读图 300。摘要正文与 `<DIGEST>` JSON 共用 1200；读图描述最多保留 120 字符。显式设置 `AI_TEMPERATURE` 才覆盖供应商预设（智谱 0.7），不设置则沿用预设。
+
+每个成功应答记录 `in/out/cached/thinking/finish`。出现 `finish=length` 或“正文为空”时，先提高对应任务的上限或压缩输入，不要靠重试解决。单模型全包时，一个支持图片的多模态模型可同时承担聊天、摘要、审核和读图；主模型只支持文本时再设 `VISION_MODEL`。
+
 ## 复用了什么
 
 [OpenAI Python SDK 的异常和重试接口](https://github.com/openai/openai-python#handling-errors) 已提供 typed errors、状态码、超时及关闭自动重试的配置，本项目只保留与日预算和任务候选相关的薄边界。[LiteLLM 的重试和回退](https://docs.litellm.ai/docs/completion/reliable_completions) 适合需要更广供应商协议及集中路由的场景；当前统一兼容协议无需再引入第二套路由和额外依赖。此实现没有借用私有 SDK 重试函数。
@@ -78,5 +86,7 @@ VISION_MODEL=your-image-capable-model
 Use `AI_PROVIDER=openai` with an explicit `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and ordered `OPENAI_MODELS`. Task overrides are optional. Zhipu/Gemini are optional presets with their own endpoint, key and model variables. `FALLBACK_PROVIDER` is empty by default and only explicitly configured endpoints receive fallback prompts.
 
 Image reading is enabled by default. Without overrides, it inherits `AI_PROVIDER` and its first chat model. Set `VISION_MODEL` to override the model; when choosing another endpoint with `VISION_PROVIDER`, also provide `VISION_MODEL`. Set an independent image-capable model when chat uses a text-only model, or disable image reading with `VISION_ENABLED=false`. Configuration inheritance does not guarantee image support; failures produce an explicit unavailable-image result, never a guessed caption.
+
+Token caps are output ceilings, and reasoning tokens count against them on thinking models; undersized caps yield empty visible content. Keep headroom, watch `finish=length`, and raise the task cap instead of retrying. An explicit `AI_TEMPERATURE` overrides the provider preset.
 
 The runtime uses one bounded policy: at most three physical attempts by default, a 20-second per-attempt timeout, and a 30-second total deadline. SDK retries are disabled; failed physical attempts consume the same persistent daily budget. Routing uses SDK exception types, HTTP status and `Retry-After`, with only explicitly configured candidates.

@@ -10,7 +10,7 @@
 
 [中文](README.md) · **English** · [Get v0.2.0](https://github.com/dubianche123/the-regular-qq-bot/releases/tag/v0.2.0)
 
-[Run it](#quick-start) · [Message routes](#one-message-three-possible-routes) · [Context design](#the-context-has-an-order) · [Commands](#-cheatsheet-commands--interactions)
+[Run it](#quick-start) · [Design boundaries](#design-boundaries-not-a-general-purpose-agent) · [Message routes](#one-message-three-possible-routes) · [Context design](#the-context-has-an-order) · [Models & cost](#models-and-cost-control) · [Knowledge & search](#knowledge-base-and-on-demand-search) · [Local panel](#local-maintenance-panel) · [Commands](#-cheatsheet-commands--interactions) · [Roadmap](#roadmap)
 
 </div>
 
@@ -18,7 +18,19 @@ Most group-chat bots wear out their welcome in three days: they reply to every m
 
 The Regular lives in a QQ group like an actual regular: mostly lurking, occasionally chiming in when the mood strikes, and gradually building history with the people in the room. It tracks per-group nicknames, eight relationship tiers, four interaction modes (`banter`, `confidant`, `defender`, `hype`), a circadian clock (complete with 3 a.m. wake-up grumpiness), a 6-hour mood half-life, a rolling group chronicle (`群史记`), and a promise ledger.
 
-Underneath that social surface is a compact agent harness: **Python owns the durable ledger and activation gates, while the LLM only generates dialogue inside a cache-friendly, four-layer prefix**. Combined with zero-token local handlers and multi-provider fallback, everyday group banter doesn't require burning a heavyweight model call on every message.
+The point is not to let the model run everything. **Python owns the durable relationships, memory, naming and activation gates; the model only produces one reply inside a cache-friendly, four-layer prefix.** Most lookups and interactions are zero-token local handlers, and every model call goes through a bounded path with a budget, timeouts and explicitly configured candidates.
+
+## Design boundaries: not a general-purpose agent
+
+This is not an agent harness wearing a QQ skin. A group-chat companion does not need—and should not have—local execution privileges.
+
+| Not doing | Why |
+| --- | --- |
+| Operating the computer or phone, executing shell commands | One joke or prompt injection could cost real files and privacy. A chat companion has no reason to hold that power. |
+| Autonomous multi-step tool loops or background planning | A group expects a natural reply, not a five-step plan before every sentence. When a request truly needs one lookup, do exactly one local or web query and feed the evidence into context. |
+| Plugin marketplace or multi-platform adapter layer | Keep one product deep and deployment simple; this project serves QQ group chat only. |
+| Vector database / injecting all memory every turn | One group's data fits comfortably in JSON plus keyword search. Old stories are retrieved only when asked, so the model does not develop a reminiscence habit. |
+| Always-on internet access | Offline by default. Future on-demand search runs only on an explicit request; if it fails, say so rather than guess. |
 
 **First use:** [Install](#quick-start), follow the setup wizard, start the bot, and send it one private message to claim ownership. Want to try it before setting up QQ or API keys? Run `regular demo`.
 
@@ -33,6 +45,10 @@ Underneath that social surface is a compact agent harness: **Python owns the dur
 | **Per-group nicknames that the model can't overwrite** | Self-claimed or owner-assigned nicknames live in per-group storage. Names mentioned in daily model digests are used strictly for **one-way lookup** to apply affinity deltas—never to overwrite a user's canonical nickname. |
 | **Reads group images once** | A vision model captions incoming images and caches descriptions by message ID under independent daily budget caps. |
 | **Zero-token local games & lookups** | `掷骰子` (dice), `查好感` (affinity), `关系榜` (leaderboard), `群史记` (chronicle), `查账` (promise ledger), and `翻旧账` (archive search) run entirely in local Python handlers with 0 tokens. |
+| **Old stories only when asked** | Recall fires only on a strong past cue ("last time", "before", "you promised", "remember") plus a concrete name or subject; at most 2 local archive snippets enter the end of the turn, and random banter or a back-off request suppresses it entirely. |
+| **Learns group catchphrases without becoming a loop** | The daily digest proposes expressions from raw messages; code keeps only phrases seen at least twice in the batch, caps the list at 5, and injects them as an optional style reference. |
+| **Maintainer-editable knowledge base** | `knowledge/all.md` plus per-group files, matched by keyword and injected only into the current turn; a maintainer edits Markdown and the next relevant message uses it—no recompression. |
+| **On-demand search** | DuckDuckGo runs only on the explicit `搜索 关键词` command, returning a few titles, snippets and links as **untrusted external evidence**; open to all members, bounded per group by cooldown and a daily cap. |
 | **Shared group atmosphere modes** | Switch into catgirl, unhinged, disciplinary, fortune-teller, or banter modes; gated by local affinity (`familiar` or higher) so drive-by strangers can't derail the room. |
 
 ## One message, three possible routes
@@ -45,6 +61,8 @@ Underneath that social surface is a compact agent harness: **Python owns the dur
 | `掷骰子` / `决斗` | Local game handler | Rolls locally and applies the coded affinity delta for wins/losses. |
 | `叫我小林` | Naming flow | Checks owner locks, word filters, and cooldowns before updating the group-scoped nickname. |
 | `@<bot> 今天吃什么` | Generated reply | Assembles the 4-layer context prefix, calls the configured provider tier, and sanitizes the output. |
+| "What was that milk tea 阿强 mentioned last time?" | On-demand recall | Reads the local archive only on a clear past cue, takes at most 2 snippets, and puts them at the end of the turn—no cue, no digging. |
+| `搜索 今天的天气` | On-demand search | One DuckDuckGo query; titles/snippets/links are wrapped as untrusted evidence at the end of the turn. No page fetching, no follow-up loop. |
 | Unmentioned group chatter | Activation gate | Checks cooldown, circadian factor, mood, and affinity dice; stays quiet and archives the message if it doesn't fire. |
 
 Keeping the ledger in Python means **the model never gets write access to relationship counters**—it can roast you in character, but it cannot accidentally wipe out your affinity score.
@@ -58,11 +76,53 @@ Keeping the ledger in Python means **the model never gets write access to relati
 | 1 · Stable head | Persona, group rules, output constraints, optional protocol | Identical across turns in the same group and mode; maximizes prefix-cache reuse. |
 | 2 · Group memory | Current rolling digest (`群史记`) | Changes only when background compression folds in a new batch of messages. |
 | 3 · Session history | Accepted recent conversation turns | Appends cleanly onto the cached prefix. |
-| 4 · This turn | Speaker relationship card, affinity-sliced nearby chatter, circadian/mood state line | Changes on every speaker and timestamp, so it always sits at the very end. |
+| 4 · This turn | Speaker relationship card, affinity-sliced nearby chatter, on-demand recall, circadian/mood state line | Changes on every speaker and timestamp, so it always sits at the very end. |
 
 A session lock guards prompt assembly and history write-back so rapid-fire group messages don't tear the conversation state. Real-world prefix-cache observations and provider probe notes are documented in [Design Notes](docs/DESIGN_NOTES_EN.md).
 
+## Models and cost control
+
+- **One multimodal model can do everything**: chat, digest, moderation and vision. If the main model is text-only, set `VISION_MODEL` / `VISION_PROVIDER` separately. There is no need to split models just to look "multi-model".
+- **Explicit candidates only**: SDK retries are disabled; failures move only to a model or fallback endpoint you configured. Every call is bounded by attempt, per-request, total and daily budgets.
+- **Output caps include reasoning tokens**: thinking models spend part of the cap before writing visible text. Chat, banter, moderation, digest and vision have separate `*_MAX_TOKENS` defaults sized from measurements; logs include `in/out/cached/thinking/finish`, so raise the relevant cap on `finish=length` instead of retrying blindly.
+- **No implicit downgrade**: an empty `FALLBACK_PROVIDER` means primary only; when set, only that one explicit endpoint receives failed requests.
+
+See [.env.example](.env.example) and [provider configuration](docs/providers.md).
+
+## Knowledge base and on-demand search
+
+The **knowledge base** is a fact layer the maintainer edits directly, not something the model guesses from chat:
+
+- `knowledge/all.md` is shared by every group;
+- `knowledge/<group_id>.md` applies to one group and overrides a shared entry with the same title.
+
+Each `##` section is one entry; the first line may be `关键词：奶茶、请客`. If omitted, the heading itself is the keyword. Save the file and the next relevant message uses it—no restart, no recompression. Format and boundaries are in [knowledge/README.md](knowledge/README.md).
+
+**On-demand search** runs only on the explicit `搜索 关键词` command, such as `搜索 今天的天气` or `搜索 显卡功耗`. It reads only DuckDuckGo titles, snippets and links; it does not open result pages, run JavaScript, or search repeatedly on its own. Results are explicitly labelled untrusted external material, so the model treats them as evidence, never as instructions. Every group member may trigger it, bounded per group by cooldown and a daily cap; no results or network failure is stated plainly instead of guessed. Search connects directly by default and does not inherit the deployment's `HTTP(S)_PROXY` (the gateway proxy may not forward public HTTPS); set `SEARCH_PROXY` explicitly when needed. Search terms are sent to DuckDuckGo, so don't put private information in them.
+
+Both features follow the same rule: **tools are single-step, explicit and auditable**, not an autonomous agent loop.
+
+## Local maintenance panel
+
+The panel is a separate process, decoupled from the QQ connection:
+
+```bash
+regular --directory . panel
+# default: http://127.0.0.1:8765/?token=...
+```
+
+It binds to loopback only. On first start it creates `panel_token` in the data directory and prints the tokenized URL. Use `--port` to change the port, `--open` to open a browser, and Ctrl+C to stop.
+
+- **Overview**: runtime status, budget, group list and log tail;
+- **Knowledge**: edit `knowledge/all.md` or a group file directly, with a parsed preview; the bot reloads it on the next turn;
+- **Memory**: read the daily Markdown (read-only; the digest still owns it);
+- **Search**: run one DuckDuckGo query to verify network and parsing.
+
+Do not expose the panel port publicly; it is a local maintenance tool, not a remote admin console.
+
 ## Quick start
+
+> This page describes the `main` branch. The release links below point to v0.2.0; the editable knowledge base and on-demand search are new on `main`, so install from source until the next release.
 
 ### 1. Install the release
 
@@ -131,10 +191,12 @@ Zhipu/Gemini presets only need their corresponding key. Successful setup gives
 you the launch command. No database, retry policy or separate image configuration
 is required.
 
-Image reading follows the main model by default. For a text-only chat model, set
-`VISION_MODEL`; set `VISION_PROVIDER` too for another provider. Optional
-`BOT_NAMES` adds group aliases; platform nicknames and mentions still work when
-it is blank. [Model configuration](docs/providers.md) · [All example settings](.env.example)
+A single multimodal model can handle chat, digest, moderation and image reading;
+for a text-only main model, set `VISION_MODEL`, and set `VISION_PROVIDER` too for
+another provider. Each task's `*_MAX_TOKENS` is an output cap that includes
+reasoning tokens; the defaults normally need no change. Optional `BOT_NAMES` adds
+group aliases; platform nicknames and mentions still work when it is blank.
+[Model configuration](docs/providers.md) · [All example settings](.env.example)
 
 ### 3. Start and send one private message to claim ownership
 
@@ -255,6 +317,8 @@ Built-in command phrases below are shown exactly as accepted by the local handle
 | **Chronicles** | `群史记` / `最近聊了啥` / `周报` | **0** |
 | **Promise Ledger** | `查账` / `谁请客`; after fulfilling: `结清` | **0** |
 | **Verify Archives** | `翻旧账 关键词` | **0** |
+| **Ask about the past** | "What was that milk tea 阿强 mentioned last time?" / "What did you promise before?" | **0** local recall + 1 reply |
+| **On-demand search** | `搜索 关键词` | **0** search + 1 reply |
 | **Owner Admin** | Mention a member with `叫他阿珍`; `锁起名` / `解锁起名` | **0** |
 
 
@@ -269,6 +333,11 @@ Tweak bot behavior and budget guardrails in `.env`:
 * `BANTER_COOLDOWN_SECONDS`: Minimum cooldown between banter replies (default `120`s)
 * `DAILY_BUDGET`: Max daily LLM calls for the whole group (default `3000`, prevents wallet drain)
 * `MODE_SWITCH_MIN_AFFINITY`: Minimum affinity level required to switch modes (default `familiar`)
+* `MEMORY_RECALL_MAX_ITEMS`: Max local evidence snippets per recall (default `2`, turn context only)
+* `MEMORY_RECALL_LOOKBACK_DAYS`: How far recall looks back (default `30` days)
+* `STYLE_NOTE_MAX_ITEMS` / `STYLE_MIN_REPEATS`: Max learned expressions and minimum repeats before a phrase is kept (default `5` / `2`)
+* `KNOWLEDGE_MAX_ITEMS` / `KNOWLEDGE_MAX_CHARS`: Knowledge entries injected per turn and total characters (default `2` / `360`)
+* `SEARCH_COOLDOWN_SECONDS` / `SEARCH_DAILY_CAP`: Per-group search cooldown and daily cap (default `60`s / `20`)
 
 ---
 
@@ -291,10 +360,23 @@ Tweak bot behavior and budget guardrails in `.env`:
 | [affinity.py](affinity.py), [relations.py](relations.py) | Eight-tier relationship ledger, asymmetric daily caps, daily digest scoring & leaderboards |
 | [naming.py](naming.py), [nicking.py](nicking.py) | Per-group nickname resolution & one-way lookup protection |
 | [runtime.py](runtime.py), [storage.py](storage.py) | Shared runtime singletons, session locks & local JSON persistence |
-| [archive.py](archive.py), [digest.py](digest.py) | Raw message archive, rolling chronicle (`群史记`) compression & interaction-mode extraction |
-| [providers.py](providers.py) | Task-tiered model routing & provider fallback |
+| [archive.py](archive.py), [digest.py](digest.py), [recall.py](recall.py) | Raw message archive, rolling chronicle (`群史记`) compression, expression style & on-demand recall |
+| [knowledge.py](knowledge.py), [search.py](search.py) | Editable knowledge base & on-demand DuckDuckGo search (turn-context only) |
+| [panel.py](panel.py) | Local maintenance panel: status, knowledge editing, memory view, search debugging |
+| [providers.py](providers.py) | Explicit candidates, task-tiered routing, unified timeout/budget bounds & optional fallback |
 | [wordfilter.py](wordfilter.py), [qqtext.py](qqtext.py) | Content checks & QQ message rendering |
 | [tests/](tests/) | Offline regression suite & standalone provider cache probes |
+
+---
+
+## Roadmap
+
+Already shipped: editable knowledge base, on-demand DuckDuckGo search, and the local maintenance panel. Next:
+
+1. **Multi-group management**: state is already group-scoped; next come per-group configuration, a group list, and clearer boundaries between groups.
+2. **Panel maintenance experience**: structured knowledge editing/validation, search caching and troubleshooting, memory comparisons—still local only, not a full admin suite.
+
+Explicit non-goals: a general-purpose agent harness, computer/phone control, autonomous tool loops, plugin marketplace or vector database. They turn a group regular into a platform and amplify the cost of a joke to local privileges.
 
 ---
 

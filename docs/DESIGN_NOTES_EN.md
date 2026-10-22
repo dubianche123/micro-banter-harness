@@ -14,7 +14,7 @@ It does exactly one thing: **it hangs out in the group like a member**. It does 
 
 **Code holds the state. The model only puts the state into words.**
 
-> It is, in essence, a **micro harness**. The hard parts of a real agent harness — deterministic state, a stable prefix, predictable degradation — compressed to the size of one group member: no framework, no database, and a small dependency and code footprint. What is borrowed is not code, it is the trade-offs.
+> It borrows exactly three engineering trade-offs from agent harnesses — deterministic state, a stable prefix, predictable degradation — but has no tool loop and no local execution privileges. No framework, no database, just a small dependency and code footprint.
 
 Affinity is an integer. The ledger lives in `state.json`; grading, decay and ranking are all computed by local code — the model never touches the number, so it cannot invent a past that never happened. Names work the same way: who is called what comes from the archive, and once someone renames themselves **the old name never appears in any text handed to the model again**.
 
@@ -120,8 +120,23 @@ One related hard rule: **relationships come from the archive only.** Anyone clai
 | Relation archive | `state.json` | ±3 per interaction, ±6 per daily settlement; no decay for 3 days, then 1 point per 2 days toward 0; pruned after 90 days idle |
 | Rename ledger | `state.json` | Up to 300 entries per group; only used to rewrite history, never injected |
 | Promise ledger | `state.json` | Nagging starts 24h after a promise; every 48h, at most twice; no unprompted messages 23:00–08:00 |
+| Old-message recall | `archive/` (read-only) | Only when explicitly asked; last 30 days, at most 2 snippets; never resident |
+| Expression style | `state.json` (digest `style`) | Recomputed each compression, at most 5; each phrase must appear at least twice in the batch |
+| Editable knowledge base | `knowledge/all.md` + `knowledge/<group_id>.md` | Maintainer-edited; applies next turn; at most 2 entries / ~360 chars per turn |
 
 Why keep the raw logs at all: summaries are lossy and the model occasionally mixes people up. When it does, `翻旧账 <keyword>` goes back to the JSONL and checks — otherwise you just live with the error.
+
+Old stories are only retrieved when asked. A 2026-10-06 controlled experiment showed that merely having old material in context makes the model grow a "reminiscence tail" even when nobody asked. `recall.py` therefore requires a strong past cue ("last time", "before", "you promised", "remember") plus a concrete name or subject, reads at most 2 snippets from the last 30 days, and puts them only in the turn-context layer. Random banter, a back-off request, or a sensitive-word hit all suppress recall. It shares the raw archive with the `翻旧账` command and makes no model call.
+
+Expression style rides the daily digest: the compression model proposes catchphrases from the raw batch, and code keeps only those that occur at least twice in that batch, drops sensitive hits, and caps the list at five. The block is explicitly labelled an optional style reference, not a script; phrases that stop being used fall out at the next compression.
+
+### Knowledge and search: single-step tools, not an agent loop
+
+The knowledge base is a maintainer-owned fact layer. `knowledge/all.md` is shared, `knowledge/<group_id>.md` is group-specific; each `##` section is one entry, matched by keyword and capped at two entries in the turn context. It is not resident, not vector-searched, and cannot be edited through group chat; a file edit applies on the next turn and wins over the digest on conflict. It is also the data layer a future local panel will edit.
+
+Search is equally single-step: an explicit `搜索 关键词` command performs one DuckDuckGo request, parses only titles, snippets and links, and never opens result pages, runs JavaScript, or searches repeatedly. The command boundary is fixed rather than a list of natural-language variants. Results are wrapped as untrusted external material with an explicit instruction to ignore embedded commands. Every member may trigger it, bounded per group by cooldown and a daily cap; failures and empty results are stated locally rather than guessed. It adds lookup capability without local privileges or an autonomous tool loop.
+
+The maintenance panel is a separate local process, not a remote admin console: `regular panel` binds only to `127.0.0.1` and authenticates with a `panel_token` stored in the data directory. It reads `status.json`, `state.json` and daily memory, and edits knowledge Markdown through atomic writes and filename validation; the bot reloads edits by mtime on the next turn. It does not import `bot` or `runtime`, so a panel failure cannot affect the QQ connection.
 
 ---
 
@@ -177,7 +192,7 @@ flowchart TD
 1) Stable head   persona + shared rules + protocol + formatting   ← independent of who speaks and which turn; shared group-wide all day
 2) Daily memory  group long-term memory                           ← changes once a day (only after compression)
 3) Session       append-only per turn                             ← naturally prefix-stable
-4) Turn context  recent chat + impression of speaker + banter cue ← all pushed to the very end
+4) Turn context  recent chat + knowledge/search/recall + impression of speaker + banter cue ← all pushed to the very end
 ```
 
 **Nothing that varies with speaker or turn may go into 1)** — everything after it is invalidated along with it. Group-owner identity, recent-chat background and relation notes used to all sit in the system block, which threw the cache away entirely. This invariant produces no error; it just quietly gets slower and more expensive, so a test pins it down (`tests/test_harness.py`). Project record: hit rate 85% before the reorder, 98% after.
@@ -238,6 +253,8 @@ The original measurement scope is retained below. Test counts, parameters and pr
 | Letting a temporarily slow tier hold the front of the ladder | Historical observation: a 20-second first-tier timeout often left too little of a 30-second total deadline for the next tier. Current calls use explicit candidates, attempt bounds and timeout without a separate slow-model penalty policy. |
 | Per-user quotas | In a group everyone is an equal member; throttling per person feels wrong. A per-group bucket plus a global daily budget keeps the bill predictable |
 | Leaking machine ids into chat | openids, their last-four tails and group ids stay in the logs. Once one reaches the prompt — chat context, the relation note, the mention fallback, even the rename confirmation — the model reads it as somebody's name and repeats it, and the group sees an unreadable string. Related: when harvesting plain-text @-nicknames, **strip `<@!openid>` first** — measured, it gets cut by the length cap into a fragment that is then learned as "this person is called 01234567…" and sent straight back to the group, so the `DisplayNames.learn` write gate blocks it too |
+| Letting the bot browse and search on its own | Search runs only on an explicit trigger, once, and reads only titles/snippets/links; it never opens result pages, runs JS or keeps searching. Results are always treated as untrusted external material. Autonomous browsing imports prompt injection and unbounded cost |
+| Letting members edit knowledge through chat | The knowledge base is a maintainer fact layer, editable only as Markdown in the deployment directory; there is no group-chat write path. Otherwise one joke or pile-on could freeze a wrong fact into "official memory" |
 | Resending expired messages | Tencent's passive replies expire (5 minutes for groups) and resending one is always rejected. Messages buffered during a disconnect are mostly expired by the time they are replayed, so it checks `message.timestamp` first and just logs the skip — firing a request that cannot succeed is worse than not firing at all |
 | Letting "cache first" deadlock the providers | Historical observation: A and B could each assume the other could take over, leaving both yielding and producing only fallback text. Cache-based yielding has been removed in favor of the shared request boundary. |
 | Letting a command that did nothing look like it worked | "No permission", "didn't parse" and "did nothing" all read as "the bot ignores me", but the worst one is **looking like it worked**: a non-owner's rename intent is swallowed by the parser on permission grounds, the request falls through to chat, and the bot answers with something like "no way, that messes up the family tree" — which reads as negotiating, or even as done, while the archive is untouched. So a strong verb-based probe catches it and refuses out loud; when it does not match ("@Wang hello") the bot stays quiet |
@@ -278,7 +295,11 @@ One platform-connection observation is retained: at 2026-09-19 13:15, a gateway 
 | `prompts.py` | Persona prompt library + the shared hard rules (change the persona here only; no names) |
 | `naming.py` | The single source of truth for "what is the bot called" and "how is the owner addressed" |
 | `relations.py` | Relation archive (grades, decay, ranking) + the old-name ledger |
-| `digest.py` | Rolling long-term memory compression + the promise ledger |
+| `digest.py` | Rolling long-term memory compression + promise ledger + expression style |
+| `recall.py` | On-demand old-message recall from the local archive |
+| `knowledge.py` | Editable knowledge base: keyword matches enter turn context |
+| `search.py` | On-demand DuckDuckGo: one query, untrusted wrapping, per-group limiter |
+| `panel.py` | Local maintenance panel: status, knowledge editing, memory view, search debugging |
 | `archive.py` | Raw JSONL archive + daily Markdown output |
 | `storage.py` | State persistence, session context, token bucket, daily budget |
 | `qqtext.py` | Message normalisation: turn "human text + machine placeholders" into readable text |
