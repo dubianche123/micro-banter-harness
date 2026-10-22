@@ -236,11 +236,14 @@ async def describe_image(image_url, context_text=""):
         return None
     started = time.monotonic()
     if config.VISION_INPUT_MODE == "download":
+        # 20s：QQ 图床大图经代理下载实测会超 12s（2026-10-22 08:42 女性图 TimeoutError，
+        # 读图整轮失败）——下载是读图唯一的机会窗口，宁可多等。
         try:
+            dl_timeout = min(20.0, config.AI_TOTAL_TIMEOUT)
             async with httpx.AsyncClient(verify=config.SSL_VERIFY,
-                                          timeout=min(12.0, config.AI_TOTAL_TIMEOUT)) as client:
+                                          timeout=dl_timeout) as client:
                 response = await asyncio.wait_for(
-                    client.get(image_url), timeout=min(12.0, config.AI_TOTAL_TIMEOUT))
+                    client.get(image_url), timeout=dl_timeout)
                 response.raise_for_status()
             image_type = response.headers.get("content-type", "image/jpeg").split(";", 1)[0]
             image_url = f"data:{image_type};base64," + base64.b64encode(response.content).decode()
@@ -261,7 +264,7 @@ async def describe_image(image_url, context_text=""):
                                  "无法理解时只输出：无法描述"},
         {"type": "image_url", "image_url": {"url": image_url}},
     ]}]
-    text = await _complete(messages, 80, "vision", 0.3, [name], {name: [model]},
+    text = await _complete(messages, 200, "vision", 0.3, [name], {name: [model]},
                            total_timeout=remaining)
     return text[:80] if text and text != "无法描述" else None
 
